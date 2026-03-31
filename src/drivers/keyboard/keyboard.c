@@ -1,11 +1,13 @@
 #include "keyboard.h"
 #include "../../io/io.h"
-#include "../../shell/shell.h" // Подключаем наш новый Shell
+#include "../../shell/shell.h"
+#include "../../gui/gui.h"
 #include <stdint.h>
 #include <stdbool.h>
 
 extern volatile uint8_t last_scancode;
-extern bool is_app_running; // Знаем только, запущено ли приложение
+extern bool is_app_running;
+extern void notepad_handle_char(char c);
 
 static bool shift_pressed = false;
 
@@ -39,10 +41,12 @@ void keyboard_callback() {
 
     if (c > 0) {
         if (!is_app_running) {
-            // Передаем управление Оболочке!
-            shell_handle_char(c);
+            // Route to notepad if it's active, otherwise to shell
+            if (notepad_win && notepad_win->active) {
+                notepad_handle_char(c);
+            } else {
+                shell_handle_char(c);
+            }
         }
-        // Если запущено приложение, мы ничего не делаем. 
-        // Оно само прочитает last_scancode через API.
     }
 }

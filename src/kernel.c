@@ -71,35 +71,234 @@ void draw_cursor(int x, int y) {
     }
 }
 
+static uint8_t prev_mouse_left = 0;
+static uint32_t paint_color = 0x000000;
+static int paint_prev_x = -1;
+static int paint_prev_y = -1;
+
+// Notepad state
+#define NOTEPAD_MAX_LINES 16
+#define NOTEPAD_LINE_LEN  48
+static char notepad_buf[NOTEPAD_MAX_LINES][NOTEPAD_LINE_LEN];
+static int notepad_line = 0;
+static int notepad_col = 0;
+static bool notepad_inited = false;
+
+void notepad_handle_char(char c) {
+    if (!notepad_inited) return;
+    if (c == '\b') {
+        if (notepad_col > 0) {
+            notepad_col--;
+            notepad_buf[notepad_line][notepad_col] = '\0';
+        } else if (notepad_line > 0) {
+            notepad_line--;
+            notepad_col = strlen(notepad_buf[notepad_line]);
+        }
+    } else if (c == '\n') {
+        if (notepad_line < NOTEPAD_MAX_LINES - 1) {
+            notepad_line++;
+            notepad_col = 0;
+        }
+    } else {
+        if (notepad_col < NOTEPAD_LINE_LEN - 1) {
+            notepad_buf[notepad_line][notepad_col] = c;
+            notepad_col++;
+            notepad_buf[notepad_line][notepad_col] = '\0';
+        }
+    }
+}
+
+// Explorer state
+static char explorer_files[16][13]; // FAT32 8.3 names
+static int explorer_file_count = 0;
+static bool explorer_scanned = false;
+static int explorer_scroll = 0;
+
 void update_gui() {
-    // 1. Очищаем содержимое терминала (рисуем черный фон ВНУТРИ буфера окна)
+    // Handle mouse clicks (rising edge detection)
+    uint8_t mouse_just_pressed = (mouse_left_button && !prev_mouse_left);
+
+    if (mouse_just_pressed) {
+        // Close button has priority
+        if (!gui_check_close_button(mouse_x, mouse_y)) {
+            // Then check desktop icons
+            int icon = gui_check_icon_click(mouse_x, mouse_y);
+            switch(icon) {
+                case ICON_TERMINAL:
+                    term_win->active = true;
+                    window_bring_to_front(term_win);
+                    break;
+                case ICON_SYSMONITOR:
+                    main_win->active = true;
+                    window_bring_to_front(main_win);
+                    break;
+                case ICON_PAINT:
+                    paint_win->active = true;
+                    window_bring_to_front(paint_win);
+                    break;
+                case ICON_EXPLORER:
+                    explorer_win->active = true;
+                    explorer_scanned = false;
+                    window_bring_to_front(explorer_win);
+                    break;
+                case ICON_NOTEPAD:
+                    notepad_win->active = true;
+                    if (!notepad_inited) {
+                        for(int i=0; i<NOTEPAD_MAX_LINES; i++)
+                            memset(notepad_buf[i], 0, NOTEPAD_LINE_LEN);
+                        notepad_line = 0; notepad_col = 0;
+                        notepad_inited = true;
+                    }
+                    window_bring_to_front(notepad_win);
+                    break;
+            }
+        }
+    }
+
+    // 1. Terminal
     if (term_win && term_win->active) {
         gui_window_draw_rect(term_win, 0, 0, term_win->w, term_win->h, 0x000000);
-        
-        // Рисуем строки истории
         for(int i = 0; i < 8; i++) {
             gui_window_draw_string(term_win, term_history[i], 10, 10 + (i * 15), 0xAAAAAA);
         }
-        // Рисуем ввод
         gui_window_draw_string(term_win, "> ", 10, 10 + (8 * 15), 0xFFFFFF);
         gui_window_draw_string(term_win, shell_buffer, 26, 10 + (8 * 15), 0x00FF00);
     }
 
-    // 2. Очищаем и рисуем системный монитор
+    // 2. System Monitor
     if (main_win && main_win->active) {
-        gui_window_draw_rect(main_win, 0, 0, main_win->w, main_win->h, 0xFFFFFF); // Белый фон
+        gui_window_draw_rect(main_win, 0, 0, main_win->w, main_win->h, 0xFFFFFF);
         char mem_info[64];
         sprintf(mem_info, "RAM: %d MB", used_memory / 1024 / 1024);
         gui_window_draw_string(main_win, mem_info, 15, 15, 0x000000);
     }
 
-    // 3. А вот теперь зовем Композитор! 
-    // Он просто возьмет эти готовые буферы и сложит их по слоям.
-    gui_compositor_render(); 
+    // 3. Paint — smooth line drawing with Bresenham interpolation
+    if (paint_win && paint_win->active) {
+        // Color palette bar (top 20px)
+        gui_window_draw_rect(paint_win, 0, 0, paint_win->w, 20, 0xCCCCCC);
+        gui_window_draw_rect(paint_win, 4, 2, 16, 16, 0x000000);
+        gui_window_draw_rect(paint_win, 24, 2, 16, 16, 0xFF0000);
+        gui_window_draw_rect(paint_win, 44, 2, 16, 16, 0x00FF00);
+        gui_window_draw_rect(paint_win, 64, 2, 16, 16, 0x0000FF);
+        gui_window_draw_rect(paint_win, 84, 2, 16, 16, 0xFFFF00);
+        gui_window_draw_rect(paint_win, 104, 2, 16, 16, 0xFFFFFF);
+        gui_window_draw_rect(paint_win, 124, 2, 16, 16, 0xFF00FF);
+        gui_window_draw_rect(paint_win, 144, 2, 16, 16, 0x00FFFF);
+        // Current color indicator
+        gui_window_draw_rect(paint_win, paint_win->w - 22, 2, 16, 16, paint_color);
+        // "Clear" button
+        gui_window_draw_string(paint_win, "CLR", paint_win->w - 60, 6, 0x333333);
 
-    // 4. Курсор рисуем САМЫМ ПОСЛЕДНИМ в backbuffer, чтобы он был поверх всего
-    draw_cursor(mouse_x, mouse_y);
-    
+        if (mouse_left_button) {
+            int rel_x = mouse_x - paint_win->x;
+            int rel_y = mouse_y - paint_win->y;
+            // Color selection on click
+            if (rel_y >= 0 && rel_y < 20 && mouse_just_pressed) {
+                if (rel_x >= 4 && rel_x < 20) paint_color = 0x000000;
+                else if (rel_x >= 24 && rel_x < 40) paint_color = 0xFF0000;
+                else if (rel_x >= 44 && rel_x < 60) paint_color = 0x00FF00;
+                else if (rel_x >= 64 && rel_x < 80) paint_color = 0x0000FF;
+                else if (rel_x >= 84 && rel_x < 100) paint_color = 0xFFFF00;
+                else if (rel_x >= 104 && rel_x < 120) paint_color = 0xFFFFFF;
+                else if (rel_x >= 124 && rel_x < 140) paint_color = 0xFF00FF;
+                else if (rel_x >= 144 && rel_x < 160) paint_color = 0x00FFFF;
+                else if (rel_x >= paint_win->w - 60 && rel_x < paint_win->w - 24) {
+                    // Clear canvas
+                    gui_window_draw_rect(paint_win, 0, 20, paint_win->w, paint_win->h - 20, 0xFFFFFF);
+                }
+            }
+            // Canvas drawing with line interpolation
+            else if (rel_y >= 20 && rel_x >= 0 && rel_x < paint_win->w && rel_y < paint_win->h) {
+                if (paint_prev_x >= 0 && paint_prev_y >= 0) {
+                    gui_window_draw_line(paint_win, paint_prev_x, paint_prev_y, rel_x, rel_y, 1, paint_color);
+                } else {
+                    for(int dy = -1; dy <= 1; dy++)
+                        for(int dx = -1; dx <= 1; dx++)
+                            gui_window_put_pixel(paint_win, rel_x + dx, rel_y + dy, paint_color);
+                }
+                paint_prev_x = rel_x;
+                paint_prev_y = rel_y;
+            }
+        } else {
+            paint_prev_x = -1;
+            paint_prev_y = -1;
+        }
+    }
+
+    // 4. Explorer — graphical file browser
+    if (explorer_win && explorer_win->active) {
+        gui_window_draw_rect(explorer_win, 0, 0, explorer_win->w, explorer_win->h, 0xFFFFFF);
+
+        // Toolbar
+        gui_window_draw_rect(explorer_win, 0, 0, explorer_win->w, 24, 0xF0F0F0);
+        gui_window_draw_string(explorer_win, "Path: /", 8, 7, 0x333333);
+        // Refresh button
+        gui_window_draw_rect(explorer_win, explorer_win->w - 60, 3, 52, 18, 0xDDDDDD);
+        gui_window_draw_string(explorer_win, "Refresh", explorer_win->w - 56, 7, 0x333333);
+        // Separator
+        gui_window_draw_rect(explorer_win, 0, 24, explorer_win->w, 1, 0xCCCCCC);
+
+        // Scan files on first open or refresh click
+        if (!explorer_scanned) {
+            explorer_file_count = 0;
+            // Add device entries
+            strcpy(explorer_files[explorer_file_count++], "[dev] fb0");
+            strcpy(explorer_files[explorer_file_count++], "[dev] net");
+            // TODO: real fat32 file listing could go here
+            explorer_scanned = true;
+        }
+
+        // Refresh button click
+        if (mouse_just_pressed) {
+            int rx = mouse_x - explorer_win->x;
+            int ry = mouse_y - explorer_win->y;
+            if (rx >= explorer_win->w - 60 && rx < explorer_win->w - 8 && ry >= 3 && ry < 21) {
+                explorer_scanned = false;
+            }
+        }
+
+        // Draw file list with icons
+        int y_off = 30;
+        for(int i = 0; i < explorer_file_count && y_off < explorer_win->h - 10; i++) {
+            // Alternate row background
+            if (i % 2 == 0)
+                gui_window_draw_rect(explorer_win, 0, y_off - 2, explorer_win->w, 18, 0xF8F8F8);
+            // Folder/device icon (small colored square)
+            uint32_t ic = (explorer_files[i][0] == '[') ? 0x0078D7 : 0xF0C040;
+            gui_window_draw_rect(explorer_win, 8, y_off, 12, 12, ic);
+            gui_window_draw_string(explorer_win, explorer_files[i], 26, y_off + 2, 0x222222);
+            y_off += 18;
+        }
+
+        if (explorer_file_count == 0) {
+            gui_window_draw_string(explorer_win, "No files found", 26, 40, 0x999999);
+        }
+    }
+
+    // 5. Notepad
+    if (notepad_win && notepad_win->active) {
+        gui_window_draw_rect(notepad_win, 0, 0, notepad_win->w, notepad_win->h, 0xFFFFFF);
+        // Menu bar
+        gui_window_draw_rect(notepad_win, 0, 0, notepad_win->w, 18, 0xF0F0F0);
+        gui_window_draw_string(notepad_win, "Notepad - EquinoxOS", 8, 5, 0x333333);
+        // Separator
+        gui_window_draw_rect(notepad_win, 0, 18, notepad_win->w, 1, 0xCCCCCC);
+        // Text content
+        for(int i = 0; i < NOTEPAD_MAX_LINES; i++) {
+            gui_window_draw_string(notepad_win, notepad_buf[i], 8, 22 + i * 14, 0x000000);
+        }
+        // Cursor blink (simple block)
+        int cx = 8 + notepad_col * 8;
+        int cy = 22 + notepad_line * 14;
+        if ((tick / 50) % 2 == 0) {
+            gui_window_draw_rect(notepad_win, cx, cy, 2, 10, 0x000000);
+        }
+    }
+
+    prev_mouse_left = mouse_left_button;
+
+    gui_compositor_render();
     vesa_update();
 }
 
