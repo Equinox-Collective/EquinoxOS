@@ -62,12 +62,13 @@ int sprintf(char* buffer, const char* format, ...) {
     return len;
 }
 
-void printf(const char* format, ...) {
+int printf(const char* format, ...) {
     char buffer[1024];
     va_list args;
     va_start(args, format);
-    vsprintf(buffer, format, args);
+    int len = vsprintf(buffer, format, args);
     va_end(args);
 
     _syscall(SYS_PRINT, (uint64_t)buffer, 0, 0, 0, 0);
+    return len;
 }

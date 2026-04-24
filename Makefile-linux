@@ -18,7 +18,7 @@ LDFLAGS = -nostdlib -T src/linker.ld -z max-page-size=0x1000
 ASMFLAGS = -f elf64
 
 # --- ФЛАГИ SDK (ПРИЛОЖЕНИЯ) ---
-SDK_INC = -I./sdk/include
+SDK_INC = -I./sdk/include -I./mlibc/sysdeps/equinox/include
 USER_CFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -D__clang__ $(SDK_INC)
 
 # --- ФЛАГИ MLIBC ---

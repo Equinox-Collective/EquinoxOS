@@ -1,4 +1,6 @@
 #include "string.h"
+#include <stdbool.h>
+#include <stdint.h>
 // sdk/lib/string.c // NOT A STRING INSIDE SRC OF THE SYSTEM
 
 // Копирует блок памяти из src в dest

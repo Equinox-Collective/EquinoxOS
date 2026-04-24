@@ -115,24 +115,27 @@ void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2, uint64_t cr3) {
 }
 
 // task.c
-// В task.c
 uint64_t schedule(uint64_t current_rsp) {
     tick++;
     if (!current_task) return current_rsp;
     
+    // Save state
     current_task->rsp = current_rsp;
     
-    // Ищем следующую задачу, которая ПОМЕЧЕНА КАК RUNNING
-    do {
-        current_task = current_task->next;
-    } while (!current_task->running); 
-    // Поскольку первая задача (ядро) всегда running=true, мы не зациклимся.
+    // SWITCH TO NEXT TASK
+    current_task = current_task->next;
 
+    // First load CR3
     uint64_t new_cr3 = (current_task->cr3 == 0) ? kernel_cr3 : current_task->cr3;
+    
+    // CRITICAL: We change CR3. From now on we see ONLY what
+    // is mapped in the new task's tables.
     __asm__ volatile("mov %0, %%cr3" : : "r"(new_cr3) : "memory");
 
+    // Now update TSS (stack for interrupts from Ring 3)
     gdt_set_tss_stack(current_task->kstack_at_bottom);
     
+    // Set FS base for TLS (Thread Local Storage) - needed for mlibc
     if (current_task->fs_base != 0) {
         wrmsr(IA32_FS_BASE_MSR, current_task->fs_base);
     }
