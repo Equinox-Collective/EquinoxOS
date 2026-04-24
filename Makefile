@@ -21,6 +21,14 @@ ASMFLAGS = -f elf64
 SDK_INC = -I./sdk/include
 USER_CFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic $(SDK_INC)
 
+# --- ФЛАГИ MLIBC ---
+MLIBC_DIR = mlibc_build
+MLIBC_SYSDEPS_INC = -I./mlibc/sysdeps/equinox/include
+MLIBC_HDRS_INC = -I./mlibc/subprojects/freestnd-c-hdrs/x86_64/include
+MLIBC_OPTIONS_INC = -I./mlibc/options/ansi/include -I./mlibc/options/posix/include -I./mlibc/options/glibc/include -I./mlibc/options/internal/include -I./mlibc/options/internal/x86_64-include -I./mlibc_build
+MLIBC_CFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -D__mlibc -D__clang__ $(MLIBC_SYSDEPS_INC) $(MLIBC_HDRS_INC) $(MLIBC_OPTIONS_INC)
+MLIBC_LIBS = $(MLIBC_DIR)/libc.a $(MLIBC_DIR)/libm.a $(MLIBC_DIR)/ld.a
+
 # Объекты SDK и Ядра
 SDK_OBJS = $(SDK_LIB_DIR)/crt0.o $(SDK_LIB_DIR)/stdio.o $(SDK_LIB_DIR)/string.o $(SDK_LIB_DIR)/eid.o
 OBJ = $(OBJ_DIR)/kernel.o $(OBJ_DIR)/io.o $(OBJ_DIR)/keyboard.o $(OBJ_DIR)/rtl8139.o $(OBJ_DIR)/vfs.o $(OBJ_DIR)/gui.o $(OBJ_DIR)/syscall.o \
@@ -29,7 +37,7 @@ OBJ = $(OBJ_DIR)/kernel.o $(OBJ_DIR)/io.o $(OBJ_DIR)/keyboard.o $(OBJ_DIR)/rtl81
       $(OBJ_DIR)/memory.o $(OBJ_DIR)/fs.o $(OBJ_DIR)/vesa.o $(OBJ_DIR)/mouse.o $(OBJ_DIR)/string.o $(OBJ_DIR)/panic.o $(OBJ_DIR)/vmm.o $(OBJ_DIR)/gdt.o \
       $(OBJ_DIR)/pcspeaker.o
 
-all: setup kernel.elf compile_app
+all: setup kernel.elf compile_app compile_mlibc_test
 
 setup:
 	@if not exist $(OBJ_DIR) mkdir $(OBJ_DIR)
@@ -89,6 +97,14 @@ compile_app: $(SDK_OBJS)
 	
 	$(CC) $(USER_CFLAGS) -c app/bmpview.c -o app/bmpview.o
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) app/bmpview.o -o $(ISO_ROOT)/bmpview.elf
+
+# --- СБОРКА MLIBC TEST ---
+compile_mlibc_test:
+	$(CC) $(MLIBC_CFLAGS) -c lib/crt0.c -o lib/crt0.o
+	$(CC) $(MLIBC_CFLAGS) -c test_mlibc.c -o test_mlibc.o
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start lib/crt0.o test_mlibc.o $(MLIBC_LIBS) -o $(ISO_ROOT)/test_mlibc.elf
+	@if exist test_mlibc.o del /q test_mlibc.o
+	@if exist lib\crt0.o del /q lib\crt0.o
 # --- ОЧИСТКА ---
 clean:
 	@if exist $(OBJ_DIR) rmdir /s /q $(OBJ_DIR)
@@ -96,6 +112,7 @@ clean:
 	@if exist sdk\lib\*.o del /q sdk\lib\*.o
 	@if exist kernel.elf del /q kernel.elf
 	@if exist iso_root\app.elf del /q iso_root\app.elf
+	@if exist iso_root\test_mlibc.elf del /q iso_root\test_mlibc.elf
 	@if exist equos.iso del /q equos.iso
 	@if exist packets.pcap del /q packets.pcap
 

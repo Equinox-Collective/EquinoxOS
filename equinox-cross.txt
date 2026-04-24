@@ -1,0 +1,15 @@
+[binaries]
+c = 'x86_64-elf-gcc'
+cpp = 'x86_64-elf-g++'
+ar = 'x86_64-elf-ar'
+strip = 'x86_64-elf-strip'
+
+[host_machine]
+system = 'equinox'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
+
+[built-in options]
+c_args = ['-ffreestanding', '-D__clang__', '-D_GNU_SOURCE']
+cpp_args = ['-ffreestanding', '-fno-exceptions', '-fno-rtti', '-D__clang__', '-D_GNU_SOURCE']
