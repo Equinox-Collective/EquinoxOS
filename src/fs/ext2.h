@@ -126,5 +126,6 @@ void ext2_stress_test_phase1(void);
 void ext2_stress_test_phase2(void);
 void ext2_stress_test_phase3(void);
 void ext2_stress_test_phase4(void);
+void ext2_stress_test_phase5(void);
 
 #endif

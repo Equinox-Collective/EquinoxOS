@@ -92,6 +92,9 @@ compile_app: $(SDK_OBJS)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) app/htmlview.o -o $(ISO_ROOT)/htmlview.elf
 	$(CC) $(USER_CFLAGS) -c app/niplay.c -o app/niplay.o
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) app/niplay.o -o $(ISO_ROOT)/niplay.elf
+	$(CC) $(USER_CFLAGS) -c app/bmpview.c -o app/bmpview.o
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) app/bmpview.o -o $(ISO_ROOT)/bmpview.elf
+
 # --- ОЧИСТКА ---
 clean:
 	@if exist $(OBJ_DIR) rmdir /s /q $(OBJ_DIR)

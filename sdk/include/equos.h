@@ -43,8 +43,31 @@ static inline void* get_system_font() {
     return (void*)_syscall(SYS_GET_FONT, 0, 0, 0, 0, 0);
 }
 
-static inline void write_file(const char* name, void* buf, uint32_t size) {
-    _syscall(SYS_WRITE_FILE, (uint64_t)name, (uint64_t)buf, size, 0, 0);
+static inline void* sys_read_file(const char* name, uint32_t* out_size) {
+    return (void*)_syscall(SYS_READ_FILE, (uint64_t)name,
+                           (uint64_t)out_size, 0, 0, 0);
+}
+
+static inline uint32_t sys_write_file(const char* name, const void* buf, uint32_t size) {
+    return (uint32_t)_syscall(SYS_WRITE_FILE, (uint64_t)name,
+                              (uint64_t)buf, size, 0, 0);
+}
+
+static inline void sys_draw_buffer(int x, int y, int w, int h, uint32_t* buffer) {
+    _syscall(SYS_DRAW_BUFFER, (uint64_t)x, (uint64_t)y, (uint64_t)w,
+             (uint64_t)h, (uint64_t)buffer);
+}
+
+static inline uint8_t sys_get_scancode() {
+    return (uint8_t)_syscall(SYS_GET_SCANCODE, 0, 0, 0, 0, 0);
+}
+
+static inline uint32_t sys_get_time_ms() {
+    return (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
+}
+
+static inline uint32_t write_file(const char* name, const void* buf, uint32_t size) {
+    return sys_write_file(name, buf, size);
 }
 
 static inline void sys_sleep(uint32_t ms) {

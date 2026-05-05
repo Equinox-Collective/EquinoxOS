@@ -300,12 +300,19 @@ void update_gui() {
                 uint8_t *bmp_data = bmp_create_from_window(paint_win, &bmp_size);
 
                 if (bmp_data) {
-                    // Сохраняем на диск.
-                    // ВАЖНО: Сейчас твоя fat32_save_file запишет только первые 512 байт!
-                    fat32_save_file("IMAGE.BMP`", (char *)bmp_data, bmp_size);
+                    const char* saved_dev = NULL;
+                    uint32_t written =
+                        vfs_write_file("IMAGE.BMP", bmp_data, bmp_size, &saved_dev);
                     kfree(bmp_data);
-                    term_print("Paint: Saved to IMAGE.BMP (Check size limit!)\n");
-                    explorer_scanned = false; // Чтобы Explorer увидел файл
+
+                    if (written == bmp_size) {
+                        term_print("Paint: Saved IMAGE.BMP to ");
+                        term_print(saved_dev ? saved_dev : "disk");
+                        term_print("\n");
+                        explorer_scanned = false;
+                    } else {
+                        term_print("Paint: Failed to save IMAGE.BMP\n");
+                    }
                 }
             }
         }
@@ -479,19 +486,15 @@ void update_gui() {
                     strcat(save_buffer, notepad_buf[i]);
                     strcat(save_buffer, "\n");
                 }
-                // Сохраняем как NOTES.TXT на ПЕРВОЕ попавшееся устройство с поддержкой записи
-                vfs_node_t* dev = vfs_root->next;
-                while (dev) {
-                    if (dev->write) {
-                         vfs_node_t file_node;
-                         memset(&file_node, 0, sizeof(vfs_node_t));
-                         strcpy(file_node.name, "NOTES.TXT");
-                         
-                         dev->write(&file_node, 0, strlen(save_buffer), (uint8_t*)save_buffer);
-                         term_print("Notepad: Saved to "); term_print(dev->name); term_print("\n");
-                         break;
-                    }
-                    dev = dev->next;
+                const char* saved_dev = NULL;
+                uint32_t written = vfs_write_file("NOTES.TXT", (uint8_t*)save_buffer,
+                                                  strlen(save_buffer), &saved_dev);
+                if (written > 0) {
+                    term_print("Notepad: Saved to ");
+                    term_print(saved_dev ? saved_dev : "disk");
+                    term_print("\n");
+                } else {
+                    term_print("Notepad: Save failed\n");
                 }
 
                 // Заставляем Explorer пересканировать диск
@@ -786,6 +789,7 @@ void kmain(void) {
     ext2_stress_test_phase2();
     ext2_stress_test_phase3();
     ext2_stress_test_phase4();
+    ext2_stress_test_phase5();
     pci_init();
     serial_puts(COM1, "PCI initialized\n");
     pcspeaker_init();

@@ -1,4 +1,5 @@
 #include "ext2.h"
+#include "vfs.h"
 #include "../system/memory.h"
 #include "../libc/stdio.h"
 #include <stdbool.h>
@@ -144,4 +145,44 @@ void ext2_stress_test_phase4() {
     }
     
     term_print("--- PHASE 4 COMPLETED ---\n");
+}
+
+void ext2_stress_test_phase5() {
+    term_print("--- EXT2 STRESS TEST PHASE 5 ---\n");
+
+    const char* test_data = "VFS Write Support PASSED!";
+    const char* dev_name = NULL;
+    uint32_t written = vfs_write_file("vfs_write_test.txt", (const uint8_t*)test_data,
+                                      strlen(test_data), &dev_name);
+
+    if (written == strlen(test_data)) {
+        term_print("PHASE 5: VFS write returned full size [PASS]\n");
+    } else {
+        term_print("PHASE 5: VFS write failed or partial write [FAIL]\n");
+        return;
+    }
+
+    uint32_t ino = ext2_resolve_path("/vfs_write_test.txt");
+    if (ino != 0) {
+        term_print("PHASE 5: VFS-created file resolved on EXT2 [PASS]\n");
+    } else {
+        term_print("PHASE 5: VFS-created file missing on EXT2 [FAIL]\n");
+        return;
+    }
+
+    char read_buf[64] = {0};
+    ext2_read(ino, 0, strlen(test_data), (uint8_t*)read_buf);
+    if (strcmp(read_buf, test_data) == 0) {
+        term_print("PHASE 5: VFS write data verification [PASS]\n");
+    } else {
+        term_print("PHASE 5: VFS write data mismatch [FAIL]\n");
+    }
+
+    if (dev_name) {
+        term_print("PHASE 5: Device: ");
+        term_print(dev_name);
+        term_print("\n");
+    }
+
+    term_print("--- PHASE 5 COMPLETED ---\n");
 }

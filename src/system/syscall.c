@@ -116,20 +116,7 @@ void syscall_handler(syscall_regs_t *regs) {
     const uint8_t *data = (const uint8_t *)regs->rsi;
     uint32_t size = (uint32_t)regs->rdx;
 
-    // Ищем устройство с поддержкой записи (первое попавшееся, обычно EXT2 или
-    // FAT32)
-    vfs_node_t *dev = vfs_root->next;
-    while (dev) {
-      if (dev->write) {
-        vfs_node_t file_node;
-        memset(&file_node, 0, sizeof(vfs_node_t));
-        strcpy(file_node.name, filename);
-        dev->write(&file_node, 0, size, (uint8_t *)data);
-        regs->rax = size;
-        break;
-      }
-      dev = dev->next;
-    }
+    regs->rax = vfs_write_file(filename, data, size, NULL);
     break;
   }
   case 5: // SYS_DRAW_BUFFER

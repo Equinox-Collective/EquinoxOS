@@ -89,6 +89,42 @@ uint8_t* vfs_read_file(const char* name, uint32_t* out_size) {
     return NULL;
 }
 
+uint32_t vfs_write_file(const char* name, const uint8_t* data, uint32_t size,
+                        const char** out_device_name) {
+    if (!vfs_root || !name || !data) {
+        return 0;
+    }
+
+    if (out_device_name) {
+        *out_device_name = NULL;
+    }
+
+    vfs_node_t* dev = vfs_root->next;
+    while (dev) {
+        if (dev->write) {
+            vfs_node_t file_node;
+            memset(&file_node, 0, sizeof(vfs_node_t));
+            size_t name_len = 0;
+            while (name[name_len] && name_len < sizeof(file_node.name) - 1) {
+                file_node.name[name_len] = name[name_len];
+                name_len++;
+            }
+            file_node.name[name_len] = '\0';
+
+            uint32_t written = dev->write(&file_node, 0, size, (uint8_t*)data);
+            if (written > 0 || size == 0) {
+                if (out_device_name) {
+                    *out_device_name = dev->name;
+                }
+                return written;
+            }
+        }
+        dev = dev->next;
+    }
+
+    return 0;
+}
+
 uint32_t vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, uint8_t* buffer) {
     if (node && node->read) {
         return node->read(node, offset, size, buffer);

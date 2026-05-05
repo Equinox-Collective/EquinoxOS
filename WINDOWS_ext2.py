@@ -237,11 +237,18 @@ class Ext2Generator:
     def generate(self, source_dir):
         print(f"[EXT2GEN] Creating {self.filename} from {source_dir}...")
 
+        added_names = set()
         for fname in sorted(os.listdir(source_dir)):
             fpath = os.path.join(source_dir, fname)
             if os.path.isfile(fpath):
                 with open(fpath, "rb") as f:
                     self.add_file(fname, f.read())
+                added_names.add(fname.upper())
+
+        sample_bmp = os.path.join("logos", "equinox_high_quality_200x200.bmp")
+        if "LOGO.BMP" not in added_names and os.path.isfile(sample_bmp):
+            with open(sample_bmp, "rb") as f:
+                self.add_file("LOGO.BMP", f.read())
 
         self.add_file("large.bin", b"X" * 32768)
         self.write_root_directory()

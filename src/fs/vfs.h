@@ -37,5 +37,7 @@ void vfs_init();
 void vfs_register_device(vfs_node_t* node);
 void vfs_ls(void);
 uint8_t* vfs_read_file(const char* name, uint32_t* out_size);
+uint32_t vfs_write_file(const char* name, const uint8_t* data, uint32_t size,
+                        const char** out_device_name);
 
 #endif
