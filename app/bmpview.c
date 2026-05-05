@@ -77,16 +77,16 @@ static void clear(uint32_t color) {
 }
 
 static void draw_frame(const char *title) {
-  eid_draw_rect(fb, WIN_W, 0, 0, WIN_W, WIN_H, CLR_BG);
-  eid_draw_rect(fb, WIN_W, 0, 0, WIN_W, 38, CLR_TOP);
-  eid_draw_rect(fb, WIN_W, 0, 38, WIN_W, 2, CLR_TOP_2);
-  eid_draw_text(fb, WIN_W, 12, 12, "BMP Viewer", 0xFFFFFF);
-  eid_draw_text(fb, WIN_W, 118, 12, title, 0xD8E4F0);
+  eid_draw_rect(fb, WIN_W, WIN_H, 0, 0, WIN_W, WIN_H, CLR_BG);
+  eid_draw_rect(fb, WIN_W, WIN_H, 0, 0, WIN_W, 38, CLR_TOP);
+  eid_draw_rect(fb, WIN_W, WIN_H, 0, 38, WIN_W, 2, CLR_TOP_2);
+  eid_draw_text(fb, WIN_W, WIN_H, 12, 12, "BMP Viewer", 0xFFFFFF);
+  eid_draw_text(fb, WIN_W, WIN_H, 118, 12, title, 0xD8E4F0);
 
-  eid_draw_rect(fb, WIN_W, VIEW_X - 1, VIEW_Y - 1, VIEW_W + 2, VIEW_H + 2,
+  eid_draw_rect(fb, WIN_W, WIN_H, VIEW_X - 1, VIEW_Y - 1, VIEW_W + 2, VIEW_H + 2,
                 CLR_BORDER);
-  eid_draw_rect(fb, WIN_W, VIEW_X, VIEW_Y, VIEW_W, VIEW_H, CLR_PANEL);
-  eid_draw_text(fb, WIN_W, 12, WIN_H - 22, "ESC - close", CLR_MUTED);
+  eid_draw_rect(fb, WIN_W, WIN_H, VIEW_X, VIEW_Y, VIEW_W, VIEW_H, CLR_PANEL);
+  eid_draw_text(fb, WIN_W, WIN_H, 12, WIN_H - 22, "ESC - close", CLR_MUTED);
 }
 
 static bool validate_bmp(const uint8_t *file_data, uint32_t file_size,
@@ -129,8 +129,8 @@ static void draw_bmp(uint8_t *file_data, uint32_t file_size, const char *filenam
   draw_frame(filename);
 
   if (!validate_bmp(file_data, file_size, &fh, &ih, &row_size)) {
-    eid_draw_text(fb, WIN_W, 24, 86, "Unsupported or broken BMP file", CLR_DANGER);
-    eid_draw_text(fb, WIN_W, 24, 108, "Supported: uncompressed 24/32-bit BMP", CLR_MUTED);
+    eid_draw_text(fb, WIN_W, WIN_H, 24, 86, "Unsupported or broken BMP file", CLR_DANGER);
+    eid_draw_text(fb, WIN_W, WIN_H, 24, 108, "Supported: uncompressed 24/32-bit BMP", CLR_MUTED);
     return;
   }
 
@@ -196,8 +196,8 @@ int main(int argc, char **argv) {
     draw_bmp(file_data, file_size, filename);
   } else {
     draw_frame(filename);
-    eid_draw_text(fb, WIN_W, 24, 86, "File not found", CLR_DANGER);
-    eid_draw_text(fb, WIN_W, 24, 108, "Save IMAGE.BMP from Paint or pass a BMP name.", CLR_MUTED);
+    eid_draw_text(fb, WIN_W, WIN_H, 24, 86, "File not found", CLR_DANGER);
+    eid_draw_text(fb, WIN_W, WIN_H, 24, 108, "Save IMAGE.BMP from Paint or pass a BMP name.", CLR_MUTED);
   }
 
   sys_draw_buffer(140, 120, WIN_W, WIN_H, fb);
