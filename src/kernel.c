@@ -19,6 +19,8 @@
 #include "system/usr/task.h"
 #include "system/misc/timer.h"
 #include "system/mem/vmm.h"
+#include "system/hal/hal.h"
+#include "system/usr/ipc.h"
 
 // --- ДРАЙВЕРЫ ---
 #include "system/drivers/devices/mouse/mouse.h"
@@ -357,6 +359,10 @@ void kmain(void) {
   serial_puts(COM1, "GUI initialized\n");
   shm_init();
   serial_puts(COM1, "Shared memory initialized\n");
+  ipc_init();
+  serial_puts(COM1, "IPC (pipes + mqueue) initialized\n");
+  hal_init();
+  serial_puts(COM1, "HAL initialized\n");
   shell_init();
   serial_puts(COM1, "Shell initialized\n");
 

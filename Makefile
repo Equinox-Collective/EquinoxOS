@@ -37,7 +37,8 @@ SRC_DIRS = src src/boot src/gui src/syslibc \
            src/system/mem \
            src/system/misc \
            src/system/shell \
-           src/system/usr
+           src/system/usr \
+           src/system/hal
 
 KERNEL_C_SRCS = $(foreach dir,$(SRC_DIRS),$(wildcard $(dir)/*.c))
 KERNEL_ASM_SRCS = $(wildcard src/system/core/*.asm)
@@ -101,7 +102,7 @@ doom.elf: $(SDK_OBJS) $(DOOM_OBJS)
 # --- APPS BUILD RULES ---
 APP_SRCS = $(wildcard app/*.c)
 APP_OBJS = $(patsubst app/%.c,app/%.o,$(APP_SRCS))
-APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_ROOT)/bin/htmlview.elf $(ISO_ROOT)/bin/niplay.elf
+APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_ROOT)/bin/htmlview.elf $(ISO_ROOT)/bin/niplay.elf $(ISO_ROOT)/bin/widget_demo.elf $(ISO_ROOT)/bin/ipc_test.elf
 
 apps: $(SDK_OBJS) $(APP_ELFS_SIMPLE) sysgui_app
 
