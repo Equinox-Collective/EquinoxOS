@@ -28,6 +28,16 @@
 #define SYS_GET_TOTAL_MEM 35
 #define SYS_EXEC 50
 
+/* --- IPC (added in HAL/sync/ipc patch set) --- */
+#define SYS_PIPE_CREATE 60
+#define SYS_PIPE_READ   61
+#define SYS_PIPE_WRITE  62
+#define SYS_PIPE_CLOSE  63
+#define SYS_MQ_CREATE   64
+#define SYS_MQ_SEND     65
+#define SYS_MQ_RECV     66
+#define SYS_MQ_CLOSE    67
+
 // Переименовали в _syscall и всегда принимаем 5 аргументов + номер
 static inline uint64_t _syscall(uint64_t num, uint64_t a1, uint64_t a2,
                                 uint64_t a3, uint64_t a4, uint64_t a5) {
@@ -90,5 +100,35 @@ static inline uint64_t sys_get_total_mem() {
 
 static inline int sys_exec(const char *cmd) {
   return (int)_syscall(SYS_EXEC, (uint64_t)cmd, 0, 0, 0, 0);
+}
+
+/* ----- IPC userspace wrappers ----- */
+static inline int sys_pipe_create(void) {
+  return (int)_syscall(SYS_PIPE_CREATE, 0, 0, 0, 0, 0);
+}
+static inline int sys_pipe_read(int id, void *buf, uint32_t size) {
+  return (int)_syscall(SYS_PIPE_READ, (uint64_t)id, (uint64_t)buf,
+                       (uint64_t)size, 0, 0);
+}
+static inline int sys_pipe_write(int id, const void *buf, uint32_t size) {
+  return (int)_syscall(SYS_PIPE_WRITE, (uint64_t)id, (uint64_t)buf,
+                       (uint64_t)size, 0, 0);
+}
+static inline void sys_pipe_close(int id) {
+  _syscall(SYS_PIPE_CLOSE, (uint64_t)id, 0, 0, 0, 0);
+}
+
+static inline int sys_mq_create(uint32_t msg_size) {
+  return (int)_syscall(SYS_MQ_CREATE, (uint64_t)msg_size, 0, 0, 0, 0);
+}
+static inline int sys_mq_send(int id, const void *buf, uint32_t prio) {
+  return (int)_syscall(SYS_MQ_SEND, (uint64_t)id, (uint64_t)buf,
+                       (uint64_t)prio, 0, 0);
+}
+static inline int sys_mq_recv(int id, void *buf) {
+  return (int)_syscall(SYS_MQ_RECV, (uint64_t)id, (uint64_t)buf, 0, 0, 0);
+}
+static inline void sys_mq_close(int id) {
+  _syscall(SYS_MQ_CLOSE, (uint64_t)id, 0, 0, 0, 0);
 }
 #endif
