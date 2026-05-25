@@ -139,8 +139,15 @@ void syscall_handler(syscall_regs_t *regs) {
       if (dev->write) {
         vfs_node_t file_node;
         memset(&file_node, 0, sizeof(vfs_node_t));
+        // Безопасное копирование имени из юзерспейса. Раньше использовался
+        // strcpy, который при подаче длинной строки переполнял
+        // file_node.name (фикс. 128 байт) → порча стека ядра.
         stac();
-        strcpy(file_node.name, filename);
+        size_t i = 0;
+        for (; i < sizeof(file_node.name) - 1 && filename[i] != '\0'; i++) {
+          file_node.name[i] = filename[i];
+        }
+        file_node.name[i] = '\0';
         clac();
         dev->write(&file_node, 0, size, (uint8_t *)data);
         regs->rax = size;
