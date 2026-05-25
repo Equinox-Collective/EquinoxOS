@@ -88,23 +88,87 @@ local term_input = ""
 local matrix_mode = false
 local matrix_tick = 0
 
-local function process_command(cmd)
-    cmd = string.gsub(cmd, "%s+", "") -- убираем лишние пробелы
-    if cmd == "help" then
-        table.insert(term_lines, "Commands: help, clear, matrix, doom, snake")
-    elseif cmd == "clear" then
+local function trim(s)
+    return s:match("^%s*(.-)%s*$")
+end
+
+local function process_command(raw)
+    local cmd = trim(raw)
+    if cmd == "" then return end
+
+    -- Разделяем на первое слово (команда) и остаток (аргументы)
+    local verb, args = cmd:match("^(%S+)%s*(.*)")
+    verb = verb or cmd
+    args = args or ""
+
+    if verb == "help" then
+        table.insert(term_lines, "Commands:")
+        table.insert(term_lines, "  run <file> [args]  - launch ELF binary")
+        table.insert(term_lines, "  ls                 - list VFS files")
+        table.insert(term_lines, "  fetch              - system info")
+        table.insert(term_lines, "  clear              - clear terminal")
+        table.insert(term_lines, "  matrix             - toggle matrix rain")
+        table.insert(term_lines, "  doom               - launch Doom")
+        table.insert(term_lines, "  snake              - launch Snake")
+    elseif verb == "clear" then
         term_lines = {}
-    elseif cmd == "matrix" then
+    elseif verb == "matrix" then
         matrix_mode = not matrix_mode
         table.insert(term_lines, "Matrix digital rain: " .. (matrix_mode and "ENABLED" or "DISABLED"))
-    elseif cmd == "doom" then
+    elseif verb == "run" then
+        if args == "" then
+            table.insert(term_lines, "Usage: run <filename> [args]")
+            table.insert(term_lines, "Example: run bin/doom.elf -iwad res/doom1.wad")
+        else
+            table.insert(term_lines, "Launching: " .. args)
+            local ret = exec(args)
+            if ret == 0 then
+                table.insert(term_lines, "Error: failed to exec '" .. args .. "'")
+            end
+        end
+    elseif verb == "exec" then
+        -- Alias for run
+        if args == "" then
+            table.insert(term_lines, "Usage: exec <filename> [args]")
+        else
+            table.insert(term_lines, "Launching: " .. args)
+            local ret = exec(args)
+            if ret == 0 then
+                table.insert(term_lines, "Error: failed to exec '" .. args .. "'")
+            end
+        end
+    elseif verb == "ls" then
+        local file_list = getFiles()
+        if #file_list == 0 then
+            table.insert(term_lines, "No files found on VFS.")
+        else
+            for _, f in ipairs(file_list) do
+                local line = string.format("  %-20s %6d B  [%s]", f.name, f.size, f.dev)
+                table.insert(term_lines, line)
+            end
+        end
+    elseif verb == "fetch" then
+        table.insert(term_lines, "")
+        table.insert(term_lines, "  EquinoxOS x86_64")
+        table.insert(term_lines, "  Shell: enGUI Lua Terminal 2.0")
+        local used, total = getMemInfo()
+        local used_mb = math.floor(used / (1024 * 1024))
+        local total_mb = math.floor(total / (1024 * 1024))
+        table.insert(term_lines, string.format("  Memory: %d / %d MB", used_mb, total_mb))
+        local uptime = getUptime()
+        local s = math.floor(uptime % 60)
+        local m = math.floor((uptime / 60) % 60)
+        local h = math.floor(uptime / 3600)
+        table.insert(term_lines, string.format("  Uptime: %02d:%02d:%02d", h, m, s))
+        table.insert(term_lines, "")
+    elseif verb == "doom" then
         table.insert(term_lines, "Launching doom.elf...")
         exec("bin/doom.elf -iwad res/doom1.wad")
-    elseif cmd == "snake" then
+    elseif verb == "snake" then
         table.insert(term_lines, "Launching snake.elf...")
         exec("bin/snake.elf")
-    elseif cmd ~= "" then
-        table.insert(term_lines, "Unknown command: '" .. cmd .. "'")
+    else
+        table.insert(term_lines, "Unknown command: '" .. verb .. "'. Type 'help' for commands.")
     end
 end
 
