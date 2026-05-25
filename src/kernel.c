@@ -150,7 +150,7 @@ void init_sse() {
   __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
 }
 
-void run_elf(uint8_t *elf_data) {
+void run_elf_named(uint8_t *elf_data, const char *argv0) {
   Elf64_Ehdr *hdr = (Elf64_Ehdr *)elf_data;
 
   if (hdr->e_ident[0] != 0x7F || hdr->e_ident[1] != 'E' ||
@@ -199,10 +199,20 @@ void run_elf(uint8_t *elf_data) {
           PTE_PRESENT | PTE_USER | PTE_WRITABLE);
 
   char *k_arg_ptr = (char *)((uint64_t)arg_phys + hhdm_offset);
-  strcpy(k_arg_ptr, "doom.elf"); // argv[0]
+  // argv[0]: имя бинарника, переданное вызывающей стороной (например,
+  // "bin/sysgui.elf" или "doom.elf"). Раньше здесь был жёстко зашит
+  // "doom.elf", из-за чего любой ELF, запущенный через run_elf, видел
+  // себя как doom.
+  const char *name = (argv0 && argv0[0]) ? argv0 : "app.elf";
+  // Длина argv[0] ограничена 255 байтами — strncpy с явным завершением.
+  size_t name_len = strlen(name);
+  if (name_len > 255)
+    name_len = 255;
+  memcpy(k_arg_ptr, name, name_len);
+  k_arg_ptr[name_len] = '\0';
 
   uint64_t *k_argv_array = (uint64_t *)(k_arg_ptr + 256);
-  k_argv_array[0] = argv_virt; // Указатель на строку "doom.elf"
+  k_argv_array[0] = argv_virt; // Указатель на argv[0]
   k_argv_array[1] = 0;         // Конец массива
 
   // Передаем argc=1 и адрес массива argv
@@ -210,6 +220,9 @@ void run_elf(uint8_t *elf_data) {
 
   is_app_running = true;
 }
+
+// Обёртка для обратной совместимости со старыми вызовами.
+void run_elf(uint8_t *elf_data) { run_elf_named(elf_data, "app.elf"); }
 
 void exec_module() {
   if (module_request.response == NULL) {
@@ -223,7 +236,7 @@ void exec_module() {
     // УБРАЛИ \n ИЗ ПОИСКА!
     if (strstr(mod->path, "app.elf")) {
       term_print("Found app.elf. Loading...\n");
-      run_elf(mod->address);
+      run_elf_named(mod->address, "app.elf");
       return;
     }
   }
@@ -259,7 +272,7 @@ void exec_from_disk(const char *filename) {
         strcpy(file_node.name, de->name);
 
         if (dev->read(&file_node, 0, de->size, elf_data) > 0) {
-          run_elf(elf_data);
+          run_elf_named(elf_data, filename);
           kfree(elf_data);
           return;
         }
@@ -322,7 +335,7 @@ void kmain(void) {
    * depending on whether they multiplied by 10 or not — see the audit in
    * the patch that introduced this comment. */
   init_timer(1000);
-  serial_puts(COM1, "Timer initialized (100Hz)\n");
+  serial_puts(COM1, "Timer initialized (1000Hz)\n");
   tick = 0;
   // !!! ВАЖНО: Ставим АСЕМБЛЕРНЫЙ обработчик СРАЗУ, до включения прерываний !!!
   extern void irq0_handler_asm();
@@ -336,8 +349,9 @@ void kmain(void) {
   while (tick < start_tick + 100) {
     __asm__ volatile("hlt");
   }
-   shm_init();
   // 4. ЗАПУСКАЕМ ТЕСТЫ (Теперь Цербер увидит тикающий таймер)
+  // (shm_init вызывается ниже вместе с остальной инициализацией подсистем —
+  // дублирующий вызов здесь убран.)
   serial_puts(COM1, "Running kernel tests...\n");
   extern bool eqstart_perform_tests();
   if (!eqstart_perform_tests()) {

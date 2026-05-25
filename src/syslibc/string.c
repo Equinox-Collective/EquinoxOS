@@ -91,6 +91,7 @@ char *strstr(const char *haystack, const char *needle) {
 void itoa(int64_t num, int base, char *buffer) {
   int i = 0;
   bool is_negative = false;
+  uint64_t value;
 
   if (num == 0) {
     buffer[i++] = '0';
@@ -100,14 +101,19 @@ void itoa(int64_t num, int base, char *buffer) {
 
   if (num < 0 && base == 10) {
     is_negative = true;
-    num = -num; // Делаем положительным для алгоритма
+    // ВАЖНО: для INT64_MIN значение `-num` даёт переполнение в int64_t (UB).
+    // Считаем абсолютное значение через unsigned-арифметику, у которой
+    // overflow определён.
+    value = (uint64_t)(-(num + 1)) + 1ULL;
+  } else {
+    value = (uint64_t)num;
   }
 
   // Получаем цифры в обратном порядке
-  while (num != 0) {
-    int rem = num % base;
+  while (value != 0) {
+    uint64_t rem = value % (uint64_t)base;
     buffer[i++] = (rem > 9) ? (rem - 10) + 'a' : rem + '0';
-    num = num / base;
+    value = value / (uint64_t)base;
   }
 
   if (is_negative)
