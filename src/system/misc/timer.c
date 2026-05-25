@@ -21,12 +21,11 @@ void init_timer(uint32_t freq) {
 }
 
 void sleep(uint32_t ms) {
-  uint32_t wait_ticks = ms / 10;
-  if (wait_ticks == 0 && ms > 0)
-    wait_ticks = 1; // Минимум 1 тик, если просили поспать
-
+  /* PIT инициализирован на 1 кГц (см. kernel.c::kmain), поэтому 1 тик = 1 мс.
+   * Раньше тут было `ms / 10`, что было сделано под гипотетический 100 Гц
+   * PIT, а реальная частота была 50 Гц — итого sleep() врал в 2-20 раз. */
   uint32_t start_tick = tick;
-  while (tick < start_tick + wait_ticks) {
+  while (tick < start_tick + ms) {
     __asm__ __volatile__(
         "pause"); // 'pause' лучше для циклов ожидания, чем 'hlt' внутри
   }

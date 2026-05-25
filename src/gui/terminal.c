@@ -174,11 +174,15 @@ void terminal_render(window_t *self) {
   // 1. Фон терминала
   if (terminal_matrix_mode) {
     gui_window_draw_rect(self, 0, 0, self->w, self->h, 0x000000);
+    /* Matrix rain — tick is now in ms (PIT @ 1 kHz). Slow the visual rate
+     * down by ÷20 so the animation keeps the same on-screen speed it had
+     * back when 1 tick = 20 ms. */
+    uint32_t mtick = tick / 20;
     for (int i = 0; i < 200; i++) {
        int x = (i * 13) % self->w;
        int speed = 2 + (i % 4);
-       int y = ((tick * speed) + i * 53) % self->h;
-       char c[2] = { (char)(33 + ((tick + i) % 90)), 0 };
+       int y = ((mtick * speed) + i * 53) % self->h;
+       char c[2] = { (char)(33 + ((mtick + i) % 90)), 0 };
        uint32_t color = (i % 5 == 0) ? 0xFFFFFF : 0x00FF00;
        gui_window_draw_string(self, c, x, y, color);
     }
@@ -223,8 +227,8 @@ void terminal_render(window_t *self) {
     }
   }
 
-  // 6. Мигающий курсор в строке ввода
-  if ((tick / 50) % 2 == 0) {
+  // 6. Мигающий курсор в строке ввода (500 ms blink, tick = ms)
+  if ((tick / 500) % 2 == 0) {
     int input_cursor_x = 32 + strlen(shell_buffer) * 8;
     gui_window_draw_rect(self, input_cursor_x, prompt_y + 16, 8, 2, 0x8BE9FD);
   }
