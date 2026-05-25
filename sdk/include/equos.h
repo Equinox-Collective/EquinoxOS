@@ -39,6 +39,19 @@
 #define SYS_MQ_RECV     66
 #define SYS_MQ_CLOSE    67
 
+/* --- Task introspection / control (ps / kill / killall from ring 3) --- */
+#define SYS_TASK_INFO   70  /* (idx, out_buf) -> 1 if filled, 0 at end */
+#define SYS_TASK_KILL   71  /* (pid)         -> 1 ok, 0 fail           */
+#define SYS_TASK_KILLALL 72 /* ()            -> number of tasks killed */
+
+typedef struct {
+  uint64_t pid;
+  uint64_t cr3;
+  uint64_t brk;
+  uint32_t running;   /* 1 = RUNNING, 0 = STOPPED */
+  uint32_t _pad;
+} sys_task_info_t;
+
 // Переименовали в _syscall и всегда принимаем 5 аргументов + номер
 static inline uint64_t _syscall(uint64_t num, uint64_t a1, uint64_t a2,
                                 uint64_t a3, uint64_t a4, uint64_t a5) {

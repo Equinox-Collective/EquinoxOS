@@ -351,13 +351,19 @@ bool task_terminate_by_pid(uint64_t pid) {
 task_t* task_get_list_head(void) { return task_list; }
 
 void task_kill_all_user(void) {
-  if (!task_list) return;
+  (void)task_kill_all_user_count();
+}
+
+int task_kill_all_user_count(void) {
+  if (!task_list) return 0;
+  int n = 0;
   task_t *start = task_list;
   task_t *curr = start;
   do {
     // PID 1 — idle/init ядра, его нельзя убивать (см. task_kill_self).
-    if (curr->id != 1) {
+    if (curr->id != 1 && curr->running) {
       curr->running = false;
+      n++;
       // vmm_destroy_address_space(curr->cr3) умышленно НЕ вызываем
       // здесь: пользовательский процесс может быть прямо сейчас на
       // своих страницах; планировщик/будущий cleanup освободит их
@@ -365,4 +371,24 @@ void task_kill_all_user(void) {
     }
     curr = curr->next;
   } while (curr && curr != start);
+  return n;
+}
+
+bool task_snapshot_at(int idx, task_snapshot_t *out) {
+  if (!task_list || !out || idx < 0) return false;
+  task_t *start = task_list;
+  task_t *curr = start;
+  int i = 0;
+  do {
+    if (i == idx) {
+      out->pid = curr->id;
+      out->cr3 = curr->cr3;
+      out->brk = curr->brk;
+      out->running = curr->running;
+      return true;
+    }
+    i++;
+    curr = curr->next;
+  } while (curr && curr != start);
+  return false;
 }

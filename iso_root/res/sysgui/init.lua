@@ -110,6 +110,9 @@ local function process_command(raw)
         table.insert(term_lines, "  matrix             - toggle matrix rain")
         table.insert(term_lines, "  doom               - launch Doom")
         table.insert(term_lines, "  snake              - launch Snake")
+        table.insert(term_lines, "  ps                 - list running tasks")
+        table.insert(term_lines, "  kill <pid>         - terminate task by PID")
+        table.insert(term_lines, "  killall            - terminate all user tasks")
     elseif verb == "clear" then
         term_lines = {}
     elseif verb == "matrix" then
@@ -167,6 +170,38 @@ local function process_command(raw)
     elseif verb == "snake" then
         table.insert(term_lines, "Launching snake.elf...")
         exec("bin/snake.elf")
+    elseif verb == "ps" then
+        local tasks = getTasks()
+        if not tasks or #tasks == 0 then
+            table.insert(term_lines, "ps: no tasks (scheduler not initialized?)")
+        else
+            table.insert(term_lines, string.format("  %-6s %-9s %-18s %-18s",
+                                                   "PID", "STATE", "CR3", "BRK"))
+            for _, t in ipairs(tasks) do
+                table.insert(term_lines,
+                    string.format("  %-6d %-9s 0x%-16x 0x%-16x",
+                                  t.pid, t.state, t.cr3, t.brk))
+            end
+        end
+    elseif verb == "kill" then
+        local pid_str = trim(args)
+        local pid = tonumber(pid_str)
+        if not pid or pid <= 0 then
+            table.insert(term_lines, "Usage: kill <pid>")
+        elseif pid == 1 then
+            table.insert(term_lines, "kill: refusing to kill PID 1 (init)")
+        else
+            local ok = killTask(pid)
+            if ok then
+                table.insert(term_lines, string.format("kill: task %d marked for termination", pid))
+            else
+                table.insert(term_lines, string.format("kill: no such task (pid=%d)", pid))
+            end
+        end
+    elseif verb == "killall" then
+        local n = killAllTasks()
+        table.insert(term_lines,
+            string.format("killall: terminated %d user task(s)", n or 0))
     else
         table.insert(term_lines, "Unknown command: '" .. verb .. "'. Type 'help' for commands.")
     end

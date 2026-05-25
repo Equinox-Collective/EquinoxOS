@@ -45,6 +45,18 @@ task_t* task_get_list_head(void);
 // если она пользовательская, должна позаботиться о yield()/kill_self
 // отдельно — здесь мы только метим running=false; планировщик
 // доразберётся в ближайшем тике.
-void task_kill_all_user(void);
+// Возвращает кол-во убитых пользовательских задач.
+int task_kill_all_user_count(void);
+
+// Снимок задачи по индексу в кольце (начиная с головы, индексация 0..N-1).
+// Заполняет out_pid/out_cr3/out_brk/out_running и возвращает true, если
+// задача с таким индексом существует. iff false — кольцо короче.
+typedef struct {
+    uint64_t pid;
+    uint64_t cr3;
+    uint64_t brk;
+    bool running;
+} task_snapshot_t;
+bool task_snapshot_at(int idx, task_snapshot_t *out);
 
 #endif
