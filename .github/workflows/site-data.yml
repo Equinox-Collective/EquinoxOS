@@ -1,0 +1,54 @@
+name: Refresh site data
+
+# Bakes a static site/data.json (commits, stars, PRs, language stats, ROADMAP.md
+# snapshot) so the project page never has to hit api.github.com from the browser
+# and never runs into the 60-req/hr anonymous rate limit.
+
+on:
+  schedule:
+    # Every hour, on the 5th minute (avoids the cron-thundering-herd minute 0).
+    - cron: '5 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/site-data.yml'
+      - '.github/scripts/build_site_data.py'
+      - 'ROADMAP.md'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: site-data
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install --quiet requests
+
+      - name: Build site/data.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python .github/scripts/build_site_data.py
+
+      - name: Commit refreshed data
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add site/data.json
+          if git diff --cached --quiet; then
+            echo "::notice::No data changes — skipping commit."
+          else
+            git commit -m "chore(site): refresh data.json [skip ci]"
+            git push
+          fi

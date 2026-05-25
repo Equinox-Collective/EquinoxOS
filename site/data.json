@@ -1,0 +1,60 @@
+{
+  "generated_at": "2026-05-25T18:02:33+00:00",
+  "repos": {
+    "eq": {
+      "name": "EquinoxOS",
+      "owner": "Equinox-Collective",
+      "full": "Equinox-Collective/EquinoxOS",
+      "url": "https://github.com/Equinox-Collective/EquinoxOS",
+      "desc": "EquinoxOS: x86-based Operating System.",
+      "stars": 10,
+      "forks": 3,
+      "issues": 0,
+      "prs": 0,
+      "commits": 242,
+      "latest": {
+        "sha": "78358a3",
+        "message": "Merge pull request #40 from Lertov2424232/fix/critical-bugs\n\nfix: PMM counters, kernel argv[0] / shm_init, ext2 inode init, syscall write overflow, itoa INT64_MIN",
+        "date": "2026-05-25T16:57:54Z",
+        "url": "https://github.com/Equinox-Collective/EquinoxOS/commit/78358a3cb7248533506f9d432e5a8cb621b1ebb9"
+      },
+      "languages": {
+        "C": 2263596,
+        "Lua": 16740,
+        "C++": 11235,
+        "Python": 10467,
+        "Assembly": 7127,
+        "Makefile": 7098,
+        "Linker Script": 1825,
+        "HTML": 985
+      },
+      "pushed_at": "2026-05-25T16:57:55Z"
+    },
+    "en": {
+      "name": "enGUI",
+      "owner": "Equinox-Collective",
+      "full": "Equinox-Collective/enGUI",
+      "url": "https://github.com/Equinox-Collective/enGUI",
+      "desc": "EquinoxOS GUI compositor (Desktop Environment)",
+      "stars": 0,
+      "forks": 1,
+      "issues": 0,
+      "prs": 0,
+      "commits": 24,
+      "latest": {
+        "sha": "c68ba7c",
+        "message": "Merge pull request #5 from Lertov2424232/feat/doom-pixel-art-icon\n\nfeat: иконка Doom — обложка игры (pixel-art)",
+        "date": "2026-05-25T17:05:22Z",
+        "url": "https://github.com/Equinox-Collective/enGUI/commit/c68ba7c1c333fa018753b57a63b0784a24f4746f"
+      },
+      "languages": {
+        "C": 921010,
+        "Lua": 31726,
+        "Makefile": 25212,
+        "C++": 218
+      },
+      "pushed_at": "2026-05-25T17:05:22Z"
+    }
+  },
+  "roadmap": "\n## 📍 Current Status — Foundation + Phase 1–4 partially landed\n\nThe kernel boots to a usable desktop, runs Ring 3 ELF apps with full filesystem\nand networking, plays AC97 audio, and now ships a Hardware Abstraction Layer,\nin-kernel IPC, sync primitives, GPT/PSF2 parsers and an extended immediate-mode\nUI toolkit (see [`CHANGES.md`](CHANGES.md) for the patch set).\n\n### ✅ Done\n\n- [x] **Boot:** Limine protocol, x86_64 Higher Half (HHDM), HHDM offset usage.\n- [x] **Memory:** Bitmap PMM (`pmm_alloc_continuous()`), 4-level VMM with per-process PML4, 64 MB kernel heap (`kmalloc`/`kfree`).\n- [x] **Multitasking:** Preemptive round-robin scheduler on IRQ0 (PIT 50 Hz).\n- [x] **User mode:** Ring 3 with isolated address spaces, per-process page tables, GDT/TSS for kernel↔user transitions.\n- [x] **ELF loader:** ELF64 PT_LOAD mapped into user PML4, jump to `_start` (CRT0).\n- [x] **System calls:** `int 0x80` dispatch table — print, file R/W, draw buffer, mouse, keyboard, exit, yield, font, sleep, brk, audio play/rate, map_phys, shm, vesa info, window pos, net (DNS/HTTP), mem stats, exec, pipes (60–63), message queues (64–67).\n- [x] **Graphics:** VESA LFB with double-buffered compositing window manager, drop shadows (alpha blend), z-ordering, hardware cursor.\n- [x] **Storage:** ATA PIO sector R/W.\n- [x] **Filesystems:** FAT32 R/W, EXT2 R/W (stress-tested in 4 phases), VFS abstraction, device-node registration.\n- [x] **Network:** RTL8139 driver, ARP, IPv4, ICMP, UDP, TCP 3-way handshake, DNS resolve, HTTP GET, NTP time sync.\n- [x] **Audio:** AC97 PCM driver via `SYS_AUDIO_PLAY` (used by DOOM port and `niplay`).\n- [x] **Input:** PS/2 keyboard (scancodes) and PS/2 mouse (relative tracking).\n- [x] **PCI bus scan** + **PIT 8253 timer** + **COM1 serial** debug log.\n- [x] **Shared Memory** (`shm_alloc()` / `SYS_SHM_GET`).\n- [x] **PSF font rendering** (loaded from `/res/font.psf` and used by VESA text output).\n- [x] **GUI rebase:** the desktop / system shell is now a separate **enGUI** project, loaded as the Ring 3 init process (`bin/sysgui.elf`) from the `app/sysgui` submodule.\n- [x] **Lua removed** from the SDK and the default app set (cleaned out in `aff9670` / `1546590`).\n\n### ✅ Phase 1 — Architectural Integrity (HAL)\n\n- [x] **HAL skeleton** in `src/system/hal/` — `hal_display_ops_t`, `hal_input_ops_t`, `hal_block_ops_t`, registry, `hal_init()` adapter registration for the existing VESA / PS/2 / ATA-PIO drivers (no callers rewritten yet, but the surface is in place for VirtIO-GPU / USB-HID / AHCI backends).\n\n### 🟡 Phase 2 — Advanced Storage & VFS\n\n- [x] **GPT parser** (`src/system/fs/gpt.{c,h}`) — protective-MBR check, header validation, entry-table walk, UTF-16 → ASCII partition names. CRC32 still TODO.\n- [ ] **AHCI / SATA driver** — to replace ATA PIO. HAL block interface is ready to host it.\n- [ ] **VFS enhancements** — proper file descriptors (`open`/`read`/`write`/`close`), seek/stat, pipe nodes wired into VFS (in-kernel pipes already exist, see Phase 4).\n- [ ] **EXT2 large files** — indirect / double-indirect / triple-indirect block support (see `ext2_plan.md`).\n\n### 🟡 Phase 3 — UI Toolkit & Visuals\n\n- [x] **PSF2 font renderer** (`src/system/drivers/vesa/psf2.{c,h}`) — variable glyph width, Unicode table, UTF-8 input decoder. Legacy `font8x8.h` kept as fallback.\n- [x] **Advanced UI widgets** in EID v2.0 extension (`sdk/include/eid_ext.h`, `sdk/lib/eid_ext.c`):\n    - [x] `eid_button` (hover / active / clicked)\n    - [x] `eid_checkbox` (bound to `bool *`)\n    - [x] `eid_text_input` (single-line, caret, backspace, ASCII via `eid_scancode_to_ascii`)\n    - [x] `eid_slider` (draggable thumb, normalized 0..1)\n    - [x] Animation helper `eid_anim_t` with Linear / OutQuad / InOutQuad / OutCubic easings\n    - [x] Widget showcase: `app/widget_demo.c`\n- [ ] **SSE/AVX-accelerated blitting** — kernel currently builds with `-mno-sse -mno-sse2`; enabling SIMD needs FXSAVE/FXRSTOR on context switch.\n- [ ] **Real-time blur** (Gaussian/Box, SSE) for window effects.\n- [ ] **TrueType rendering** — `sdk/include/stb_truetype.h` + `sdk/lib/font_ttf.c` are shipped for userspace; kernel-side TTF still TODO.\n- [ ] **Window animations** in the compositor itself (fade-in, slide-out) — primitive available via `eid_anim_*`, not yet hooked into the WM.\n\n### ✅ Phase 4 — Multitasking & IPC\n\n- [x] **Sync primitives** (`src/system/usr/sync.{c,h}`):\n    - [x] `spinlock_t` (IRQ-disabling)\n    - [x] `waitqueue_t` (sleep/wake)\n    - [x] `kmutex_t` (sleeping FIFO mutex)\n    - [x] `ksem_t` (counting semaphore)\n- [x] **IPC** (`src/system/usr/ipc.{c,h}`):\n    - [x] **Pipes** — 4 KB ring buffer, blocking R/W with reader+writer wait queues.\n    - [x] **Message queues** — up to 32 messages × 256 B, priority-sorted.\n    - [x] Syscalls **60–67** (`SYS_PIPE_*`, `SYS_MQ_*`) plus wrappers in `equos.h`, demo in `app/ipc_test.c`.\n- [ ] **Shared memory across processes** (today `shm_alloc` is single-task) — secondary to pipes/MQ but useful for GUI event streaming.\n\n### 🟡 Phase 5 — Self-Hosting\n\n- [ ] **C standard library** — minimal stdio/stdlib/string/math/setjmp present in `sdk/lib/`; full `mlibc` / `newlib` port still TODO.\n- [ ] **Shell improvements** — scripting, env vars, piping (now realistic with kernel pipes).\n- [ ] **Toolchain port** — TCC or `x86_64-elf-gcc` cross to native, plus `make`.\n- [ ] **Native build** — compile a Hello-World _inside_ EquinoxOS.\n\n---\n\n## 🌠 Long-Term Vision\n\n* **Networking:** DHCP client + DNS cache, full POSIX socket API (`socket`/`bind`/`connect`/`send`/`recv`), TCP retransmission and full state machine (`SYN_SENT`, `FIN_WAIT`, `TIME_WAIT`) — see `network_plan.md`.\n* **Security & crypto:** HTTPS (BearSSL / mbedTLS port), RNG, cert store.\n* **Audio stack:** Intel HD Audio in addition to AC97; software mixer with multiple streams.\n* **USB stack:** UHCI / EHCI / xHCI for keyboards, mice, storage.\n* **Filesystem:** native EquinoxFS format + reusable journaling layer; mountable installer image.\n* **Distribution:** installable ISO that writes the OS to a real disk (EXT2/FAT32 with GPT layout).\n* **Games & ports:** native Quake / Wolf3D in addition to the existing DOOM port.\n"
+}
