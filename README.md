@@ -125,8 +125,11 @@ The OS ships a full desktop environment with the following apps:
 | `bmpview.elf` | `run bmpview.elf BG.BMP` | BMP image viewer |
 | `htmlview.elf` | Explorer | HTTP browser (no HTTPS) |
 | `niplay.elf` | `run niplay.elf terry.wav` | WAV music player via AC97 |
-| `luagui.elf` | `run luagui.elf app.lua` | Embedded Lua 5.x script runner |
+| `widget_demo.elf` | Explorer | EID v2.0 widget showcase (button / checkbox / text input / slider + animations) |
+| `ipc_test.elf` | Explorer | Pipe & message-queue smoke test (syscalls 60–67) |
 | `doom.elf` | Explorer | **DOOM** port with AC97 audio |
+
+> 💡 The desktop / system shell itself is now the separate **enGUI** project, pulled in as the `app/sysgui` Git submodule and launched as the Ring 3 init process (`bin/sysgui.elf`). Older versions had Lua (`luagui.elf`) bundled — Lua was removed from the SDK and app set.
 
 ---
 
@@ -230,12 +233,13 @@ EquinoxOS/
 │   ├── bmpview.c                    # BMP image viewer
 │   ├── htmlview.c                   # HTTP browser
 │   ├── niplay.c                     # WAV music player
-│   ├── luagui.c                     # Lua script runner
+│   ├── widget_demo.c                # EID v2.0 widget showcase
+│   ├── ipc_test.c                   # Pipe + message-queue test app
+│   ├── sysgui/                      # enGUI submodule (Ring 3 init process)
 │   └── doom/                        # DOOM port (doomgeneric)
 ├── sdk/
-│   ├── include/                     # equos.h, eid.h, syscall wrappers
-│   ├── lib/                         # CRT0 (_start), syscall stubs
-│   ├── lua/                         # Lua 5.x source (stripped)
+│   ├── include/                     # equos.h, eid.h, eid_ext.h, stb_truetype.h, libc headers
+│   ├── lib/                         # CRT0 (_start), syscall stubs, libc bits, eid + eid_ext
 │   └── codec/                       # WAV/audio codec helpers
 ├── iso_root/                        # Bootable ISO staging area
 │   ├── sys/kernel.elf
@@ -319,46 +323,50 @@ PCI initialized  |  GUI initialized  |  Shell initialized
 
 ## 🗺 Roadmap
 
-> Full details in [ROADMAP.md](ROADMAP.md)
+> Full details in [ROADMAP.md](ROADMAP.md) · recent patch set: [CHANGES.md](CHANGES.md)
 
 ### ✅ Completed
 
-- [x] x86_64 Higher Half kernel via Limine
-- [x] Bitmap PMM + 4-level VMM + kernel heap
-- [x] VESA LFB with compositing WM, alpha shadows, Z-ordering
-- [x] Preemptive Round-Robin scheduler (IRQ0)
-- [x] Ring 3 user mode with isolated address spaces
+- [x] x86_64 Higher Half kernel via Limine (HHDM)
+- [x] Bitmap PMM + 4-level VMM + 64 MB kernel heap
+- [x] Preemptive Round-Robin scheduler (IRQ0 / PIT 50 Hz)
+- [x] Ring 3 user mode with isolated per-process address spaces
 - [x] GDT / IDT / TSS — proper kernel+user segments
-- [x] FAT32 read + write support
-- [x] EXT2 read + write support
-- [x] VFS abstraction layer
-- [x] ELF64 loader → Ring 3 jump
-- [x] Syscall interface (`int 0x80`, 10 calls)
-- [x] RTL8139 NIC driver + full TCP/IP stack (ARP, IPv4, TCP, UDP, DNS, NTP, HTTP)
-- [x] AC97 audio driver with software mixer
-- [x] PS/2 keyboard & mouse
-- [x] DOOM port with audio
-- [x] Lua 5.x embedded interpreter (as userspace app)
-- [x] HTTP browser (`htmlview.elf`)
-- [x] PSF font rendering
+- [x] ELF64 loader → Ring 3 jump (CRT0)
+- [x] Syscall interface (`int 0x80`) — 30+ calls (print, file R/W, draw, mouse, kbd, exec, audio, net, shm, pipes, mqueue, …)
+- [x] VESA LFB with compositing WM, alpha shadows, z-ordering
+- [x] ATA PIO + FAT32 R/W + EXT2 R/W (stress-tested) + VFS abstraction
+- [x] RTL8139 NIC + full happy-path TCP/IP stack (ARP, IPv4, ICMP, TCP, UDP, DNS, NTP, HTTP GET)
+- [x] AC97 PCM audio driver
+- [x] PS/2 keyboard & mouse, PCI bus scan, COM1 serial debug
 - [x] Shared Memory (`shm_alloc`)
+- [x] PSF font rendering (loaded from `/res/font.psf`)
+- [x] **HAL skeleton** — `hal_display_ops_t` / `hal_input_ops_t` / `hal_block_ops_t` registry with adapters for VESA, PS/2, ATA PIO
+- [x] **GPT partition table parser** (UTF-16 names, header validation; CRC32 still TODO)
+- [x] **Sync primitives** — spinlock, waitqueue, sleeping mutex, counting semaphore
+- [x] **IPC** — kernel pipes (4 KB ring buffer) + priority message queues + syscalls 60–67
+- [x] **PSF2 font renderer** in the kernel (variable glyph width, Unicode, UTF-8 decoder)
+- [x] **EID v2.0 widget set** — button / checkbox / text input / slider + animation helper (linear / quad / cubic easing)
+- [x] **enGUI** spun out as a Git submodule (`app/sysgui`) and launched as the Ring 3 init process
+- [x] DOOM port with AC97 audio · HTTP browser (`htmlview.elf`) · WAV player (`niplay.elf`)
 
 ### 🔧 In Progress / Planned
 
-- [ ] HAL — hardware abstraction layer (decouple VESA/VGA/VirtIO)
-- [ ] AHCI/SATA driver (replace aging ATA PIO)
-- [ ] GPT partition table parsing
-- [ ] SSE/AVX-accelerated window compositing
-- [ ] Advanced UI widgets (checkboxes, text inputs, animations)
-- [ ] TrueType / PSF2 font rendering
-- [ ] IPC — pipes and message queues
-- [ ] Thread-safe mutexes & semaphores
-- [ ] Port `mlibc` / `newlib` as full libc
-- [ ] Self-hosting (EquinoxOS compiling EquinoxOS)
-- [ ] USB stack (UHCI/EHCI/XHCI)
-- [ ] HTTPS (TLS)
-- [ ] Own filesystem format
-- [ ] OS installable/archiveable
+- [ ] AHCI/SATA driver (slot into the HAL block interface, retire ATA PIO)
+- [ ] VFS file descriptors (`open` / `read` / `write` / `close`, seek, stat) and pipe VFS nodes
+- [ ] EXT2 indirect / double-indirect / triple-indirect blocks (large files)
+- [ ] GPT CRC32 verification + multi-partition VFS mount
+- [ ] SSE/AVX-accelerated compositing (needs FXSAVE/FXRSTOR on context switch)
+- [ ] Real-time blur (Gaussian/Box) and WM-level window animations
+- [ ] Kernel-side TrueType rendering (userspace `stb_truetype.h` already in SDK)
+- [ ] Cross-process shared memory for GUI event streaming
+- [ ] Port `mlibc` / `newlib` as a full libc → self-hosting (TCC / GCC inside the OS)
+- [ ] Shell scripting, env vars, native piping via kernel pipes
+- [ ] DHCP client + DNS cache, full TCP state machine with retransmission, POSIX socket syscalls
+- [ ] HTTPS (BearSSL / mbedTLS port) + RNG + cert store
+- [ ] USB stack (UHCI / EHCI / xHCI)
+- [ ] Intel HD Audio driver and multi-stream software mixer
+- [ ] Native EquinoxFS format + installable ISO that writes the OS to disk
 
 ---
 
