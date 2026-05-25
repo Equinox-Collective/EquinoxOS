@@ -101,16 +101,18 @@ void *pmm_alloc() {
     if (!BITMAP_TEST(i)) {
       BITMAP_SET(i);
       last_page = i;
-      pmm_used_pages++; // Увеличиваем здесь
+      pmm_used_pages++;
+      free_memory -= PAGE_SIZE;
       return (void *)(i * PAGE_SIZE);
     }
   }
 
-  // 2. ИСПРАВЛЕНИЕ: Если дошли до конца, ищем с самого начала (Wrap-around)
+  // Wrap-around: ищем с самого начала
   for (uint64_t i = 0; i < last_page; i++) {
     if (!BITMAP_TEST(i)) {
       BITMAP_SET(i);
       last_page = i;
+      pmm_used_pages++;
       free_memory -= PAGE_SIZE;
       return (void *)(i * PAGE_SIZE);
     }
@@ -149,10 +151,24 @@ void* pmm_alloc_continuous(uint64_t count) {
 void pmm_free(void *ptr) {
   uint64_t addr = (uintptr_t)ptr;
   uint64_t page = addr / PAGE_SIZE;
+
+  // Защита от мусорных адресов: страницы, не покрытые PMM-битмапом
+  // (например, MMIO-регионы вроде VESA LFB, замапленные через SYS_MAP_PHYS),
+  // не должны редактировать битмап и счётчики. Раньше это вызывало
+  // запись за пределы массива `bitmap` при выходе любого приложения,
+  // которое мапило фреймбуфер.
+  if (page >= total_pages)
+    return;
+
   if (BITMAP_TEST(page)) {
     BITMAP_CLEAR(page);
     if (pmm_used_pages > 0)
-      pmm_used_pages--; // Уменьшаем здесь
+      pmm_used_pages--;
+    free_memory += PAGE_SIZE;
+    // Сдвигаем last_page влево, чтобы следующий pmm_alloc мог сразу
+    // переиспользовать только что освобождённую страницу.
+    if (page < last_page)
+      last_page = page;
   }
 }
 

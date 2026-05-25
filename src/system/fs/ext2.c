@@ -116,6 +116,11 @@ void ext2_read_inode(uint32_t inode, ext2_inode_t* out_inode) {
     
     // Safety check: Don't overflow our struct if disk inode is larger
     uint32_t copy_size = (sb->inode_size < sizeof(ext2_inode_t)) ? sb->inode_size : sizeof(ext2_inode_t);
+    // Если копируем меньше, чем размер структуры (старая ФС со 128-байтным
+    // inode при 256-байтной in-memory структуре), хвост out_inode будет
+    // содержать мусор со стека вызывающего → ext2_get_inode_block уйдёт
+    // читать «индирект» по случайному адресу диска. Обнуляем заранее.
+    memset(out_inode, 0, sizeof(ext2_inode_t));
     memcpy(out_inode, buffer + (offset % block_size), copy_size);
     
     kfree(buffer);
