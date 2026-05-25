@@ -14,6 +14,7 @@
 #include "../usr/task.h"
 #include "../mem/vmm.h"
 #include "../core/cpu.h"
+#include "ipc.h"
 #include <stdint.h>
 
 extern volatile uint32_t tick;
@@ -520,6 +521,33 @@ void syscall_handler(syscall_regs_t *regs) {
     regs->rax = task_exec(cmd_buf) ? 1 : 0;
     break;
   }
+  /* ---- IPC: pipes ----------------------------------------------------- */
+  case 60: regs->rax = (uint64_t)(int64_t)pipe_create(); break;
+  case 61:
+    regs->rax = (uint64_t)(int64_t)pipe_read((int)regs->rdi,
+                                             (void *)regs->rsi,
+                                             (uint32_t)regs->rdx);
+    break;
+  case 62:
+    regs->rax = (uint64_t)(int64_t)pipe_write((int)regs->rdi,
+                                              (const void *)regs->rsi,
+                                              (uint32_t)regs->rdx);
+    break;
+  case 63: pipe_close((int)regs->rdi); break;
+  /* ---- IPC: message queues ------------------------------------------- */
+  case 64:
+    regs->rax = (uint64_t)(int64_t)mq_create((uint32_t)regs->rdi);
+    break;
+  case 65:
+    regs->rax = (uint64_t)(int64_t)mq_send((int)regs->rdi,
+                                           (const void *)regs->rsi,
+                                           (uint32_t)regs->rdx);
+    break;
+  case 66:
+    regs->rax = (uint64_t)(int64_t)mq_recv((int)regs->rdi,
+                                           (void *)regs->rsi);
+    break;
+  case 67: mq_close((int)regs->rdi); break;
   default:
     break;
   }
