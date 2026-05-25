@@ -344,3 +344,25 @@ bool task_terminate_by_pid(uint64_t pid) {
   term_print("TASK: PID not found.\n");
   return false;
 }
+// =============================================================================
+//                       Публичные хелперы для оболочки
+// =============================================================================
+
+task_t* task_get_list_head(void) { return task_list; }
+
+void task_kill_all_user(void) {
+  if (!task_list) return;
+  task_t *start = task_list;
+  task_t *curr = start;
+  do {
+    // PID 1 — idle/init ядра, его нельзя убивать (см. task_kill_self).
+    if (curr->id != 1) {
+      curr->running = false;
+      // vmm_destroy_address_space(curr->cr3) умышленно НЕ вызываем
+      // здесь: пользовательский процесс может быть прямо сейчас на
+      // своих страницах; планировщик/будущий cleanup освободит их
+      // когда задача окончательно слезет с CPU.
+    }
+    curr = curr->next;
+  } while (curr && curr != start);
+}

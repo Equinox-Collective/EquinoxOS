@@ -36,6 +36,7 @@
 #include "system/fs/vfs.h"
 #include "gui/terminal.h"
 #include "system/shell/shell.h"
+#include "system/shell/eshell.h"
 #include "gui/gui_apps.h"
 
 // --- EXTERNAL VARIABLES ---
@@ -243,6 +244,33 @@ void exec_module() {
   term_print("Error: app.elf not found in modules!\n");
 }
 
+// =========================================================================
+//                  Emergency shell hook (SUPER+ALT+F10 / `killall`)
+// =========================================================================
+//
+// Сценарий: пользователь жмёт SUPER+ALT+F10 (см. keyboard.c) или печатает
+// `killall` в shell. Мы:
+//   1) валим все пользовательские задачи (включая Ring 3 init = sysgui);
+//   2) поднимаем emergency shell, который рисует прямо в видеобуфер,
+//      минуя compositor (его и так больше нет, sysgui убит);
+//   3) ждём команды `exit` для перезагрузки.
+//
+// Функция вызывается ИЗ нормального контекста (kmain main loop или
+// shell-команды), НЕ из IRQ.
+void emergency_kill_all_and_shell(void) {
+  // 1. Прибиваем всё пользовательское.
+  task_kill_all_user();
+  is_app_running = false;
+
+  // 2. Чёрный экран + готовый sink на eshell. eshell_enter() сам сделает
+  // shell_set_output(eshell_print) и закрутит свой цикл.
+  emergency_shell_active = true;
+  eshell_enter();
+  // eshell_enter() возвращает управление только если активность снята.
+  // На практике он сам делает reboot по `exit`, так что обычно сюда мы
+  // не возвращаемся.
+}
+
 // Загрузка и запуск ELF-файла через VFS (теперь работает и с EXT2, и с FAT32!)
 void exec_from_disk(const char *filename) {
   vfs_node_t *dev = vfs_root->next;
@@ -405,6 +433,13 @@ void kmain(void) {
     if (should_run_app) {
       should_run_app = false;
       exec_module();
+    }
+    // SUPER+ALT+F10 поднимает флаг прямо из IRQ keyboard_callback.
+    // Реальную работу (kill всех задач + emergency shell) делаем здесь,
+    // в нормальном контексте.
+    if (emergency_shell_requested) {
+      emergency_shell_requested = false;
+      emergency_kill_all_and_shell();
     }
     __asm__("hlt");
   }
