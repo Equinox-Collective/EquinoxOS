@@ -31,5 +31,7 @@ void yield(void);
 void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2, uint64_t cr3);
 bool task_exec(char* full_command);
 void task_kill_self();
+bool task_terminate_by_pid(uint64_t pid);
+void task_list_all();
 
 #endif

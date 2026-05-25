@@ -99,7 +99,7 @@ local function process_command(cmd)
         table.insert(term_lines, "Matrix digital rain: " .. (matrix_mode and "ENABLED" or "DISABLED"))
     elseif cmd == "doom" then
         table.insert(term_lines, "Launching doom.elf...")
-        exec("bin/doom.elf")
+        exec("bin/doom.elf -iwad res/doom1.wad")
     elseif cmd == "snake" then
         table.insert(term_lines, "Launching snake.elf...")
         exec("bin/snake.elf")

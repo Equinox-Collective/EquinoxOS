@@ -301,3 +301,46 @@ void task_kill_self() {
   while (1)
     ; // Сюда мы никогда не вернемся
 }
+
+void task_list_all() {
+  task_t *start = task_list;
+  task_t *curr = start;
+
+  term_print("\e[33m PID   STATE       CR3          MEM_BRK\e[0m\n");
+  do {
+    char buf[128];
+    const char *state = curr->running ? "RUNNING" : "STOPPED";
+    // PID 1 обычно idle или init
+    sprintf(buf, " %d     %s     %x   %x\n", (uint32_t)curr->id, state,
+            (uint32_t)curr->cr3, (uint32_t)curr->brk);
+    term_print(buf);
+    curr = curr->next;
+  } while (curr != start);
+}
+
+// Убивает процесс по PID
+bool task_terminate_by_pid(uint64_t pid) {
+  if (pid == 1) {
+    term_print("TASK: Cannot kill kernel init process!\n");
+    return false;
+  }
+
+  task_t *curr = task_list;
+  do {
+    if (curr->id == pid) {
+      curr->running = false;
+      // Если у процесса был свой CR3 (не ядро), чистим память
+      if (curr->cr3 != 0) {
+        // vmm_destroy_address_space(curr->cr3); // Твоя функция очистки
+      }
+      char buf[64];
+      sprintf(buf, "TASK: Process %d terminated.\n", (uint32_t)pid);
+      term_print(buf);
+      return true;
+    }
+    curr = curr->next;
+  } while (curr != task_list);
+
+  term_print("TASK: PID not found.\n");
+  return false;
+}
