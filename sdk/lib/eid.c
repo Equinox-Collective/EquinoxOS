@@ -93,9 +93,27 @@ void eid_draw_pixel(uint32_t *fb, int win_w, int win_h, int x, int y,
 
 void eid_draw_rect(uint32_t *fb, int win_w, int win_h, int x, int y, int w,
                    int h, uint32_t color) {
-  for (int i = y; i < y + h; i++) {
-    for (int j = x; j < x + w; j++) {
-      eid_draw_pixel(fb, win_w, win_h, j, i, color);
+  // Клиппинг границ один раз на весь прямоугольник
+  if (x < 0) {
+    w += x;
+    x = 0;
+  }
+  if (y < 0) {
+    h += y;
+    y = 0;
+  }
+  if (x + w > win_w)
+    w = win_w - x;
+  if (y + h > win_h)
+    h = win_h - y;
+  if (w <= 0 || h <= 0)
+    return;
+
+  // Прямой построчный рендеринг без перевычисления адресов
+  for (int i = 0; i < h; i++) {
+    uint32_t *line = &fb[(y + i) * win_w + x];
+    for (int j = 0; j < w; j++) {
+      line[j] = color;
     }
   }
 }
@@ -104,13 +122,25 @@ void eid_draw_text(uint32_t *fb, int win_w, int win_h, int x, int y,
                    const char *text, uint32_t color) {
   if (!sys_font)
     return;
+
   while (*text) {
     uint8_t *glyph = (uint8_t *)sys_font + sizeof(psf1_t) +
                      ((uint8_t)*text * sys_font->charsize);
+
     for (int cy = 0; cy < sys_font->charsize; cy++) {
+      int py = y + cy;
+      if (py < 0 || py >= win_h) {
+        glyph++;
+        continue;
+      }
+
+      uint32_t *line = &fb[py * win_w];
       for (int cx = 0; cx < 8; cx++) {
-        if ((*glyph >> (7 - cx)) & 1) {
-          eid_draw_pixel(fb, win_w, win_h, x + cx, y + cy, color);
+        int px = x + cx;
+        if (px >= 0 && px < win_w) {
+          if ((*glyph >> (7 - cx)) & 1) {
+            line[px] = color;
+          }
         }
       }
       glyph++;
@@ -153,20 +183,50 @@ void eid_end(eid_ctx_t *ctx, int win_x, int win_y) {
 void eid_draw_gradient_rect(uint32_t *fb, int win_w, int win_h, int x, int y,
                             int w, int h, uint32_t col1, uint32_t col2,
                             bool vertical) {
-  for (int i = 0; i < h; i++) {
-    float t = (float)i / (float)h;
-    // Линейная интерполяция цветов
-    uint8_t r = (uint8_t)((1.0f - t) * ((col1 >> 16) & 0xFF) +
-                          t * ((col2 >> 16) & 0xFF));
-    uint8_t g =
-        (uint8_t)((1.0f - t) * ((col1 >> 8) & 0xFF) + t * ((col2 >> 8) & 0xFF));
-    uint8_t b = (uint8_t)((1.0f - t) * (col1 & 0xFF) + t * (col2 & 0xFF));
-    uint32_t color = (r << 16) | (g << 8) | b;
+  if (x < 0) {
+    w += x;
+    x = 0;
+  }
+  if (y < 0) {
+    h += y;
+    y = 0;
+  }
+  if (x + w > win_w)
+    w = win_w - x;
+  if (y + h > win_h)
+    h = win_h - y;
+  if (w <= 0 || h <= 0)
+    return;
 
-    if (vertical) {
-      eid_draw_rect(fb, win_w, win_h, x, y + i, w, 1, color);
-    } else {
-      // Для горизонтального градиента логика такая же, только по J
+  if (vertical) {
+    int r1 = (col1 >> 16) & 0xFF;
+    int g1 = (col1 >> 8) & 0xFF;
+    int b1 = col1 & 0xFF;
+
+    int r2 = (col2 >> 16) & 0xFF;
+    int g2 = (col2 >> 8) & 0xFF;
+    int b2 = col2 & 0xFF;
+
+    // Fixed-point 16.16
+    int r = r1 << 16;
+    int g = g1 << 16;
+    int b = b1 << 16;
+
+    int dr = ((r2 - r1) << 16) / h;
+    int dg = ((g2 - g1) << 16) / h;
+    int db = ((b2 - b1) << 16) / h;
+
+    for (int i = 0; i < h; i++) {
+      uint32_t color = (((r >> 16) & 0xFF) << 16) | (((g >> 16) & 0xFF) << 8) |
+                       ((b >> 16) & 0xFF);
+
+      uint32_t *line = &fb[(y + i) * win_w + x];
+      for (int j = 0; j < w; j++) {
+        line[j] = color;
+      }
+      r += dr;
+      g += dg;
+      b += db;
     }
   }
 }

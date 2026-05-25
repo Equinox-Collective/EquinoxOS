@@ -255,6 +255,7 @@ void syscall_handler(syscall_regs_t *regs) {
     yield(); // Уходим в планировщик
     break;
   case 11: // SYS_YIELD (Уступить процессор)
+    yield(); // Фактический switch context через int $32
     break;
   case 12: { // SYS_GET_FONT
     extern void *vesa_get_font();
@@ -272,17 +273,14 @@ void syscall_handler(syscall_regs_t *regs) {
     uint32_t ms = regs->rdi;
     uint32_t start = tick;
 
-    __asm__ volatile("sti"); // Включаем аппаратные прерывания!
-
-    // Спим, пока не пройдет нужное время. PIT на 1 кГц → 1 тик = 1 мс,
-    // поэтому SYS_SLEEP(ms) спит ровно ~ms миллисекунд (с точностью до
-    // одного тика). hlt усыпляет процессор до следующего тика таймера
-    // (экономим 100% CPU).
+    /* Спим через yield() — каждую итерацию передаем CPU другим задачам,
+     * а потом планировщик вернёт нас обратно. hlt здесь не нужен —
+     * yield() сам обеспечивает пробуждение через IRQ0.
+     * Важно: не делаем cli после выхода — это убивало планировщик
+     * до следующего сисколла. */
     while (tick < start + ms) {
-      __asm__ volatile("hlt");
+      yield();
     }
-
-    __asm__ volatile("cli"); // Выключаем обратно перед выходом
     break;
   }
 
