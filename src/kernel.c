@@ -243,6 +243,31 @@ void exec_module() {
   term_print("Error: app.elf not found in modules!\n");
 }
 
+// =========================================================================
+//                  Emergency shell hook (SUPER+ALT+F10 / `killall`)
+// =========================================================================
+//
+// Сценарий: пользователь жмёт SUPER+ALT+F10 (см. keyboard.c) или печатает
+// `killall` в shell. Мы:
+//   1) валим все пользовательские задачи (включая Ring 3 init = sysgui);
+//   2) поднимаем emergency shell, который рисует прямо в видеобуфер,
+//      минуя compositor (его и так больше нет, sysgui убит);
+//   3) ждём команды `exit` для перезагрузки.
+//
+// Функция вызывается ИЗ нормального контекста (kmain main loop или
+// shell-команды), НЕ из IRQ.
+void emergency_kill_all_and_shell(void) {
+  // 1. Прибиваем всё пользовательское.
+  task_kill_all_user();
+  is_app_running = false;
+
+  // 2. Чёрный экран + emergency-режим оболочки (он сам перенастраивает
+  // sink и крутит свой цикл ввода). Возврат — только если активность
+  // сняли снаружи; обычно режим выходит через `exit` -> reboot.
+  shell_emergency_active = true;
+  shell_emergency_enter();
+}
+
 // Загрузка и запуск ELF-файла через VFS (теперь работает и с EXT2, и с FAT32!)
 void exec_from_disk(const char *filename) {
   vfs_node_t *dev = vfs_root->next;
@@ -405,6 +430,13 @@ void kmain(void) {
     if (should_run_app) {
       should_run_app = false;
       exec_module();
+    }
+    // SUPER+ALT+F10 поднимает флаг прямо из IRQ keyboard_callback.
+    // Реальную работу (kill всех задач + emergency-режим оболочки)
+    // делаем здесь, в нормальном контексте.
+    if (shell_emergency_requested) {
+      shell_emergency_requested = false;
+      emergency_kill_all_and_shell();
     }
     __asm__("hlt");
   }
