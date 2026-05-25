@@ -36,7 +36,6 @@
 #include "system/fs/vfs.h"
 #include "gui/terminal.h"
 #include "system/shell/shell.h"
-#include "system/shell/eshell.h"
 #include "gui/gui_apps.h"
 
 // --- EXTERNAL VARIABLES ---
@@ -262,13 +261,11 @@ void emergency_kill_all_and_shell(void) {
   task_kill_all_user();
   is_app_running = false;
 
-  // 2. Чёрный экран + готовый sink на eshell. eshell_enter() сам сделает
-  // shell_set_output(eshell_print) и закрутит свой цикл.
-  emergency_shell_active = true;
-  eshell_enter();
-  // eshell_enter() возвращает управление только если активность снята.
-  // На практике он сам делает reboot по `exit`, так что обычно сюда мы
-  // не возвращаемся.
+  // 2. Чёрный экран + emergency-режим оболочки (он сам перенастраивает
+  // sink и крутит свой цикл ввода). Возврат — только если активность
+  // сняли снаружи; обычно режим выходит через `exit` -> reboot.
+  shell_emergency_active = true;
+  shell_emergency_enter();
 }
 
 // Загрузка и запуск ELF-файла через VFS (теперь работает и с EXT2, и с FAT32!)
@@ -435,10 +432,10 @@ void kmain(void) {
       exec_module();
     }
     // SUPER+ALT+F10 поднимает флаг прямо из IRQ keyboard_callback.
-    // Реальную работу (kill всех задач + emergency shell) делаем здесь,
-    // в нормальном контексте.
-    if (emergency_shell_requested) {
-      emergency_shell_requested = false;
+    // Реальную работу (kill всех задач + emergency-режим оболочки)
+    // делаем здесь, в нормальном контексте.
+    if (shell_emergency_requested) {
+      shell_emergency_requested = false;
       emergency_kill_all_and_shell();
     }
     __asm__("hlt");

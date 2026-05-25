@@ -1,6 +1,7 @@
 #include "shell.h"
 #include "../drivers/devices/pcspeaker/pcspeaker.h"
 #include "../drivers/vesa/bmp.h"
+#include "../drivers/vesa/vesa.h"
 #include "../fs/vfs.h"
 #include "../../gui/gui.h"
 #include "../../gui/terminal.h"
@@ -25,7 +26,7 @@
 // Раньше shell.c звал term_print() напрямую и был намертво прибит к
 // GUI-терминалу (term_win). Теперь это полноценная оболочка-процессор:
 // весь вывод идёт через подменяемый sink. Дефолт — term_print, но
-// emergency shell, init.lua, утилита или приложение могут перенаправить
+// emergency-режим, init.lua, утилита или приложение могут перенаправить
 // вывод к себе одним вызовом shell_set_output().
 
 extern void term_print(const char *str);
@@ -48,6 +49,8 @@ shell_output_fn shell_get_output(void) { return s_out; }
 //                            ВСПОМОГАТЕЛЬНОЕ
 // =============================================================================
 
+// Оставлено на будущее под net-команды (ping, arp).
+__attribute__((unused))
 static uint32_t parse_ip(const char* s) {
     uint32_t res = 0;
     for (int i = 0; i < 4; i++) {
@@ -84,7 +87,7 @@ extern bool should_run_app;
 extern void show();
 
 // Реализована в kernel.c. Безопасно завершает все пользовательские
-// задачи и запрашивает emergency shell на чёрном экране.
+// задачи и запрашивает emergency-режим оболочки на чёрном экране.
 extern void emergency_kill_all_and_shell(void);
 
 // =============================================================================
@@ -195,8 +198,6 @@ static void cmd_kill(const char *args) {
         return;
     }
     if (!task_terminate_by_pid((uint64_t)pid)) {
-        // task_terminate_by_pid сам пишет через term_print, но если sink
-        // был перенастроен — пользователь всё равно увидит исход здесь.
         char buf[64];
         sprintf(buf, "kill: failed to terminate pid %d\n", pid);
         sh_print(buf);
@@ -238,13 +239,9 @@ static void shell_execute(char *cmd) {
     } else if (strcmp(cmd, "fetch") == 0) {
         cmd_fetch();
     } else if (strcmp(cmd, "clear") == 0) {
-        // Если sink — emergency shell, у него своя реализация clear через
-        // пустой ввод. Здесь чистим именно GUI-терминал, только если он
-        // и есть наш текущий sink.
         if (s_out == default_output) {
             terminal_clear();
         } else {
-            // Просто пара пустых строк — нормальный poor man's clear.
             sh_print("\n\n");
         }
     } else if (strcmp(cmd, "gui") == 0) {
@@ -266,12 +263,14 @@ static void shell_execute(char *cmd) {
         sh_print("\n");
     }
 
-    shell_prompt();
+    // В emergency-режиме prompt мы НЕ печатаем: у emergency-рендера
+    // свой prompt в нижней строке, его рисует emergency_redraw().
+    if (s_out == default_output) {
+        shell_prompt();
+    }
 }
 
 void shell_run_command(const char *cmd) {
-    // Копируем во временный буфер: shell_execute мутирует/использует strtok
-    // на словах позже, plus вызывающий может передать literal-строку.
     char buf[64];
     int i = 0;
     if (cmd) {
@@ -328,7 +327,245 @@ void shell_handle_char(char c) {
 }
 
 void shell_handle_fkey(int n) {
-    // По умолчанию F-клавиши не интерпретируются (ловить их умеют
-    // приложения/eshell). Здесь можно повесить хоткеи оболочки в будущем.
+    // По умолчанию F-клавиши не интерпретируются — emergency-режим имеет
+    // свою таблицу (см. shell_emergency_handle_fkey ниже). Здесь можно
+    // повесить хоткеи обычной оболочки в будущем.
     (void)n;
+}
+
+// =============================================================================
+//                EMERGENCY-РЕЖИМ (бывший eshell.c, теперь часть shell)
+// =============================================================================
+//
+// Идея: тот же command-processor (см. shell_execute выше), но другой
+// рендер. Мы:
+//   1) ставим sink на emergency_sink() — он буферизует строки;
+//   2) при каждом обновлении состояния пере-рисовываем чёрный экран
+//      напрямую в фреймбуфер (vesa *_direct), bottom-up;
+//   3) обрабатываем ввод сами (shell_emergency_handle_char), потому что
+//      приоритет ввода с клавиатуры в этот режим даёт keyboard.c.
+
+#define EM_CHAR_W       8
+#define EM_CHAR_H       8
+#define EM_LINE_H       10
+#define EM_LEFT_PAD     8
+#define EM_BOTTOM_PAD   8
+#define EM_FG           0xC8C8C8
+#define EM_FG_DIM       0x808080
+#define EM_FG_PROMPT    0x00C864
+#define EM_BG           0x000000
+
+#define EM_MAX_LINES    256
+#define EM_LINE_W       256
+#define EM_INPUT_MAX    128
+
+static char  em_lines[EM_MAX_LINES][EM_LINE_W];
+static int   em_line_count = 0;
+static char  em_current[EM_LINE_W];     // незакрытая (без \n) строка
+static int   em_current_len = 0;
+
+static char  em_input[EM_INPUT_MAX];
+static int   em_input_len = 0;
+
+volatile bool shell_emergency_active = false;
+volatile bool shell_emergency_requested = false;
+
+static void em_reset_state(void) {
+    em_line_count = 0;
+    em_current_len = 0;
+    em_current[0] = '\0';
+    em_input_len = 0;
+    em_input[0] = '\0';
+}
+
+static void em_push_line(const char *line) {
+    if (em_line_count == EM_MAX_LINES) {
+        for (int i = 0; i < EM_MAX_LINES - 1; i++)
+            strcpy(em_lines[i], em_lines[i + 1]);
+        em_line_count = EM_MAX_LINES - 1;
+    }
+    int n = 0;
+    while (line[n] && n < EM_LINE_W - 1) {
+        em_lines[em_line_count][n] = line[n];
+        n++;
+    }
+    em_lines[em_line_count][n] = '\0';
+    em_line_count++;
+}
+
+// Буферизуем строки, выкидывая ANSI escape и нерисуемые символы.
+static void em_buffer_write(const char *s) {
+    if (!s) return;
+    while (*s) {
+        unsigned char c = (unsigned char)*s++;
+
+        if (c == 0x1B) {                 // ESC
+            if (*s == '[') {
+                s++;
+                while (*s && !((*s >= 'A' && *s <= 'Z') ||
+                               (*s >= 'a' && *s <= 'z'))) s++;
+                if (*s) s++;
+            }
+            continue;
+        }
+        if (c == '\r') {
+            em_current_len = 0;
+            em_current[0] = '\0';
+            continue;
+        }
+        if (c == '\n') {
+            em_current[em_current_len] = '\0';
+            em_push_line(em_current);
+            em_current_len = 0;
+            em_current[0] = '\0';
+            continue;
+        }
+        if (c == '\t') {
+            for (int k = 0; k < 4 && em_current_len < EM_LINE_W - 1; k++)
+                em_current[em_current_len++] = ' ';
+            em_current[em_current_len] = '\0';
+            continue;
+        }
+        if (c == '\b') {
+            if (em_current_len > 0)
+                em_current[--em_current_len] = '\0';
+            continue;
+        }
+        if (c < 32 || c > 126) continue;
+
+        if (em_current_len < EM_LINE_W - 1) {
+            em_current[em_current_len++] = (char)c;
+            em_current[em_current_len] = '\0';
+        }
+    }
+}
+
+static void em_redraw(void) {
+    // 1. Чёрный фон во весь экран.
+    draw_rect_direct(0, 0, (int)screen_width, (int)screen_height, EM_BG);
+
+    // 2. Header сверху (как у Arch installer).
+    vesa_draw_string_direct(
+        "EquinoxOS emergency shell -- type 'help' for commands, 'exit' "
+        "to reboot",
+        EM_LEFT_PAD, 4, EM_FG_DIM);
+    draw_rect_direct(0, EM_LINE_H + 4, (int)screen_width, 1, 0x202020);
+
+    // 3. Нижняя строка — input prompt.
+    int input_y = (int)screen_height - EM_LINE_H - EM_BOTTOM_PAD;
+    vesa_draw_string_direct("# ", EM_LEFT_PAD, input_y, EM_FG_PROMPT);
+    vesa_draw_string_direct(em_input,
+                            EM_LEFT_PAD + 2 * EM_CHAR_W, input_y, EM_FG);
+    int cursor_x = EM_LEFT_PAD + (2 + em_input_len) * EM_CHAR_W;
+    draw_rect_direct(cursor_x, input_y, EM_CHAR_W, EM_CHAR_H, EM_FG);
+
+    // 4. История — снизу вверх. Сначала недозакрытая em_current.
+    int y = input_y - EM_LINE_H;
+    if (em_current_len > 0 && y > EM_LINE_H) {
+        vesa_draw_string_direct(em_current, EM_LEFT_PAD, y, EM_FG);
+        y -= EM_LINE_H;
+    }
+    for (int i = em_line_count - 1; i >= 0 && y > EM_LINE_H + 4; i--) {
+        vesa_draw_string_direct(em_lines[i], EM_LEFT_PAD, y, EM_FG);
+        y -= EM_LINE_H;
+    }
+}
+
+// Sink для shell_set_output: получает то, что печатают команды
+// (sh_print()), буферизует и перерисовывает экран.
+static void emergency_sink(const char *s) {
+    em_buffer_write(s);
+    em_redraw();
+}
+
+static void em_banner(void) {
+    em_buffer_write(
+        "Emergency shell.\n"
+        "GUI subsystem stopped. Direct framebuffer mode.\n"
+        "Commands: help ps kill killall fetch ls reboot exit\n"
+        "\n");
+}
+
+void shell_emergency_handle_char(char c) {
+    if (!shell_emergency_active) return;
+
+    if (c == '\n') {
+        // 1. Эхо команды в историю.
+        char echo[EM_INPUT_MAX + 8];
+        int j = 0;
+        echo[j++] = '#';
+        echo[j++] = ' ';
+        for (int i = 0; i < em_input_len && j < (int)sizeof(echo) - 2; i++)
+            echo[j++] = em_input[i];
+        echo[j++] = '\n';
+        echo[j] = '\0';
+        em_buffer_write(echo);
+
+        // 2. Спецкоманда `exit` — выходим через triple fault.
+        if (strcmp(em_input, "exit") == 0) {
+            em_buffer_write("Rebooting...\n");
+            em_redraw();
+            struct { uint16_t l; uint64_t b; }
+                __attribute__((packed)) idt = {0, 0};
+            __asm__ volatile("lidt %0; int3" : : "m"(idt));
+            for (;;) __asm__("hlt");
+        }
+
+        // 3. Иначе — обычный исполнитель оболочки. Вывод придёт
+        // обратно через emergency_sink() и сам перерисует экран.
+        shell_run_command(em_input);
+        em_input_len = 0;
+        em_input[0] = '\0';
+        em_redraw();
+        return;
+    }
+    if (c == '\b') {
+        if (em_input_len > 0) {
+            em_input[--em_input_len] = '\0';
+            em_redraw();
+        }
+        return;
+    }
+    if (c >= 32 && c <= 126 && em_input_len < EM_INPUT_MAX - 1) {
+        em_input[em_input_len++] = c;
+        em_input[em_input_len] = '\0';
+        em_redraw();
+    }
+}
+
+void shell_emergency_handle_fkey(int n) {
+    switch (n) {
+    case 1:  shell_run_command("help"); em_redraw(); break;
+    case 2:  shell_run_command("ps");   em_redraw(); break;
+    case 12: // F12 — экстренный reboot, даже если ввод текста сломан
+        shell_emergency_handle_char('e');
+        shell_emergency_handle_char('x');
+        shell_emergency_handle_char('i');
+        shell_emergency_handle_char('t');
+        shell_emergency_handle_char('\n');
+        break;
+    default: break;
+    }
+}
+
+void shell_emergency_enter(void) {
+    // Запоминаем прошлый sink и подменяем своим. Уважительно: после
+    // выхода (если когда-нибудь произойдёт) восстановим.
+    shell_output_fn prev = shell_get_output();
+    shell_set_output(emergency_sink);
+
+    em_reset_state();
+    em_banner();
+
+    shell_emergency_active = true;
+    shell_emergency_requested = false;
+    em_redraw();
+
+    // Дальше ввод идёт через keyboard_callback → shell_emergency_handle_char.
+    // Здесь мы просто hlt'имся, давая прерываниям делать работу. Выход
+    // обычно — `exit` (см. выше, делает reboot и сюда не возвращается).
+    while (shell_emergency_active) {
+        __asm__ volatile("hlt");
+    }
+    shell_set_output(prev);
 }

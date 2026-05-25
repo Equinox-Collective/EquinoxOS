@@ -2,7 +2,6 @@
 #include "../../../../gui/gui.h"
 #include "../../../core/io.h"
 #include "../../../shell/shell.h"
-#include "../../../shell/eshell.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -126,26 +125,27 @@ void keyboard_callback(void) {
 
   if (is_release) return; // дальше нас интересуют только нажатия
 
-  // 4. Системные хоткеи. SUPER+ALT+F10 — emergency shell (killall + чёрный
-  // экран). Это обрабатывается ВНЕ зависимости от того, кто сейчас в фокусе.
+  // 4. Системные хоткеи. SUPER+ALT+F10 — emergency-режим оболочки
+  // (killall + чёрный экран). Обрабатывается ВНЕ зависимости от того,
+  // кто сейчас в фокусе.
   int fkey = scancode_to_fkey(code);
   if (fkey > 0 && super_pressed && alt_pressed && fkey == 10) {
     // Из IRQ ничего тяжёлого не делаем — просто сигналим главному
     // циклу в kmain.
-    emergency_shell_requested = true;
+    shell_emergency_requested = true;
     return;
   }
 
   // 5. Куда отдавать ввод.
-  if (emergency_shell_active) {
+  if (shell_emergency_active) {
     if (fkey > 0) {
-      eshell_handle_fkey(fkey);
+      shell_emergency_handle_fkey(fkey);
       return;
     }
     // Сначала shift/extended выпиливаем — get_ascii_char уже учитывает
     // shift_pressed по сайд-эффекту выше.
     char c = was_extended ? 0 : get_ascii_char(scancode);
-    if (c > 0) eshell_handle_char(c);
+    if (c > 0) shell_emergency_handle_char(c);
     return;
   }
 
