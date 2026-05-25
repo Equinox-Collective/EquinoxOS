@@ -88,7 +88,9 @@ void *sys_get_file(const char *name, uint64_t *size) {
 }
 
 char sys_get_key() { return 0; } // Заглушка
-uint32_t sys_get_time_ms() { return tick * 10; }
+/* The PIT is initialised at 1000 Hz (see init_timer call in kmain), so
+ * `tick` increments once per millisecond. */
+uint32_t sys_get_time_ms() { return tick; }
 
 uint8_t sys_get_scancode() {
   uint8_t code = last_scancode;
@@ -310,7 +312,16 @@ void kmain(void) {
   serial_puts(COM1, "IDT initialized\n");
   pic_remap(); // Перенаправляет PIC на 0x20+
   serial_puts(COM1, "PIC remapped\n");
-  init_timer(50); // Настраивает PIT на 50Гц (компенсирует двоение частоты в QEMU)
+  /* PIT at 1000 Hz → 1 tick = 1 ms. This makes `tick` directly usable as a
+   * milliseconds-since-boot counter (see SYS_GET_TIME / SYS_SLEEP / sleep()),
+   * and gives the round-robin scheduler a 1 ms preemption quantum — enough
+   * for snappy interactive feel without measurable CPU overhead in QEMU.
+   *
+   * The old 50 Hz value (with the “compensates for QEMU frequency doubling”
+   * comment) made every consumer of `tick` either off by 2× or off by 10×
+   * depending on whether they multiplied by 10 or not — see the audit in
+   * the patch that introduced this comment. */
+  init_timer(1000);
   serial_puts(COM1, "Timer initialized (100Hz)\n");
   tick = 0;
   // !!! ВАЖНО: Ставим АСЕМБЛЕРНЫЙ обработчик СРАЗУ, до включения прерываний !!!
@@ -320,9 +331,9 @@ void kmain(void) {
   __asm__("sti"); // Включаем прерывания
   serial_puts(COM1, "Interrupts enabled\n");
 
-  // Даем таймеру "прокашляться" (ждем 10 тиков = 100мс)
+  // Даем таймеру "прокашляться" (ждем 100 мс = 100 тиков при 1 кГц PIT)
   uint32_t start_tick = tick;
-  while (tick < start_tick + 10) {
+  while (tick < start_tick + 100) {
     __asm__ volatile("hlt");
   }
    shm_init();

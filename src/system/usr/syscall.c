@@ -156,8 +156,10 @@ void syscall_handler(syscall_regs_t *regs) {
                         (uint32_t *)regs->r8);
     clac();
     break;
-  case 6:                  // SYS_GET_TIME
-    regs->rax = tick * 10; // Возвращаем время в RAX
+  case 6: // SYS_GET_TIME
+    // Возвращаем время в миллисекундах. PIT тикает на 1 кГц, поэтому tick
+    // напрямую измеряется в мс с момента загрузки.
+    regs->rax = tick;
     break;
   case 7: { // SYS_GET_MOUSE_FULL
     extern int mouse_x, mouse_y;
@@ -229,13 +231,15 @@ void syscall_handler(syscall_regs_t *regs) {
   }
   case 13: { // SYS_SLEEP
     uint32_t ms = regs->rdi;
-    uint32_t start = tick * 10;
+    uint32_t start = tick;
 
     __asm__ volatile("sti"); // Включаем аппаратные прерывания!
 
-    // Спим, пока не пройдет нужное время.
-    // hlt усыпляет процессор до следующего тика таймера (экономим 100% CPU)
-    while ((tick * 10) < start + ms) {
+    // Спим, пока не пройдет нужное время. PIT на 1 кГц → 1 тик = 1 мс,
+    // поэтому SYS_SLEEP(ms) спит ровно ~ms миллисекунд (с точностью до
+    // одного тика). hlt усыпляет процессор до следующего тика таймера
+    // (экономим 100% CPU).
+    while (tick < start + ms) {
       __asm__ volatile("hlt");
     }
 

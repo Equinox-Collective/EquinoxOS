@@ -165,7 +165,8 @@ void update_gui() {
     gui_window_draw_rect(main_win, 15, 35, 150, 10, 0xDDDDDD);
     int bar_w = (used_mb * 150) / total_mb;
     gui_window_draw_rect(main_win, 15, 35, bar_w, 10, 0x0078D7);
-    uint32_t s = tick / 100;
+    /* tick = milliseconds (PIT @ 1 kHz), see kernel.c. */
+    uint32_t s = tick / 1000;
     sprintf(info, "Uptime: %02u:%02u:%02u", s / 3600, (s % 3600) / 60, s % 60);
     gui_window_draw_string(main_win, info, 15, 85, 0x555555);
   }
@@ -342,7 +343,8 @@ void update_gui() {
     }
     int cx = 8 + notepad_col * 8;
     int cy = 22 + notepad_line * 14;
-    if ((tick / 50) % 2 == 0) {
+    /* 500 ms on / 500 ms off caret blink (tick is now in ms). */
+    if ((tick / 500) % 2 == 0) {
       gui_window_draw_rect(notepad_win, cx, cy, 2, 10, 0x000000);
     }
   }
