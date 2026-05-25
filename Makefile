@@ -115,7 +115,9 @@ app/%.o: app/%.c
 sysgui_app:
 	@echo "=== Building sysgui (enGUI) ==="
 	$(MAKE) -C app/sysgui
-	cp app/sysgui/sysgui.elf iso_root/bin/sysgui.elf
+	copy app\sysgui\sysgui.elf iso_root\bin\sysgui.elf
+	@if not exist iso_root\res\sysgui mkdir iso_root\res\sysgui
+	copy app\sysgui\scripts\init.lua iso_root\res\sysgui\init.lua
 
 # --- SYSTEM RULES ---
 
@@ -127,6 +129,7 @@ clean:
 	@if exist app\*.d del /q app\*.d
 	@if exist kernel.elf del /q kernel.elf
 	@if exist equos.iso del /q equos.iso
+	@if exist app\sysgui\sysgui.elf del /q app\sysgui\sysgui.elf
 
 create_hdd:
 	@echo --- Generating EXT2 hdd.img ---

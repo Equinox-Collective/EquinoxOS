@@ -355,16 +355,16 @@ void kmain(void) {
   serial_puts(COM1, "PC Speaker initialized\n");
   init_mouse();
   serial_puts(COM1, "Mouse initialized\n");
-  gui_init();
-  serial_puts(COM1, "GUI initialized\n");
+  // gui_init();
+  // serial_puts(COM1, "GUI initialized\n");
   shm_init();
   serial_puts(COM1, "Shared memory initialized\n");
   ipc_init();
   serial_puts(COM1, "IPC (pipes + mqueue) initialized\n");
   hal_init();
   serial_puts(COM1, "HAL initialized\n");
-  shell_init();
-  serial_puts(COM1, "Shell initialized\n");
+  // shell_init();
+  // serial_puts(COM1, "Shell initialized\n");
 
   // Запускаем сетевой поток в фоновом режиме
   task_create(network_thread, 0, 0, 0);
@@ -373,8 +373,10 @@ void kmain(void) {
   void *font_ptr = sys_get_file("font.psf", &font_size);
   vesa_set_font(font_ptr);
   serial_puts(COM1, "=== EquinoxOS Ready ===\n");
+  exec_from_disk("bin/sysgui.elf"); // Загружаем ELF с диска и отдаем планировщику
+  serial_puts(COM1, "enGUI spawned as Ring 3 init process\n");
   while (1) {
-    update_gui();
+    // update_gui();
     if (should_run_app) {
       should_run_app = false;
       exec_module();
