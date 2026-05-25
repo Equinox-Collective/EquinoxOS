@@ -433,11 +433,12 @@ local dragging_win = nil
 local drag_ox, drag_oy = 0, 0
 
 function on_tick(dt)
+    local sw, sh = getScreenSize() 
     local mx, my, mdown = getMouse()
     _G.needs_redraw = false  -- сбрасываем в начале каждого тика
 
     -- 1. Рендеринг обоев (Красивый плавный космический фон)
-    drawGradient(0, 0, 1024, 728, 0x101216, 0x1E222D, true)
+    drawGradient(0, 0, sw, sh - 32, 0x101216, 0x1E222D, true)
 
     -- 2. Обработка ввода (Считывание сканкодов клавиш)
     local key = getLastKey()
@@ -594,8 +595,8 @@ function on_tick(dt)
 
     -- 6. Нижняя системная панель задач (Taskbar)
     local task_y = 736
-    drawGradient(0, task_y, 1024, 32, 0x1B1F2A, 0x12151D, true)
-    drawRect(0, task_y, 1024, 1, 0x2A2E3D)
+    drawGradient(0, task_y, sw, sh - 32, 0x1B1F2A, 0x12151D, true)
+    drawRect(0, task_y, sw, 1, 0x2A2E3D)
 
     -- Быстрый список открытых окон в левой части
     local tx_start = 15
@@ -627,14 +628,14 @@ function on_tick(dt)
     local used, total = getMemInfo()
     local used_mb = math.floor(used / (1024 * 1024))
     local ram_str = string.format("RAM: %d MB", used_mb)
-    drawText(ram_str, 820, task_y + 10, 0x888C94)
+    drawText(ram_str, sw - 200, task_y + 10, 0x888C94)
 
     local uptime = getUptime()
     local s = math.floor(uptime % 60)
     local m = math.floor((uptime / 60) % 60)
     local h = math.floor(uptime / 3600)
     local clock_str = string.format("%02d:%02d:%02d", h, m, s)
-    drawText(clock_str, 930, task_y + 10, 0xD8DEE9)
+    drawText(clock_str, sw - 100, task_y + 10, 0xD8DEE9)
 
     last_mdown = mdown
 end
