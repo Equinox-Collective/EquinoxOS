@@ -150,6 +150,47 @@ void syscall_handler(syscall_regs_t *regs) {
     }
     break;
   }
+  case 4: { // SYS_READ_DIR
+    int idx = (int)regs->rdi;
+
+    // Временная структура для безопасной записи в память пользователя
+    struct {
+      char name[128];
+      uint32_t size;
+      char dev[32];
+    } *out = (void *)regs->rsi;
+
+    int current_idx = 0;
+    vfs_node_t *dev = vfs_root->next;
+    bool found = false;
+
+    while (dev) {
+      if (dev->readdir) {
+        for (int i = 0; i < 32; i++) {
+          vfs_dirent_t *de = dev->readdir(dev, i);
+          if (!de)
+            break;
+
+          if (current_idx == idx) {
+            stac(); // Разрешаем доступ к памяти Ring 3
+            strcpy(out->name, de->name);
+            out->size = de->size;
+            strcpy(out->dev, dev->name);
+            clac(); // Закрываем доступ
+            found = true;
+            break;
+          }
+          current_idx++;
+        }
+      }
+      if (found)
+        break;
+      dev = dev->next;
+    }
+
+    regs->rax = found ? 1 : 0; // Возвращаем 1, если файл найден, иначе 0
+    break;
+  }
   case 5: // SYS_DRAW_BUFFER
     stac();
     sys_draw_app_buffer(regs->rdi, regs->rsi, regs->rdx, regs->rcx,
@@ -172,20 +213,11 @@ void syscall_handler(syscall_regs_t *regs) {
   {
     static window_t *last_focus = NULL;
 
-    if (focused_window == app_win) {
-      // Если мы только что переключились на окно Дума
-      if (last_focus != app_win) {
-        // Вычищаем буфер полностью, чтобы старые Enter-ы не срабатывали
-        while (keyboard_pop() != 0)
-          ;
-        last_focus = app_win;
-        regs->rax = 0;
-        break;
-      }
+    if(app_win && app_win->active && focused_window == app_win) {
       regs->rax = keyboard_pop();
-    } else {
-      last_focus = focused_window;
-      regs->rax = 0;
+    }
+    else {
+      regs->rax = keyboard_pop();
     }
     break;
   }

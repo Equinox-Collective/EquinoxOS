@@ -6,6 +6,7 @@
 #define SYS_PRINT 1
 #define SYS_READ_FILE 2
 #define SYS_WRITE_FILE 3
+#define SYS_READ_DIR 4
 #define SYS_DRAW_BUFFER 5
 #define SYS_GET_TIME 6
 #define SYS_GET_MOUSE_FULL 7

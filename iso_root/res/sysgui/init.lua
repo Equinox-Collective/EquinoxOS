@@ -1,62 +1,540 @@
--- enGUI: Lua System UI
-print("enGUI: init.lua started successfully!")
+-- Equinox Desktop Environment (enGUI)
+print("enGUI Desktop Environment: Windows & Apps loaded!")
 
--- Хранилище настроек
-local settings = {
-    enable_wifi = false,
-    enable_blur = true,
-    volume = 0.5,
+local windows = {}
+local focused_window = nil
+local last_mdown = false
+
+-- Состояние глобального ввода для Блокнота / Терминала
+local shift_pressed = false
+
+-- --- КЛАСС WINDOW (ООП МЕНЕДЖЕР ОКОН) ---
+local Window = {}
+Window.__index = Window
+
+function Window.new(title, x, y, w, h, draw_cb)
+    local self = setmetatable({}, Window)
+    self.title = title
+    self.x = x
+    self.y = y
+    self.w = w
+    self.h = h
+    self.active = true
+    self.draw_cb = draw_cb
+    return self
+end
+
+function Window:draw(mx, my, mdown, dt)
+    if not self.active then return end
+
+    local active = (focused_window == self)
+    local ty = self.y - 25
+
+    -- 1. Рамка и тень (обводка)
+    drawRect(self.x - 1, ty - 1, self.w + 2, self.h + 27, 0x111216)
+
+    -- 2. Градиентный заголовок
+    if active then
+        drawGradient(self.x, ty, self.w, 25, 0x0078D7, 0x005A9E, true)
+    else
+        drawGradient(self.x, ty, self.w, 25, 0x44464F, 0x2E3037, true)
+    end
+
+    -- 3. Текст заголовка
+    drawText(self.title, self.x + 8, ty + 5, 0xFFFFFF)
+
+    -- 4. Кнопка закрытия [X] (Стиль Windows 10)
+    local bx = self.x + self.w - 24
+    local by = ty + 4
+    local bw, bh = 18, 16
+    local over_close = (mx >= bx and mx < bx + bw and my >= by and my < by + bh)
+    
+    if over_close then
+        drawRect(bx, by, bw, bh, 0xE81123)
+    else
+        drawRect(bx, by, bw, bh, 0xCC2A2A)
+    end
+    drawText("X", bx + 5, by + 1, 0xFFFFFF)
+
+    if over_close and mdown and not last_mdown then
+        self.active = false
+        if focused_window == self then focused_window = nil end
+        return
+    end
+
+    -- 5. Фон рабочей области окна
+    drawRect(self.x, self.y, self.w, self.h, 0x1E1F29)
+
+    -- 6. Отрисовка внутреннего содержимого (Callback)
+    if self.draw_cb then
+        self.draw_cb(self, mx, my, mdown, dt)
+    end
+end
+
+-- --- ПРИЛОЖЕНИЕ 1: EQUINOX TERMINAL ---
+local term_lines = {
+    "Equinox OS Ring 3 Terminal [Version 2.0]",
+    "Welcome to the Lua-driven CLI terminal shell.",
+    "Type 'help' to see available commands.",
+    ""
+}
+local term_input = ""
+local matrix_mode = false
+local matrix_tick = 0
+
+local function process_command(cmd)
+    cmd = string.gsub(cmd, "%s+", "") -- убираем лишние пробелы
+    if cmd == "help" then
+        table.insert(term_lines, "Commands: help, clear, matrix, doom, snake")
+    elseif cmd == "clear" then
+        term_lines = {}
+    elseif cmd == "matrix" then
+        matrix_mode = not matrix_mode
+        table.insert(term_lines, "Matrix digital rain: " .. (matrix_mode and "ENABLED" or "DISABLED"))
+    elseif cmd == "doom" then
+        table.insert(term_lines, "Launching doom.elf...")
+        exec("bin/doom.elf")
+    elseif cmd == "snake" then
+        table.insert(term_lines, "Launching snake.elf...")
+        exec("bin/snake.elf")
+    elseif cmd ~= "" then
+        table.insert(term_lines, "Unknown command: '" .. cmd .. "'")
+    end
+end
+
+local function draw_terminal(win, mx, my, mdown, dt)
+    -- Обработка Matrix-режима
+    if matrix_mode then
+        matrix_tick = matrix_tick + 1
+        drawRect(win.x, win.y, win.w, win.h, 0x000000)
+        for i = 1, 30 do
+            local rx = win.x + ((i * 17) % win.w)
+            local speed = 2 + (i % 4)
+            local ry = win.y + math.floor((matrix_tick * speed + i * 43) % win.h)
+            local char_code = 33 + ((matrix_tick + i) % 90)
+            local char_str = string.char(char_code)
+            local col = (i % 5 == 0) and 0xFFFFFF or 0x00FF00
+            drawText(char_str, rx, ry, col)
+        end
+    end
+
+    -- Рендеринг строк истории вывода
+    local line_h = 14
+    local max_lines = math.floor((win.h - 30) / line_h)
+    local start_idx = #term_lines - max_lines + 1
+    if start_idx < 1 then start_idx = 1 end
+
+    local draw_y = win.y + 8
+    for i = start_idx, #term_lines do
+        if term_lines[i] then
+            drawText(term_lines[i], win.x + 8, draw_y, 0x50FA7B)
+            draw_y = draw_y + line_h
+        end
+    end
+
+    -- Нижний разделитель строки ввода
+    local prompt_y = win.y + win.h - 22
+    drawRect(win.x, prompt_y, win.w, 1, 0x2E3440)
+    drawText(">> " .. term_input, win.x + 8, prompt_y + 4, 0xF8F8F2)
+
+    -- Мигающий курсор терминала
+    if math.floor(getUptime() * 2) % 2 == 0 then
+        local cur_cx = win.x + 8 + 24 + string.len(term_input) * 8
+        drawRect(cur_cx, prompt_y + 16, 8, 2, 0x8BE9FD)
+    end
+end
+
+-- --- ПРИЛОЖЕНИЕ 2: SYSTEM MONITOR ---
+local function draw_monitor(win, mx, my, mdown, dt)
+    local used, total = getMemInfo()
+    local used_mb = math.floor(used / (1024 * 1024))
+    local total_mb = math.floor(total / (1024 * 1024))
+
+    local ram_str = string.format("System RAM: %d / %d MB", used_mb, total_mb)
+    drawText(ram_str, win.x + 15, win.y + 20, 0xE5E9F0)
+
+    -- Фоновая полоса
+    drawRect(win.x + 15, win.y + 40, win.w - 30, 12, 0x2E3440)
+    -- Заполненная полоса
+    local ratio = used / total
+    local fill_w = math.floor(ratio * (win.w - 30))
+    drawRect(win.x + 15, win.y + 40, fill_w, 12, 0x0078D7)
+
+    -- Аптайм
+    local uptime = getUptime()
+    local s = math.floor(uptime % 60)
+    local m = math.floor((uptime / 60) % 60)
+    local h = math.floor(uptime / 3600)
+    local uptime_str = string.format("Uptime: %02d:%02d:%02d", h, m, s)
+    drawText(uptime_str, win.x + 15, win.y + 75, 0x888C94)
+end
+
+-- --- ПРИЛОЖЕНИЕ 3: PAINT VECTOR DRAW ---
+local paint_strokes = {} -- Список мазков
+local active_stroke = nil
+local active_color = 0xFF0000
+
+local palette = {
+    0x000000, 0xFF0000, 0x00FF00, 0x0000FF,
+    0xFFFF00, 0xFF00FF, 0x00FFFF, 0xFFFFFF
 }
 
--- Инициализируем анимацию выезжающей панели
--- Длительность 300мс, Ease Out Cubic (тип 3)
-local panel_anim = animCreate(300.0, 3) 
-animTo(panel_anim, 1.0) -- Начинаем анимацию открытия (от 0 до 1)
+local function draw_paint(win, mx, my, mdown, dt)
+    -- Панель инструментов
+    drawRect(win.x, win.y, win.w, 24, 0x2E303B)
+    drawRect(win.x, win.y + 24, win.w, 1, 0x4B5263)
 
--- Функция срабатывает каждые ~16мс
+    -- Палитра
+    for idx, col in ipairs(palette) do
+        local px = win.x + 4 + (idx - 1) * 22
+        drawRect(px, win.y + 3, 18, 18, col)
+        
+        -- Выбор цвета кликом по палитре
+        if mx >= px and mx < px + 18 and my >= win.y + 3 and my < win.y + 21 then
+            if mdown and not last_mdown then
+                active_color = col
+            end
+        end
+    end
+
+    -- Кнопка "Очистить" (CLR)
+    local clr_x = win.x + win.w - 110
+    if button("CLR", clr_x, win.y + 3, 45, 18) then
+        paint_strokes = {}
+    end
+
+    -- Кнопка "Сохранить" (SAVE)
+    local save_x = win.x + win.w - 55
+    if button("SAVE", save_x, win.y + 3, 50, 18) then
+        saveFile("PAINT.TXT", "Equinox Paint Canvas Dump")
+    end
+
+    -- Обработка рисования (холст ниже панели инструментов)
+    local canvas_y = win.y + 25
+    local inside_canvas = (mx >= win.x and mx < win.x + win.w and my >= canvas_y and my < win.y + win.h)
+
+    if inside_canvas and mdown then
+        if not active_stroke then
+            active_stroke = { color = active_color, points = {} }
+            table.insert(paint_strokes, active_stroke)
+        end
+        table.insert(active_stroke.points, { x = mx, y = my })
+    else
+        active_stroke = nil
+    end
+
+    -- Рендеринг всех нарисованных мазков
+    for _, stroke in ipairs(paint_strokes) do
+        local points = stroke.points
+        for k = 1, #points - 1 do
+            local p1 = points[k]
+            local p2 = points[k+1]
+            drawLine(p1.x, p1.y, p2.x, p2.y, stroke.color)
+        end
+    end
+end
+
+-- --- ПРИЛОЖЕНИЕ 4: FILE EXPLORER ---
+local files_list = {}
+local function refresh_explorer()
+    files_list = getFiles()
+end
+
+local function draw_explorer(win, mx, my, mdown, dt)
+    -- Панель путей
+    drawRect(win.x, win.y, win.w, 24, 0x2E303B)
+    drawText("Root VFS Volume Directory", win.x + 8, win.y + 6, 0xD8DEE9)
+
+    -- Кнопка обновления REFR
+    if button("REFR", win.x + win.w - 55, win.y + 3, 50, 18) then
+        refresh_explorer()
+    end
+
+    local draw_y = win.y + 32
+    if #files_list == 0 then
+        drawText("No volumes or files found.", win.x + 20, draw_y, 0x888C94)
+    end
+
+    for idx, f in ipairs(files_list) do
+        local row_y = draw_y + (idx - 1) * 22
+        local is_hover = (mx >= win.x and mx < win.x + win.w and my >= row_y and my < row_y + 20)
+
+        -- Эффект выделения строки
+        if is_hover then
+            drawRect(win.x, row_y, win.w, 20, 0x333644)
+        end
+
+        -- Значок диска (EXT2 синий, FAT желтый)
+        local icon_col = (f.dev == "EXT2_DISK") and 0x5E81AC or 0xEBCB8B
+        drawRect(win.x + 8, row_y + 5, 10, 10, icon_col)
+
+        -- Название и размер
+        drawText(f.name, win.x + 26, row_y + 3, 0xE5E9F0)
+        drawText(f.dev, win.x + win.w - 120, row_y + 3, 0x888C94)
+
+        -- При клике открываем файл в Блокноте
+        if is_hover and mdown and not last_mdown then
+            local notepad_window = nil
+            for _, w in ipairs(windows) do
+                if w.title == "Notepad Text Editor" then
+                    notepad_window = w
+                    break
+                end
+            end
+            
+            if notepad_window then
+                notepad_window.active = true
+                -- Считываем контент
+                local content = readFile(f.name)
+                if content then
+                    _G.notepad_text = content
+                else
+                    _G.notepad_text = "Empty file"
+                end
+                focused_window = notepad_window
+            end
+        end
+    end
+end
+
+-- --- ПРИЛОЖЕНИЕ 5: NOTEPAD TEXT EDITOR ---
+_G.notepad_text = "This is a simple text document.\nYou can write text here using your keyboard."
+
+local function draw_notepad(win, mx, my, mdown, dt)
+    -- Панель Блокнота
+    drawRect(win.x, win.y, win.w, 24, 0x2E303B)
+    drawText("NOTES.TXT", win.x + 8, win.y + 6, 0xE5E9F0)
+
+    -- Кнопка сохранения SAVE
+    if button("SAVE", win.x + win.w - 55, win.y + 3, 50, 18) then
+        saveFile("NOTES.TXT", _G.notepad_text)
+        refresh_explorer()
+    end
+
+    -- Выводим текст построчно
+    local text_y = win.y + 32
+    local lines = {}
+    for line in string.gmatch(_G.notepad_text, "[^\n]+") do
+        table.insert(lines, line)
+    end
+    if _G.notepad_text == "" or string.sub(_G.notepad_text, -1) == "\n" then
+        table.insert(lines, "")
+    end
+
+    for idx, line in ipairs(lines) do
+        drawText(line, win.x + 8, text_y + (idx - 1) * 14, 0xE5E9F0)
+    end
+
+    -- Курсор ввода текста на последней строке
+    if math.floor(getUptime() * 2) % 2 == 0 then
+        local last_line = lines[#lines] or ""
+        local cur_x = win.x + 8 + string.len(last_line) * 8
+        local cur_y = text_y + (#lines - 1) * 14
+        drawRect(cur_x, cur_y, 2, 12, 0x8BE9FD)
+    end
+end
+
+-- --- ИНИЦИАЛИЗАЦИЯ ИКОНОК И ОКОН ---
+local desktop_icons = {
+    { label = "Terminal", icon_col = 0x1E1E24, text = ">_", win_title = "Equinox Terminal" },
+    { label = "Monitor",  icon_col = 0x0078D7, text = "M",  win_title = "System Monitor" },
+    { label = "Paint",    icon_col = 0xFF6B00, text = "P",  win_title = "Vector Paint Brush" },
+    { label = "Explorer", icon_col = 0xF0C040, text = "E",  win_title = "VFS File Explorer" },
+    { label = "Notepad",  icon_col = 0x2B579A, text = "N",  win_title = "Notepad Text Editor" },
+}
+
+-- Инициализируем объекты окон
+table.insert(windows, Window.new("Equinox Terminal", 50, 80, 500, 320, draw_terminal))
+table.insert(windows, Window.new("System Monitor", 600, 80, 320, 140, draw_monitor))
+table.insert(windows, Window.new("Vector Paint Brush", 120, 200, 420, 300, draw_paint))
+table.insert(windows, Window.new("VFS File Explorer", 400, 150, 350, 260, draw_explorer))
+table.insert(windows, Window.new("Notepad Text Editor", 100, 100, 400, 260, draw_notepad))
+
+-- Все окна изначально активны
+for _, win in ipairs(windows) do win.active = true end
+focused_window = windows[1] -- Фокус по умолчанию на Терминале
+
+-- Сканируем файловую систему при старте
+refresh_explorer()
+
+-- --- ГЛАВНЫЙ ИГРОВОЙ ЦИКЛ GUI (ON_TICK) ---
+local dragging_win = nil
+local drag_ox, drag_oy = 0, 0
+
 function on_tick(dt)
-    -- Шагаем анимацию
-    animStep(panel_anim, dt)
-    local t = animEval(panel_anim)
+    local mx, my, mdown = getMouse()
 
-    -- Очищаем экран (красивый темный фон)
-    drawRect(0, 0, 1024, 768, 0x14161B)
+    -- 1. Рендеринг обоев (Красивый плавный космический фон)
+    drawGradient(0, 0, 1024, 728, 0x101216, 0x1E222D, true)
 
-    -- Вычисляем положение выезжающей боковой панели (выезжает слева)
-    local panel_w = 320
-    local panel_x = math.floor((t - 1.0) * panel_w)
+    -- 2. Обработка ввода (Считывание сканкодов клавиш)
+    local key = getLastKey()
+    if key > 0 then
+        -- Поддержка Shift
+        if key == 42 or key == 54 then
+            shift_pressed = true
+        end
 
-    -- Рисуем фон панели градиентом
-    drawGradient(panel_x, 0, panel_w, 768, 0x1E222B, 0x15181F, true)
+        local char = scancodeToAscii(key, shift_pressed)
 
-    -- Текст заголовка
-    drawText("Equinox Control Center", panel_x + 20, 30, 0xFFFFFF)
-    drawRect(panel_x, 65, panel_w, 1, 0x2A2E3D) -- Разделительная линия
-
-    -- 1. Чекбоксы (Возвращают новое состояние!)
-    settings.enable_wifi = checkbox("Enable Wi-Fi Network", panel_x + 20, 90, settings.enable_wifi)
-    settings.enable_blur = checkbox("Enable Glass Blur Effect", panel_x + 20, 130, settings.enable_blur)
-
-    -- 2. Слайдер громкости
-    drawText("System Volume", panel_x + 20, 180, 0x8A8E9B)
-    settings.volume = slider("vol_slider", panel_x + 20, 205, 260, settings.volume, 0.0, 1.0)
-
-    -- 3. Кнопка сброса настроек
-    if button("Reset Options", panel_x + 20, 260, 140, 30) then
-        settings.enable_wifi = false
-        settings.enable_blur = true
-        settings.volume = 0.5
-        -- Перезапускаем анимацию панели для вау-эффекта
-        animTo(panel_anim, 0.0)
-        -- И через секунду открываем обратно
-        -- (Для сложных таймеров можно сделать логику в Lua)
-        animTo(panel_anim, 1.0)
+        -- Куда направлять ввод?
+        if focused_window then
+            if focused_window.title == "Equinox Terminal" then
+                if key == 28 then -- ENTER
+                    table.insert(term_lines, ">> " .. term_input)
+                    process_command(term_input)
+                    term_input = ""
+                elseif key == 14 then -- Backspace
+                    term_input = string.sub(term_input, 1, -2)
+                elseif string.len(char) > 0 and string.byte(char) >= 32 then
+                    term_input = term_input .. char
+                end
+            elseif focused_window.title == "Notepad Text Editor" then
+                if key == 28 then -- ENTER
+                    _G.notepad_text = _G.notepad_text .. "\n"
+                elseif key == 14 then -- Backspace
+                    _G.notepad_text = string.sub(_G.notepad_text, 1, -2)
+                elseif string.len(char) > 0 and string.byte(char) >= 32 then
+                    _G.notepad_text = _G.notepad_text .. char
+                end
+            end
+        end
+    else
+        -- Сброс шифта
+        shift_pressed = false
     end
 
-    -- Статусная строка внизу панели
-    local status = "Status: OK"
-    if settings.enable_wifi then
-        status = "Status: Connecting..."
+    -- 3. Отрисовка рабочего стола (иконок)
+    for i, icon in ipairs(desktop_icons) do
+        local ix = 20
+        local iy = 30 + (i - 1) * 90
+
+        -- Рисуем обводку и тело иконки
+        drawRect(ix, iy, 48, 48, 0x14151B)
+        drawRect(ix + 2, iy + 2, 44, 44, icon.icon_col)
+        drawText(icon.text, ix + 18, iy + 16, 0xFFFFFF)
+        drawText(icon.label, ix + 2, iy + 52, 0xD8DEE9)
+
+        -- Клик на иконку рабочего стола открывает окно
+        if mx >= ix and mx < ix + 48 and my >= iy and my < iy + 64 then
+            if mdown and not last_mdown then
+                for _, win in ipairs(windows) do
+                    if win.title == icon.win_title then
+                        win.active = true
+                        focused_window = win
+                        -- Выводим окно наверх стопки отрисовки
+                        for k, w in ipairs(windows) do
+                            if w == win then
+                                table.remove(windows, k)
+                                break
+                            end
+                        end
+                        table.insert(windows, win)
+                        break
+                    end
+                end
+            end
+        end
     end
-    drawText(status, panel_x + 20, 720, 0x4A8DFD)
+
+    -- 4. Перемещение окон (Drag & Drop) и смена фокуса
+    if mdown and not last_mdown then
+        local clicked_win = nil
+        -- Ищем окно от верхнего слоя к нижнему
+        for i = #windows, 1, -1 do
+            local win = windows[i]
+            if win.active then
+                -- Проверка попадания в заголовок (для перемещения)
+                if mx >= win.x and mx < win.x + win.w and my >= win.y - 25 and my < win.y then
+                    clicked_win = win
+                    break
+                -- Проверка попадания в тело (для смены фокуса)
+                elseif mx >= win.x and mx < win.x + win.w and my >= win.y and my < win.y + win.h then
+                    focused_window = win
+                    -- Перемещаем окно в самый конец списка отрисовки
+                    table.remove(windows, i)
+                    table.insert(windows, win)
+                    break
+                end
+            end
+        end
+
+        if clicked_win then
+            focused_window = clicked_win
+            dragging_win = clicked_win
+            drag_ox = mx - clicked_win.x
+            drag_oy = my - clicked_win.y
+
+            -- Перемещаем наверх стопки
+            for k, w in ipairs(windows) do
+                if w == clicked_win then
+                    table.remove(windows, k)
+                    break
+                end
+            end
+            table.insert(windows, clicked_win)
+        end
+    end
+
+    if not mdown then
+        dragging_win = nil
+    end
+
+    if dragging_win then
+        dragging_win.x = mx - drag_ox
+        dragging_win.y = my - drag_oy
+        -- Ограничение: заголовок не может уползти за верхнюю границу экрана
+        if dragging_win.y < 25 then dragging_win.y = 25 end
+    end
+
+    -- 5. Рендеринг всех активных окон (в порядке слоев)
+    for _, win in ipairs(windows) do
+        win:draw(mx, my, mdown, dt)
+    end
+
+    -- 6. Нижняя системная панель задач (Taskbar)
+    local task_y = 736
+    drawGradient(0, task_y, 1024, 32, 0x1B1F2A, 0x12151D, true)
+    drawRect(0, task_y, 1024, 1, 0x2A2E3D)
+
+    -- Быстрый список открытых окон в левой части
+    local tx_start = 15
+    for _, win in ipairs(windows) do
+        if win.active then
+            local active = (focused_window == win)
+            local tag_col = active and 0x0078D7 or 0x2C313C
+            drawRect(tx_start, task_y + 4, 120, 24, tag_col)
+            drawText(string.sub(win.title, 1, 12), tx_start + 10, task_y + 8, 0xE5E9F0)
+
+            -- Клик по панели задач фокусирует окно
+            if mx >= tx_start and mx < tx_start + 120 and my >= task_y + 4 and my < task_y + 28 then
+                if mdown and not last_mdown then
+                    focused_window = win
+                    for k, w in ipairs(windows) do
+                        if w == win then
+                            table.remove(windows, k)
+                            break
+                        end
+                    end
+                    table.insert(windows, win)
+                end
+            end
+            tx_start = tx_start + 128
+        end
+    end
+
+    -- Статус RAM и Uptime в правой части панели задач
+    local used, total = getMemInfo()
+    local used_mb = math.floor(used / (1024 * 1024))
+    local ram_str = string.format("RAM: %d MB", used_mb)
+    drawText(ram_str, 820, task_y + 10, 0x888C94)
+
+    local uptime = getUptime()
+    local s = math.floor(uptime % 60)
+    local m = math.floor((uptime / 60) % 60)
+    local h = math.floor(uptime / 3600)
+    local clock_str = string.format("%02d:%02d:%02d", h, m, s)
+    drawText(clock_str, 930, task_y + 10, 0xD8DEE9)
+
+    last_mdown = mdown
 end
