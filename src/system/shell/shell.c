@@ -252,7 +252,17 @@ static void shell_execute(char *cmd) {
         cmd_kill(cmd + 5);
     } else if (strcmp(cmd, "killall") == 0) {
         sh_print("killall: terminating user processes...\n");
-        emergency_kill_all_and_shell();
+        // ВАЖНО: эту команду пользователь обычно печатает в GUI-терминале,
+        // то есть мы СЕЙЧАС находимся внутри обработчика прерывания
+        // клавиатуры (interrupt.asm: keyboard_handler -> keyboard_callback
+        // -> shell_handle_char -> shell_execute). EOI ещё не отправлен.
+        // Если позвать emergency_kill_all_and_shell() прямо здесь, он
+        // зайдёт в бесконечный hlt-цикл в shell_emergency_enter() ДО
+        // возврата из IRQ, и keyboard IRQ останется in-service на PIC —
+        // никаких новых нажатий мы не получим, аварийная оболочка
+        // окажется "немой". Поэтому только выставляем флаг: kmain в
+        // главном цикле его подхватит, уже вне IRQ-контекста.
+        shell_emergency_requested = true;
     } else if (strcmp(cmd, "reboot") == 0) {
         cmd_reboot();
     } else if (memcmp(cmd, "run ", 4) == 0) {
