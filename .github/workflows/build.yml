@@ -1,0 +1,77 @@
+name: build
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Не держим в очереди старые ребилды одного и того же PR — отменяем их.
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-iso:
+    name: Build kernel + apps + ISO (Linux)
+    runs-on: ubuntu-latest
+    # Контейнер с уже собранным x86_64-elf cross-compiler — экономит ~20 мин
+    # на ребилд GCC. Образ — стандартный для OSDev-туториалов.
+    container:
+      image: randomdude/gcc-cross-x86_64-elf:latest
+
+    steps:
+      - name: Install host build tools
+        # Образ Debian-based, но без nasm/xorriso/python — доставляем.
+        run: |
+          set -eux
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            nasm xorriso make python3 git ca-certificates
+          # Делаем 'python' алиасом для 'python3' (WINDOWS_ext2.py зовёт python).
+          ln -sf /usr/bin/python3 /usr/local/bin/python
+
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          # На PR'ах GitHub чекаутит merge-commit head — этого достаточно.
+
+      - name: Show toolchain versions
+        run: |
+          x86_64-elf-gcc --version | head -1
+          x86_64-elf-ld  --version | head -1
+          nasm --version
+          xorriso --version 2>&1 | head -1
+          make --version | head -1
+
+      - name: Build (make ci)
+        # ci-таргет: kernel.elf + apps + doom.elf + iso, БЕЗ hdd.img.
+        # hdd.img в CI не нужен — нам важна только сборка кода.
+        run: |
+          set -eux
+          make -j"$(nproc)" ci
+
+      - name: Sanity-check artefacts
+        run: |
+          set -eux
+          test -f kernel.elf
+          test -f equos.iso
+          test -f iso_root/sys/kernel.elf
+          test -f iso_root/bin/sysgui.elf
+          test -f iso_root/bin/doom.elf
+          test -f iso_root/bin/snake.elf
+          test -f iso_root/res/sysgui/init.lua
+          ls -lh kernel.elf equos.iso
+          file kernel.elf || true
+
+      - name: Upload ISO artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: equos-iso-${{ github.sha }}
+          path: |
+            equos.iso
+            kernel.elf
+          if-no-files-found: error
+          retention-days: 14
