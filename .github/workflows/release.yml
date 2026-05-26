@@ -89,7 +89,8 @@ jobs:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: ${{ steps.meta.outputs.name }}
           body_path: release-notes.md
-          prerelease: true
+          prerelease: false
+          make_latest: "true"
           fail_on_unmatched_files: true
           files: |
             equos.iso
