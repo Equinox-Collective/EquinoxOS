@@ -1,0 +1,219 @@
+name: build
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Не держим в очереди старые ребилды одного и того же PR — отменяем их.
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# enGUI собирается только в составе EquinoxOS (Makefile подтягивает SDK
+# через ../../sdk/lib/*.o), поэтому в CI мы:
+#   1) чекаутим EquinoxOS,
+#   2) подменяем подмодуль app/sysgui содержимым этого PR,
+#   3) запускаем штатный `make ci` EquinoxOS — он строит SDK, apps,
+#      sysgui.elf и iso. Если PR ломает компиляцию sysgui на любой
+#      из платформ, билд падает здесь.
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Linux job — быстрый. Cross-toolchain GCC 15.x в готовом контейнере.
+  # ---------------------------------------------------------------------------
+  build-linux:
+    name: Linux (Ubuntu, cross-gcc container)
+    runs-on: ubuntu-latest
+    container:
+      image: randomdude/gcc-cross-x86_64-elf:latest
+
+    steps:
+      - name: Install host build tools
+        run: |
+          set -eux
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            nasm xorriso make python3 git ca-certificates
+          ln -sf /usr/bin/python3 /usr/local/bin/python
+
+      - name: Checkout enGUI (this PR)
+        uses: actions/checkout@v4
+        with:
+          path: engui-pr
+
+      - name: Checkout EquinoxOS (without sysgui submodule)
+        uses: actions/checkout@v4
+        with:
+          repository: Equinox-Collective/EquinoxOS
+          path: equinox
+          # Не тянем подмодули — мы их заменим этим PR.
+          submodules: false
+
+      - name: Inject this PR as app/sysgui
+        run: |
+          set -eux
+          # Удаляем placeholder/.git-файл, оставшийся от submodule init,
+          # и кладём содержимое PR-чекаута на его место.
+          rm -rf equinox/app/sysgui
+          cp -a engui-pr equinox/app/sysgui
+          # На всякий случай убираем вложенный .git, чтобы make/xorriso
+          # не паниковали.
+          rm -rf equinox/app/sysgui/.git equinox/app/sysgui/.github
+          ls -la equinox/app/sysgui | head -20
+
+      - name: Show toolchain versions
+        run: |
+          x86_64-elf-gcc --version | head -1
+          x86_64-elf-ld  --version | head -1
+          nasm --version
+          xorriso --version 2>&1 | head -1
+          make --version | head -1
+
+      - name: Build (make ci) in EquinoxOS with PR sysgui
+        run: |
+          set -eux
+          cd equinox
+          make -j"$(nproc)" ci
+
+      - name: Sanity-check sysgui artefacts
+        run: |
+          set -eux
+          cd equinox
+          test -f iso_root/bin/sysgui.elf
+          test -f iso_root/res/sysgui/init.lua
+          ls -lh iso_root/bin/sysgui.elf
+
+      - name: Upload sysgui artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sysgui-linux-${{ github.sha }}
+          path: |
+            equinox/iso_root/bin/sysgui.elf
+            equinox/iso_root/res/sysgui/init.lua
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Windows job — проверяет, что Makefile / shell-эскейпы / cmd-flow EquinoxOS
+  # всё ещё работают с подложенным sysgui из этого PR. Toolchain —
+  # статически слинкованный x86_64-elf cross-gcc 7.1 от lordmilko.
+  # Кэшируем zip, чтобы не качать 280 МБ на каждый PR.
+  # ---------------------------------------------------------------------------
+  build-windows:
+    name: Windows (windows-latest, x86_64-elf-tools)
+    runs-on: windows-latest
+
+    env:
+      TOOLCHAIN_VERSION: 7.1.0
+      TOOLCHAIN_URL: https://github.com/lordmilko/i686-elf-tools/releases/download/7.1.0/x86_64-elf-tools-windows.zip
+      TOOLCHAIN_DIR: C:\opt\x86_64-elf-tools
+
+    steps:
+      - name: Checkout enGUI (this PR)
+        uses: actions/checkout@v4
+        with:
+          path: engui-pr
+
+      - name: Checkout EquinoxOS (without sysgui submodule)
+        uses: actions/checkout@v4
+        with:
+          repository: Equinox-Collective/EquinoxOS
+          path: equinox
+          submodules: false
+
+      - name: Inject this PR as app/sysgui
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path 'equinox/app/sysgui') {
+            Remove-Item -Recurse -Force 'equinox/app/sysgui'
+          }
+          New-Item -ItemType Directory -Force -Path 'equinox/app/sysgui' | Out-Null
+          # Robocopy: код 0..7 — успех, всё что выше — ошибка.
+          $rc = (Start-Process -FilePath 'robocopy.exe' `
+                  -ArgumentList 'engui-pr', 'equinox/app/sysgui', '/MIR', '/NFL', '/NDL', '/NJH', '/NJS', '/NP' `
+                  -Wait -PassThru -NoNewWindow).ExitCode
+          if ($rc -ge 8) { exit $rc } else { exit 0 }
+          # Чистим .git/.github уже после копирования, см. отдельный шаг.
+
+      - name: Drop nested .git / .github from injected sysgui
+        shell: pwsh
+        run: |
+          if (Test-Path 'equinox/app/sysgui/.git')     { Remove-Item -Recurse -Force 'equinox/app/sysgui/.git' }
+          if (Test-Path 'equinox/app/sysgui/.github')  { Remove-Item -Recurse -Force 'equinox/app/sysgui/.github' }
+          Get-ChildItem 'equinox/app/sysgui' | Select-Object -First 20
+
+      - name: Install nasm + make via Chocolatey
+        shell: pwsh
+        run: |
+          choco install -y --no-progress nasm make
+          Add-Content $env:GITHUB_PATH 'C:\Program Files\NASM'
+
+      - name: Install xorriso via MSYS2
+        shell: pwsh
+        run: |
+          & 'C:\msys64\usr\bin\pacman.exe' -Sy --noconfirm
+          & 'C:\msys64\usr\bin\pacman.exe' -S  --noconfirm --needed xorriso
+          Add-Content $env:GITHUB_PATH 'C:\msys64\usr\bin'
+
+      - name: Cache cross-toolchain (x86_64-elf-gcc)
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TOOLCHAIN_DIR }}
+          key: x86_64-elf-tools-windows-${{ env.TOOLCHAIN_VERSION }}
+
+      - name: Download + extract x86_64-elf cross-toolchain
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = 'toolchain.zip'
+          Write-Host "Downloading $env:TOOLCHAIN_URL ..."
+          Invoke-WebRequest -Uri $env:TOOLCHAIN_URL -OutFile $zip -UseBasicParsing
+          New-Item -ItemType Directory -Force -Path $env:TOOLCHAIN_DIR | Out-Null
+          Write-Host "Extracting to $env:TOOLCHAIN_DIR ..."
+          Expand-Archive -Path $zip -DestinationPath $env:TOOLCHAIN_DIR -Force
+          Remove-Item $zip
+
+      - name: Add cross-toolchain to PATH
+        shell: pwsh
+        run: |
+          Add-Content $env:GITHUB_PATH "$env:TOOLCHAIN_DIR\bin"
+
+      - name: Show toolchain versions
+        shell: cmd
+        run: |
+          x86_64-elf-gcc --version
+          x86_64-elf-ld --version
+          nasm --version
+          xorriso --version 2>&1
+          make --version
+
+      - name: Build (make ci) in EquinoxOS with PR sysgui
+        shell: cmd
+        # Параллелизация make на Windows со spawn'ом cmd.exe в каждом
+        # рецепте — нестабильна (race на mkdir). Поэтому без -j.
+        working-directory: equinox
+        run: make ci
+
+      - name: Sanity-check sysgui artefacts
+        shell: cmd
+        working-directory: equinox
+        run: |
+          if not exist iso_root\bin\sysgui.elf ( echo missing sysgui.elf & exit /b 1 )
+          if not exist iso_root\res\sysgui\init.lua ( echo missing init.lua & exit /b 1 )
+          dir iso_root\bin\sysgui.elf
+
+      - name: Upload sysgui artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sysgui-windows-${{ github.sha }}
+          path: |
+            equinox/iso_root/bin/sysgui.elf
+            equinox/iso_root/res/sysgui/init.lua
+          if-no-files-found: error
+          retention-days: 14
