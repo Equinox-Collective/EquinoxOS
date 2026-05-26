@@ -34,4 +34,29 @@ void task_kill_self();
 bool task_terminate_by_pid(uint64_t pid);
 void task_list_all();
 
+// Доступ к глобальному списку задач (циклический односвязный).
+// Возвращает голову, либо NULL, если планировщик ещё не поднят.
+// Использовать с осторожностью: список — кольцо, идти до тех пор,
+// пока next != head.
+task_t* task_get_list_head(void);
+
+// Аккуратно убивает все пользовательские задачи кроме idle/init
+// (id == 1). Используется в `killall` и SUPER+ALT+F10. Сама задача,
+// если она пользовательская, должна позаботиться о yield()/kill_self
+// отдельно — здесь мы только метим running=false; планировщик
+// доразберётся в ближайшем тике.
+// Возвращает кол-во убитых пользовательских задач.
+int task_kill_all_user_count(void);
+
+// Снимок задачи по индексу в кольце (начиная с головы, индексация 0..N-1).
+// Заполняет out_pid/out_cr3/out_brk/out_running и возвращает true, если
+// задача с таким индексом существует. iff false — кольцо короче.
+typedef struct {
+    uint64_t pid;
+    uint64_t cr3;
+    uint64_t brk;
+    bool running;
+} task_snapshot_t;
+bool task_snapshot_at(int idx, task_snapshot_t *out);
+
 #endif

@@ -589,6 +589,40 @@ void syscall_handler(syscall_regs_t *regs) {
                                            (void *)regs->rsi);
     break;
   case 67: mq_close((int)regs->rdi); break;
+  /* ---- task introspection / control (ps / kill / killall) ------------ */
+  case 70: { // SYS_TASK_INFO
+    int idx = (int)regs->rdi;
+    struct user_task_info {
+      uint64_t pid;
+      uint64_t cr3;
+      uint64_t brk;
+      uint32_t running;
+      uint32_t _pad;
+    } *uout = (void *)regs->rsi;
+    task_snapshot_t snap;
+    if (uout && task_snapshot_at(idx, &snap)) {
+      stac();
+      uout->pid     = snap.pid;
+      uout->cr3     = snap.cr3;
+      uout->brk     = snap.brk;
+      uout->running = snap.running ? 1u : 0u;
+      uout->_pad    = 0;
+      clac();
+      regs->rax = 1;
+    } else {
+      regs->rax = 0;
+    }
+    break;
+  }
+  case 71: { // SYS_TASK_KILL
+    uint64_t pid = regs->rdi;
+    regs->rax = task_terminate_by_pid(pid) ? 1 : 0;
+    break;
+  }
+  case 72: { // SYS_TASK_KILLALL
+    regs->rax = (uint64_t)task_kill_all_user_count();
+    break;
+  }
   default:
     break;
   }
