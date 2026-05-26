@@ -2,6 +2,15 @@ CC = x86_64-elf-gcc
 LD = x86_64-elf-ld
 ASM = nasm
 
+ifeq ($(OS),Windows_NT)
+  # GitHub's Windows image adds MSYS2 to PATH for xorriso, which also exposes
+  # sh.exe. GNU Make will otherwise pick that POSIX shell and then fail on the
+  # cmd.exe-style Windows recipes below (`if not exist ...`). Force cmd.exe for
+  # Windows builds so local mingw/choco make and CI use the same recipe syntax.
+  SHELL := cmd.exe
+  .SHELLFLAGS := /C
+endif
+
 # --- HOST SHELL ABSTRACTION ----------------------------------------------------
 # Чтобы Makefile собирался И на Windows (cmd.exe, mingw32-make), И на Linux/CI,
 # обёртываем все file-ops в макросы и переключаем их по $(OS). Все pattern-rules
@@ -87,12 +96,13 @@ DOOM_OBJS = $(patsubst $(DOOM_DIR)/%.c, $(OBJ_DIR)/doom/%.o, $(DOOM_SRCS))
 
 # --- MAIN RULES ---
 
-# Полный билд (как раньше) — собирает всё и генерит hdd.img.
-all: setup kernel.elf apps doom.elf create_hdd iso
+# Full local build: compile everything, generate hdd.img, then build the ISO.
+# Keep these targets behind explicit dependencies so `make -j` cannot run
+# `create_hdd` before the app binaries (notably bin/doom.elf) are ready.
+all: create_hdd iso
 
-# CI-вариант — без hdd.img. Нужен PR-чекам, чтобы они не ждали 64 МБ ext2
-# и не зависели от состояния iso_root/. Артефактом всё равно остаётся .iso.
-ci: setup kernel.elf apps doom.elf iso
+# CI variant: build the ISO artifacts without generating hdd.img.
+ci: iso
 
 # --- SETUP -------------------------------------------------------------------
 ifeq ($(OS),Windows_NT)
@@ -113,7 +123,7 @@ setup:
 endif
 
 # --- KERNEL LINK -------------------------------------------------------------
-kernel.elf: $(KERNEL_OBJS)
+kernel.elf: setup $(KERNEL_OBJS)
 	$(LD) $(LDFLAGS) $(KERNEL_OBJS) -o kernel.elf
 	@$(call CP_F,kernel.elf,$(ISO_ROOT)/sys/kernel.elf)
 
@@ -138,7 +148,7 @@ $(OBJ_DIR)/doom/%.o: $(DOOM_DIR)/%.c
 	@$(call MKDIR_P,$(OBJ_DIR)/doom)
 	$(CC) $(USER_CFLAGS) -DDOOMGENERIC_RESX=640 -DDOOMGENERIC_RESY=400 -DFEATURE_SOUND -c $< -o $@
 
-doom.elf: $(SDK_OBJS) $(DOOM_OBJS)
+doom.elf: setup $(SDK_OBJS) $(DOOM_OBJS)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $(DOOM_OBJS) -o $(ISO_ROOT)/bin/doom.elf
 
 # --- APPS BUILD RULES --------------------------------------------------------
@@ -146,7 +156,11 @@ APP_SRCS = $(wildcard app/*.c)
 APP_OBJS = $(patsubst app/%.c,app/%.o,$(APP_SRCS))
 APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_ROOT)/bin/htmlview.elf $(ISO_ROOT)/bin/niplay.elf $(ISO_ROOT)/bin/widget_demo.elf $(ISO_ROOT)/bin/ipc_test.elf
 
-apps: $(SDK_OBJS) $(APP_ELFS_SIMPLE) sysgui_app
+# Object builds need the Windows directory tree from setup before they start;
+# this matters when users run `make -j`.
+$(KERNEL_OBJS) $(SDK_OBJS) $(APP_OBJS) $(DOOM_OBJS): | setup
+
+apps: setup $(SDK_OBJS) $(APP_ELFS_SIMPLE) sysgui_app
 
 $(ISO_ROOT)/bin/%.elf: app/%.o $(SDK_OBJS)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< -o $@
@@ -181,16 +195,44 @@ clean:
 	@rm -f app/sysgui/sysgui.elf
 endif
 
-create_hdd:
+create_hdd: kernel.elf apps doom.elf
 	@echo --- Generating EXT2 hdd.img ---
 	python WINDOWS_ext2.py
 
-iso:
+iso: kernel.elf apps doom.elf
 	@$(call RM_F,equos.iso)
 	xorriso -as mkisofs -b boot/limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table --efi-boot EFI/BOOT/limine-bios-cd.bin -efi-boot-part --efi-boot-image -o equos.iso $(ISO_ROOT)
 
+# --- QEMU ---
+#
+# Раньше run/cleanrun жёстко включали `-d int,guest_errors,mmu -D qemu.log`,
+# из-за чего QEMU писал КАЖДОЕ прерывание (включая каждый int $0x80 и каждый
+# тик таймера на 1 кГц) в файл — это легко режет производительность в 5-10
+# раз и визуально превращает рабочий стол в "10 FPS".
+#
+# Делим на два таргета:
+#   make run        — обычный запуск, никакого логирования, пытаемся включить
+#                     железное ускорение (whpx на Windows, kvm на Linux, hvf
+#                     на macOS) с откатом на TCG, если ничего не доступно.
+#   make run-debug  — диагностический запуск с записью всех прерываний/MMU
+#                     в qemu.log. Использовать только при отладке падений.
+
+QEMU       := qemu-system-x86_64
+QEMU_BASE  := -m 512M -boot d \
+              -drive file=hdd.img,format=raw,index=0,media=disk \
+              -cdrom equos.iso \
+              -serial stdio \
+              -netdev user,id=n0,hostfwd=tcp::2222-:22 \
+              -device rtl8139,netdev=n0 \
+              -device ac97,audiodev=snd0 -audiodev dsound,id=snd0
+# Перебор акселераторов: первый рабочий используется, иначе TCG.
+QEMU_ACCEL := -accel whpx,kernel-irqchip=off -accel kvm -accel hvf -accel tcg
+
 run:
-	qemu-system-x86_64 -m 512M -boot d -drive file=hdd.img,format=raw,index=0,media=disk -cdrom equos.iso -serial stdio -netdev user,id=n0,hostfwd=tcp::2222-:22 -device rtl8139,netdev=n0 -device ac97,audiodev=snd0 -audiodev dsound,id=snd0 -d int,guest_errors,mmu -D qemu.log 
+	$(QEMU) $(QEMU_BASE) $(QEMU_ACCEL)
+
+run-debug:
+	$(QEMU) $(QEMU_BASE) -d int,guest_errors,mmu -D qemu.log
 
 cleanrun: clean all run
 

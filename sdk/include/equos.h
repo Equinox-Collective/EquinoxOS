@@ -44,6 +44,19 @@
 #define SYS_TASK_KILL   71  /* (pid)         -> 1 ok, 0 fail           */
 #define SYS_TASK_KILLALL 72 /* ()            -> number of tasks killed */
 
+/* --- Ring-0 shell bridge --------------------------------------------------
+ * Выполнить готовую строку командой ring-0 шелла (см. shellsyntx.h /
+ * shell.c). Вывод собирается во временный sink и копируется в user-buf.
+ *
+ *   rdi = const char *line      (NUL-terminated, < 256 байт)
+ *   rsi = char *user_out_buf    (куда писать вывод, NUL-terminated)
+ *   rdx = uint64_t out_buf_len  (размер user_out_buf, в байтах)
+ *
+ * Возвращает количество байт, записанных в out_buf (без NUL).
+ */
+#define SYS_SHELL_EXEC  73
+#define SYS_GET_FG_APP  74   /* () -> PID активного foreground-app, 0 если нет */
+
 typedef struct {
   uint64_t pid;
   uint64_t cr3;

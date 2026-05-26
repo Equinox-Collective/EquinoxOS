@@ -51,6 +51,14 @@ bool should_run_app = false;
 volatile uint8_t last_scancode = 0;
 static EquinoxAPI app_api;
 
+// PID активного foreground-приложения (того, кто последним вызвал
+// SYS_DRAW_BUFFER). Используется в SYS_GET_SCANCODE/SYS_GET_MOUSE_FULL,
+// чтобы ввод не делился между sysgui и приложением на лету — иначе
+// нажатия в doom рандомно "съедал" sysgui (см. цикл polling'а в
+// app/sysgui/main.c). 0 = нет foreground-app, ввод идёт всем.
+// Сбрасывается в SYS_EXIT и task_terminate_by_pid.
+volatile uint64_t fg_app_pid = 0;
+
 // --- LIMINE REQUESTS ---
 #define LIMINE_REQ __attribute__((used, section(".limine_requests")))
 
@@ -98,24 +106,72 @@ uint8_t sys_get_scancode() {
   return code;
 }
 
-// Вызывается приложением для отрисовки
+// Вызывается приложением для отрисовки одного кадра в (x, y, w, h).
+//
+// История: раньше эта функция писала кадр в `app_win->buffer`, который
+// затем растеризовался kernel-side композитором (`gui_compositor_render`).
+// Сейчас `gui_init()` и `update_gui()` в kmain закомменчены — окнами
+// заведует ring-3 sysgui, а `app_win == NULL`. Из-за этого все вызовы
+// `SYS_DRAW_BUFFER` (doom, bmpview, htmlview, snake...) уходили в
+// пустоту, и пользователь видел рабочий стол sysgui вместо приложения.
+//
+// Минимальный фикс — бьём кадр напрямую в VESA-фронтбуфер. Sysgui
+// со своей стороны держит локальный backbuffer и композитит его в vram
+// только при `need_redraw` (движение мыши/клавиша/анимация, см.
+// `app/sysgui/main.c`). Приложения, которые делают `SYS_DRAW_BUFFER`
+// каждый кадр (~30 fps у doom), как правило выигрывают эту гонку и
+// остаются видимы; sysgui перерисует поверх, только если пользователь
+// взаимодействует с интерфейсом.
 void sys_draw_app_buffer(int x, int y, int w, int h, uint32_t *buffer) {
-  if (!app_win)
+  if (!buffer || w <= 0 || h <= 0)
     return;
 
-  // Автоматически подстраиваем размер окна под приложение!
-  if (app_win->w != w || app_win->h != h) {
-    window_resize(app_win, w, h);
+  extern uintptr_t fb_base_addr;
+  extern uint32_t screen_width;
+  extern uint32_t screen_height;
+  extern uint32_t screen_pitch;
+
+  // Тот, кто рисует кадры — и есть foreground app. Захватываем фокус
+  // ввода: пока эта задача жива, sysgui не получит ни клавиатуру, ни
+  // мышь (см. case 9 / case 7 в src/system/usr/syscall.c).
+  //
+  // ВАЖНО: sysgui сам тоже идёт через SYS_DRAW_BUFFER — `eid_end()` в
+  // sdk/lib/eid.c делает `_syscall(SYS_DRAW_BUFFER, 0, 0, screen_w,
+  // screen_h, backbuffer)`. Если мы засчитаем его как foreground, то
+  // sysgui увидит SYS_GET_FG_APP == свой PID, решит, что есть полно­
+  // экранная игра, и навсегда перестанет композитить — рабочий стол
+  // и курсор зависнут на первом же кадре. Поэтому полно­экранные
+  // блиты (w == screen_width && h == screen_height, обычно от
+  // компоновщика) фокус НЕ забирают.
+  bool is_fullscreen = (x == 0 && y == 0 &&
+                        w == (int)screen_width && h == (int)screen_height);
+  if (!is_fullscreen && current_task && current_task->id != 1) {
+    fg_app_pid = current_task->id;
   }
 
-  if (!app_win->active) {
-    app_win->active = true;
-    window_bring_to_front(app_win);
-    focused_window = app_win;
-  }
+  // Клампим прямоугольник к экрану — иначе при больших разрешениях окна
+  // (например 640x400 у doom + смещение) мы бы вылезли за фреймбуфер.
+  if (x < 0) x = 0;
+  if (y < 0) y = 0;
+  if (x >= (int)screen_width || y >= (int)screen_height) return;
+  if (x + w > (int)screen_width)  w = (int)screen_width  - x;
+  if (y + h > (int)screen_height) h = (int)screen_height - y;
+  if (w <= 0 || h <= 0) return;
 
-  // Копируем кадр целиком (теперь размеры точно совпадают)
-  memcpy(app_win->buffer, buffer, w * h * 4);
+  // Копируем построчно: pitch у VESA ≥ width*4 (выравнивание), поэтому
+  // используем pitch для назначения и ширину кадра для источника.
+  // Раньше внутренний цикл был побайтным `dst[col] = src[col]`, который
+  // gcc -O2 не разворачивал в rep movsq; на 640×400 это давало ~25 мс
+  // блита на кадр и совместно с sysgui-композитингом ронял doom до
+  // ~10 FPS. memcpy на freestanding gcc раскрывается в rep movsb/q.
+  size_t row_bytes = (size_t)w * 4;
+  for (int row = 0; row < h; row++) {
+    uint8_t *dst = (uint8_t *)(fb_base_addr +
+                               (uintptr_t)(y + row) * screen_pitch +
+                               (uintptr_t)x * 4);
+    uint8_t *src = (uint8_t *)(buffer + (size_t)row * (size_t)w);
+    memcpy(dst, src, row_bytes);
+  }
 }
 // =========================================================================
 //                              MAIN LOOPS & INIT
@@ -422,6 +478,9 @@ void kmain(void) {
   uint64_t font_size = 0;
   void *font_ptr = sys_get_file("font.psf", &font_size);
   vesa_set_font(font_ptr);
+  vesa_set_font_size(font_size); /* нужно SYS_GET_FONT, чтобы замаппить
+                                    в user-space все страницы шрифта, а не
+                                    только первые 4 KiB (см. syscall.c) */
   serial_puts(COM1, "=== EquinoxOS Ready ===\n");
   exec_from_disk("bin/sysgui.elf"); // Загружаем ELF с диска и отдаем планировщику
   serial_puts(COM1, "enGUI spawned as Ring 3 init process\n");

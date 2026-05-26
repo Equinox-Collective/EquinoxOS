@@ -137,13 +137,21 @@ bool eqstart_perform_tests() {
                     "FPU math error - CPU features not properly enabled");
   }
 
-  // Тест 5: Heartbeat (PIT)
+  // Тест 5: Heartbeat (PIT).
+  //
+  // Раньше тут был `for (volatile int i = 0; i < 15000000; i++);` без `hlt`.
+  // На WHPX/KVM с быстрым CPU этот busy-loop отрабатывал заметно быстрее,
+  // чем успевал тикнуть PIT (~1 мс), и тест случайным образом валился с
+  // "PIT Timer is not ticking. Interrupts dead?" на каждом 2-3 запуске.
+  // Чиним: ждём ДО 100 мс в `hlt`-цикле, при первом же тике объявляем PIT
+  // живым. CPU спит, гипервизор гарантированно прокидывает прерывание.
   log_info("TIME: Testing interrupt fire rate...");
   uint32_t start_tick = tick;
-  // Короткое ожидание
-  for (volatile int i = 0; i < 15000000; i++)
-    ;
-  if (tick <= start_tick) {
+  uint32_t deadline = start_tick + 100; // ждём максимум 100 мс
+  while (tick == start_tick && tick < deadline) {
+    __asm__ volatile("hlt");
+  }
+  if (tick == start_tick) {
     log_status("FROZEN", 0xFF0000);
     CERBERUS_ASSERT(false, "PIT Timer is not ticking. Interrupts dead?");
   }
