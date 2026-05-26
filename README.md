@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/Equinox-Collective/EquinoxOS/refs/heads/main/resources/logo.png" alt="EquinoxOS" width="120" onerror="this.style.display='none'">
+<img src="https://raw.githubusercontent.com/Equinox-Collective/EquinoxOS/refs/heads/main/resources/logo.svg" alt="EquinoxOS" width="120" onerror="this.style.display='none'">
 
 # EquinoxOS
 
