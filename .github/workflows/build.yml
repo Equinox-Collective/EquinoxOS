@@ -112,25 +112,39 @@ jobs:
           & 'C:\msys64\usr\bin\pacman.exe' -S  --noconfirm --needed xorriso
           Add-Content $env:GITHUB_PATH 'C:\msys64\usr\bin'
 
-      - name: Cache cross-toolchain (x86_64-elf-gcc)
+      # Кэшируем только сам zip (один файл ~280 МБ), а распаковываем
+      # каждый раз 7-Zip'ом. На Windows это в разы быстрее, чем кэшировать
+      # распакованную директорию (тысячи мелких файлов) или использовать
+      # Expand-Archive (он жутко тормозит на больших архивах).
+      - name: Cache toolchain zip
         id: cache-toolchain
         uses: actions/cache@v4
         with:
-          path: ${{ env.TOOLCHAIN_DIR }}
-          key: x86_64-elf-tools-windows-${{ env.TOOLCHAIN_VERSION }}
+          path: ${{ runner.temp }}\toolchain.zip
+          key: x86_64-elf-tools-windows-${{ env.TOOLCHAIN_VERSION }}-zip-v2
 
-      - name: Download + extract x86_64-elf cross-toolchain
+      - name: Download toolchain zip (cache miss)
         if: steps.cache-toolchain.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $zip = 'toolchain.zip'
-          Write-Host "Downloading $env:TOOLCHAIN_URL ..."
-          Invoke-WebRequest -Uri $env:TOOLCHAIN_URL -OutFile $zip -UseBasicParsing
+          $zip = Join-Path $env:RUNNER_TEMP 'toolchain.zip'
+          Write-Host "Downloading $env:TOOLCHAIN_URL -> $zip"
+          # curl.exe качает GH releases быстрее, чем Invoke-WebRequest
+          # (тот по умолчанию буферизует в память и тормозит на больших файлах).
+          curl.exe -L --fail --silent --show-error -o $zip $env:TOOLCHAIN_URL
+          Get-Item $zip | Format-List Length
+
+      - name: Extract toolchain with 7-Zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'toolchain.zip'
           New-Item -ItemType Directory -Force -Path $env:TOOLCHAIN_DIR | Out-Null
-          Write-Host "Extracting to $env:TOOLCHAIN_DIR ..."
-          Expand-Archive -Path $zip -DestinationPath $env:TOOLCHAIN_DIR -Force
-          Remove-Item $zip
+          # 7-Zip предустановлен на windows-latest и распаковывает в ~5x
+          # быстрее, чем Expand-Archive (Compress.FileSystem).
+          & 'C:\Program Files\7-Zip\7z.exe' x $zip "-o$($env:TOOLCHAIN_DIR)" -y -bso0 -bsp0
+          if ($LASTEXITCODE -ne 0) { throw "7z extraction failed: $LASTEXITCODE" }
 
       - name: Add cross-toolchain to PATH
         shell: pwsh
