@@ -225,7 +225,16 @@ void vesa_draw_psf_char(psf_t *font, char c, int x, int y, uint32_t fg) {
   }
 }
 
+/* Размер файла шрифта в байтах. Нужен SYS_GET_FONT, чтобы маппить
+ * пользователю достаточное число страниц (PSF1 8x16 = 4100 байт, что
+ * перешагивает первую 4 KiB страницу для последних глифов 0xFE/0xFF). */
+static uint64_t current_font_size = 0;
+
 void vesa_set_font(void *font_addr) { current_font = (psf1_t *)font_addr; }
+
+void vesa_set_font_size(uint64_t size) { current_font_size = size; }
+
+uint64_t vesa_get_font_size(void) { return current_font_size; }
 
 // =========================================================================
 //                         VFS УСТРОЙСТВО (/dev/fb0)

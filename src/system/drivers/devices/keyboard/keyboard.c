@@ -96,10 +96,16 @@ static int scancode_to_fkey(uint8_t code) {
 void keyboard_callback(void) {
   uint8_t scancode = inb(0x60);
 
-  // 1. Extended prefix. Просто запоминаем и выходим: реальный код придёт
+  // 1. Extended prefix. Запоминаем для собственной интерпретации
+  // модификаторов (super/правый-ctrl и т.д.) И одновременно кладём 0xE0
+  // в кольцевой буфер: иначе ring-3 приложения, читающие через
+  // SYS_GET_SCANCODE (например, doom — см. DG_GetKey в
+  // app/doom/doomgeneric_equos.c), никогда не увидят prefix\'а и не
+  // распознают стрелки/правые модификаторы. Реальный код придёт
   // следующим прерыванием.
   if (scancode == 0xE0) {
     extended = true;
+    keyboard_push(0xE0);
     return;
   }
 
@@ -111,11 +117,23 @@ void keyboard_callback(void) {
   // 2. Модификаторы.
   //    Левый Ctrl: 0x1D / 0x9D. Правый Ctrl: E0 0x1D / E0 0x9D.
   //    Левый Alt:  0x38 / 0xB8. Правый Alt (AltGr): E0 0x38 / E0 0xB8.
+  //    Левый Shift:0x2A / 0xAA. Правый Shift:      0x36 / 0xB6.
   //    Super (Win) — ТОЛЬКО extended: E0 0x5B / E0 0x5C.
+  //
+  // ВАЖНО про Shift: shift_pressed раньше обновлялся только как побочный
+  // эффект из get_ascii_char(), а get_ascii_char() ниже не вызывается для
+  // release-скан-кодов (есть `if (is_release) return;`). В итоге, если
+  // пользователь нажимал Shift и одновременно ловил emergency (Super+Alt
+  // +F10) — release-код 0xAA пролетал мимо, shift_pressed залипал в true
+  // и весь последующий ввод шёл в верхнем регистре, причём отменить это
+  // было невозможно. Теперь обновляем shift_pressed прямо здесь, на
+  // press и release, до раннего возврата по is_release.
   if (code == 0x1D) {
     ctrl_pressed = !is_release;
   } else if (code == 0x38) {
     alt_pressed = !is_release;
+  } else if (code == 0x2A || code == 0x36) {
+    shift_pressed = !is_release;
   } else if (was_extended && (code == 0x5B || code == 0x5C)) {
     super_pressed = !is_release;
   }
