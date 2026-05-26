@@ -13,30 +13,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-iso:
-    name: Build kernel + apps + ISO (Linux)
+  # ---------------------------------------------------------------------------
+  # Linux job — быстрый. Делает реальный correctness-чек (cross-toolchain GCC
+  # 15.x в готовом контейнере). Падает при любом warning'е, который у нас в
+  # CFLAGS не whitelisted, но Wall/Wextra — не -Werror, так что warnings
+  # пройдут, упадёт только при настоящих ошибках компиляции/линковки.
+  # ---------------------------------------------------------------------------
+  build-linux:
+    name: Linux (Ubuntu, cross-gcc container)
     runs-on: ubuntu-latest
-    # Контейнер с уже собранным x86_64-elf cross-compiler — экономит ~20 мин
-    # на ребилд GCC. Образ — стандартный для OSDev-туториалов.
     container:
       image: randomdude/gcc-cross-x86_64-elf:latest
 
     steps:
       - name: Install host build tools
-        # Образ Debian-based, но без nasm/xorriso/python — доставляем.
         run: |
           set -eux
           apt-get update
           apt-get install -y --no-install-recommends \
             nasm xorriso make python3 git ca-certificates
-          # Делаем 'python' алиасом для 'python3' (WINDOWS_ext2.py зовёт python).
           ln -sf /usr/bin/python3 /usr/local/bin/python
 
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
         with:
           submodules: recursive
-          # На PR'ах GitHub чекаутит merge-commit head — этого достаточно.
 
       - name: Show toolchain versions
         run: |
@@ -47,8 +48,6 @@ jobs:
           make --version | head -1
 
       - name: Build (make ci)
-        # ci-таргет: kernel.elf + apps + doom.elf + iso, БЕЗ hdd.img.
-        # hdd.img в CI не нужен — нам важна только сборка кода.
         run: |
           set -eux
           make -j"$(nproc)" ci
@@ -64,12 +63,111 @@ jobs:
           test -f iso_root/bin/snake.elf
           test -f iso_root/res/sysgui/init.lua
           ls -lh kernel.elf equos.iso
-          file kernel.elf || true
 
       - name: Upload ISO artefact
         uses: actions/upload-artifact@v4
         with:
-          name: equos-iso-${{ github.sha }}
+          name: equos-iso-linux-${{ github.sha }}
+          path: |
+            equos.iso
+            kernel.elf
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Windows job — проверяет, что Makefile / shell-эскейпы / cmd-flow всё ещё
+  # работают на той же платформе, что использует мейнтейнер локально.
+  # Toolchain — статически слинкованный x86_64-elf cross-gcc 7.1 от lordmilko.
+  # Кэшируем zip, чтобы не качать 280 МБ на каждый PR.
+  # ---------------------------------------------------------------------------
+  build-windows:
+    name: Windows (windows-latest, x86_64-elf-tools)
+    runs-on: windows-latest
+
+    env:
+      TOOLCHAIN_VERSION: 7.1.0
+      TOOLCHAIN_URL: https://github.com/lordmilko/i686-elf-tools/releases/download/7.1.0/x86_64-elf-tools-windows.zip
+      TOOLCHAIN_DIR: C:\opt\x86_64-elf-tools
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install nasm + make via Chocolatey
+        shell: pwsh
+        run: |
+          choco install -y --no-progress nasm make
+          # NASM кладёт себя сюда:
+          Add-Content $env:GITHUB_PATH 'C:\Program Files\NASM'
+
+      - name: Install xorriso via MSYS2
+        shell: pwsh
+        run: |
+          # На windows-latest уже стоит MSYS2 в C:\msys64. Просто синкаем
+          # репы и ставим xorriso. Заодно докидываем bash-утилиты в PATH
+          # — Makefile они не используют, но xorriso.exe там же.
+          & 'C:\msys64\usr\bin\pacman.exe' -Sy --noconfirm
+          & 'C:\msys64\usr\bin\pacman.exe' -S  --noconfirm --needed xorriso
+          Add-Content $env:GITHUB_PATH 'C:\msys64\usr\bin'
+
+      - name: Cache cross-toolchain (x86_64-elf-gcc)
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TOOLCHAIN_DIR }}
+          key: x86_64-elf-tools-windows-${{ env.TOOLCHAIN_VERSION }}
+
+      - name: Download + extract x86_64-elf cross-toolchain
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = 'toolchain.zip'
+          Write-Host "Downloading $env:TOOLCHAIN_URL ..."
+          Invoke-WebRequest -Uri $env:TOOLCHAIN_URL -OutFile $zip -UseBasicParsing
+          New-Item -ItemType Directory -Force -Path $env:TOOLCHAIN_DIR | Out-Null
+          Write-Host "Extracting to $env:TOOLCHAIN_DIR ..."
+          Expand-Archive -Path $zip -DestinationPath $env:TOOLCHAIN_DIR -Force
+          Remove-Item $zip
+
+      - name: Add cross-toolchain to PATH
+        shell: pwsh
+        run: |
+          Add-Content $env:GITHUB_PATH "$env:TOOLCHAIN_DIR\bin"
+
+      - name: Show toolchain versions
+        shell: cmd
+        run: |
+          x86_64-elf-gcc --version
+          x86_64-elf-ld --version
+          nasm --version
+          xorriso --version 2>&1
+          make --version
+
+      - name: Build (make ci)
+        shell: cmd
+        # Параллелизация make на Windows со spawn'ом cmd.exe в каждом
+        # рецепте — нестабильна (race на mkdir). Поэтому без -j.
+        run: make ci
+
+      - name: Sanity-check artefacts
+        shell: cmd
+        run: |
+          if not exist kernel.elf ( echo missing kernel.elf & exit /b 1 )
+          if not exist equos.iso ( echo missing equos.iso & exit /b 1 )
+          if not exist iso_root\sys\kernel.elf ( echo missing iso_root\sys\kernel.elf & exit /b 1 )
+          if not exist iso_root\bin\sysgui.elf ( echo missing sysgui.elf & exit /b 1 )
+          if not exist iso_root\bin\doom.elf ( echo missing doom.elf & exit /b 1 )
+          if not exist iso_root\bin\snake.elf ( echo missing snake.elf & exit /b 1 )
+          if not exist iso_root\res\sysgui\init.lua ( echo missing init.lua & exit /b 1 )
+          dir kernel.elf equos.iso
+
+      - name: Upload ISO artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: equos-iso-windows-${{ github.sha }}
           path: |
             equos.iso
             kernel.elf
