@@ -13,6 +13,7 @@
 #include "../mem/shm.h"
 #include "../usr/task.h"
 #include "../mem/vmm.h"
+#include "../shell/shellsyntx.h"
 #include "../core/cpu.h"
 #include "ipc.h"
 #include <stdint.h>
@@ -212,20 +213,32 @@ void syscall_handler(syscall_regs_t *regs) {
   case 7: { // SYS_GET_MOUSE_FULL
     extern int mouse_x, mouse_y;
     extern bool mouse_left_button, mouse_right_button;
-    // RAX = X, RBX = Y, RCX = Кнопки (биты: 0-L, 1-R)
-    regs->rax = mouse_x;
-    regs->rbx = mouse_y;
-    regs->rcx = (mouse_left_button ? 1 : 0) | (mouse_right_button ? 2 : 0);
+    extern volatile uint64_t fg_app_pid;
+    // Если активно foreground-приложение (последний кто вызвал
+    // SYS_DRAW_BUFFER), мышь видит только оно. Иначе — все подряд.
+    if (fg_app_pid != 0 && current_task && current_task->id != fg_app_pid) {
+      regs->rax = 0;
+      regs->rbx = 0;
+      regs->rcx = 0;
+    } else {
+      regs->rax = mouse_x;
+      regs->rbx = mouse_y;
+      regs->rcx = (mouse_left_button ? 1 : 0) | (mouse_right_button ? 2 : 0);
+    }
     break;
   }
   case 9: // SYS_GET_SCANCODE
   {
-    static window_t *last_focus = NULL;
-
-    if(app_win && app_win->active && focused_window == app_win) {
-      regs->rax = keyboard_pop();
-    }
-    else {
+    extern volatile uint64_t fg_app_pid;
+    // Раньше тут была мёртвая ветка с `app_win`/`focused_window` (kernel-
+    // композитор отключён). Без маршрутизации sysgui и приложение
+    // одновременно дёргали `keyboard_pop()`, и нажатия рандомно
+    // "съедал" тот, кто поллит чаще — обычно sysgui (16 ms цикл).
+    // Теперь: пока есть foreground-app, sysgui получает 0; ввод идёт
+    // только в активный процесс.
+    if (fg_app_pid != 0 && current_task && current_task->id != fg_app_pid) {
+      regs->rax = 0;
+    } else {
       regs->rax = keyboard_pop();
     }
     break;
@@ -249,6 +262,14 @@ void syscall_handler(syscall_regs_t *regs) {
     extern bool is_app_running;
     is_app_running = false;
 
+    // Если выходит foreground-app — отдаём фокус ввода обратно sysgui.
+    {
+      extern volatile uint64_t fg_app_pid;
+      if (fg_app_pid == current_task->id) {
+        fg_app_pid = 0;
+      }
+    }
+
     if (app_win)
       app_win->active = false;
 
@@ -259,6 +280,7 @@ void syscall_handler(syscall_regs_t *regs) {
     break;
   case 12: { // SYS_GET_FONT
     extern void *vesa_get_font();
+    extern uint64_t vesa_get_font_size(void);
     void *kfont = vesa_get_font();
 
     uint64_t font_addr = (uint64_t)kfont;
@@ -266,7 +288,17 @@ void syscall_handler(syscall_regs_t *regs) {
       font_addr = VIRT(font_addr);
     }
 
-    regs->rax = copy_to_user((void *)font_addr, 4096);
+    /* Раньше тут было `copy_to_user(font_addr, 4096)`. Для PSF1 файла
+     * 8x16 / 256 глифов реальный размер = 4 (header) + 4096 (glyphs)
+     * = 4100 байт, что перешагивает первую 4 KiB страницу. Глифы
+     * 0xFE / 0xFF при отрисовке (eid_draw_text / vesa_draw_string)
+     * читают байты со смещений 4084..4099 — последние 4 байта попадают
+     * на 0x60001000, который не был замаплен в user CR3, что вызывало
+     * #PF (ERR=0x4) и BSOD. Маппим всю длину шрифта. */
+    uint64_t size = vesa_get_font_size();
+    if (size == 0)
+      size = 8192; /* fallback на случай, если размер не выставили */
+    regs->rax = copy_to_user((void *)font_addr, size);
     break;
   }
   case 13: { // SYS_SLEEP
@@ -623,7 +655,77 @@ void syscall_handler(syscall_regs_t *regs) {
     regs->rax = (uint64_t)task_kill_all_user_count();
     break;
   }
+  case 73: { // SYS_SHELL_EXEC — выполнить строку ring-0 shell'а и
+             // вернуть printed-вывод в user-buf. См. shellsyntx.h и
+             // shell_capture_sink ниже.
+    const char *user_line   = (const char *)regs->rdi;
+    char       *user_outbuf = (char *)regs->rsi;
+    uint64_t    out_cap     = regs->rdx;
+
+    /* 1) Скопировать команду в kernel-память (даём шеллу свободно
+     *    дергать sh_print без stac/clac на каждый чих). */
+    char kline[256];
+    {
+      uint64_t i = 0;
+      stac();
+      while (i < sizeof(kline) - 1 && user_line && user_line[i] != '\0') {
+        kline[i] = user_line[i];
+        i++;
+      }
+      clac();
+      kline[i] = '\0';
+    }
+
+    /* 2) Обнулить capture-буфер и натравить шелл на capture-sink. */
+    extern char shell_capture_buf[];
+    extern int  shell_capture_pos;
+    extern void shell_capture_sink(const char *);
+
+    shell_capture_pos = 0;
+    shell_capture_buf[0] = '\0';
+    shell_execute_line(kline, shell_capture_sink);
+
+    /* 3) Скопировать результат юзеру, усечение допустимо. */
+    int n = shell_capture_pos;
+    if (out_cap == 0 || user_outbuf == NULL) {
+      regs->rax = (uint64_t)n;
+      break;
+    }
+    uint64_t to_copy = ((uint64_t)n + 1 < out_cap) ? (uint64_t)n + 1 : out_cap;
+    stac();
+    memcpy(user_outbuf, shell_capture_buf, to_copy);
+    if (to_copy > 0) user_outbuf[to_copy - 1] = '\0';
+    clac();
+
+    regs->rax = (to_copy > 0) ? to_copy - 1 : 0;
+    break;
+  }
+  case 74: { // SYS_GET_FG_APP — текущий PID foreground-приложения
+    // 0 если нет (десктоп пустой → ввод и vram свободны для sysgui).
+    // Используется sysgui чтобы не композитить vram, пока активна
+    // полно­экранная игра вроде doom — иначе sysgui раз в 16 ms
+    // memcpy'ит весь 1024×768×4 backbuffer поверх кадра doom'а, что
+    // даёт жёсткое мерцание + просадку FPS.
+    extern volatile uint64_t fg_app_pid;
+    regs->rax = fg_app_pid;
+    break;
+  }
   default:
     break;
   }
+}
+
+/* ----- capture-sink для SYS_SHELL_EXEC ------------------------------------
+ * Один-единственный буфер, используемый и case 73 выше, и самим sink'ом.
+ * Не thread-safe — но syscall_handler у нас и так не reentrant. */
+char shell_capture_buf[2048];
+int  shell_capture_pos = 0;
+const int shell_capture_cap = (int)sizeof(shell_capture_buf);
+
+void shell_capture_sink(const char *s) {
+    if (!s) return;
+    while (*s && shell_capture_pos < shell_capture_cap - 1) {
+        shell_capture_buf[shell_capture_pos++] = *s++;
+    }
+    shell_capture_buf[shell_capture_pos] = '\0';
 }

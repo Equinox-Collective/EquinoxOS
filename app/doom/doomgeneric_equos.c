@@ -15,14 +15,47 @@ extern int snd_sfxdevice;
 extern int snd_musicdevice;
 // --- Системные функции порта ---
 
+// Кэш центральных координат — считаем один раз через SYS_GET_VESA_INFO.
+// Делаем static, чтобы лишний syscall на каждый кадр не звать.
+static int dg_center_x = 0;
+static int dg_center_y = 0;
+static int dg_center_ready = 0;
+
+static void dg_compute_center(void) {
+    // RAX = phys_fb, RBX = screen_width, RCX = screen_height, RDX = pitch.
+    // _syscall возвращает только RAX, поэтому используем inline asm,
+    // как делает sdk при необходимости. Проще: вызвать syscall и
+    // забрать RBX/RCX через сохранённые регистры.
+    uint64_t w = 0, h = 0;
+    __asm__ volatile (
+        "movq $32, %%rax\n\t"
+        "int $0x80\n\t"
+        "movq %%rbx, %0\n\t"
+        "movq %%rcx, %1\n\t"
+        : "=r"(w), "=r"(h)
+        :
+        : "rax", "rbx", "rcx", "rdx", "memory"
+    );
+    int sw = (int)w, sh = (int)h;
+    if (sw <= 0 || sh <= 0) { sw = 1024; sh = 768; }  // fallback
+    dg_center_x = (sw - DOOMGENERIC_RESX) / 2;
+    dg_center_y = (sh - DOOMGENERIC_RESY) / 2;
+    if (dg_center_x < 0) dg_center_x = 0;
+    if (dg_center_y < 0) dg_center_y = 0;
+    dg_center_ready = 1;
+}
+
 void DG_Init() {
     // Чистим буфер клавиатуры при старте
     for(int i = 0; i < 16; i++) _syscall(9, 0, 0, 0, 0, 0);
+    dg_compute_center();
 }
 
 void DG_DrawFrame() {
-    // Рисуем буфер Дума на экран через системный вызов
-    _syscall(SYS_DRAW_BUFFER, 0, 0, DOOMGENERIC_RESX, DOOMGENERIC_RESY, (uintptr_t)DG_ScreenBuffer);
+    // Рисуем буфер Дума на экран по центру
+    if (!dg_center_ready) dg_compute_center();
+    _syscall(SYS_DRAW_BUFFER, dg_center_x, dg_center_y,
+             DOOMGENERIC_RESX, DOOMGENERIC_RESY, (uintptr_t)DG_ScreenBuffer);
 }
 
 void DG_SleepMs(uint32_t ms) {
@@ -236,12 +269,21 @@ int DG_GetKey(int* pressed, unsigned char* key) {
     }
 
     switch(clean) {
-        case 0x1D: *key = KEY_FIRE; break;   
-        case 0x39: *key = KEY_USE; break;    
+        case 0x1D: *key = KEY_FIRE; break;
+        case 0x39: *key = KEY_USE; break;
         case 0x01: *key = KEY_ESCAPE; break;
         case 0x1C: *key = KEY_ENTER; break;
         case 0x0E: *key = KEY_BACKSPACE; break;
-        
+
+        // WASD маршрутизируется как в современных шутерах:
+        //   W/S — вперёд/назад (UP/DOWN), A/D — стрейф (а не поворот,
+        //   как делает LEFTARROW/RIGHTARROW). В classic Doom стрейф —
+        //   отдельные клавиши KEY_STRAFE_L/R (по умолчанию ',' и '.').
+        case 0x11: *key = KEY_UPARROW;    break; // W
+        case 0x1F: *key = KEY_DOWNARROW;  break; // S
+        case 0x1E: *key = KEY_STRAFE_L;   break; // A
+        case 0x20: *key = KEY_STRAFE_R;   break; // D
+
         default: {
             static const char map[] = {
                 0, 0, '1','2','3','4','5','6','7','8','9','0','-','=', 0,

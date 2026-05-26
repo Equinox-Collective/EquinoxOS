@@ -115,8 +115,16 @@ void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2, uint64_t cr3) {
   }
 
   new_task->rsp = (uint64_t)frame;
-  new_task->next = task_list->next;
-  task_list->next = new_task;
+  // Защита от поломанного ring-а: если task_list ещё не проинициализирован
+  // (теоретически не должно случаться, т.к. task_init выполняется первым),
+  // делаем новую задачу самоссылочной — так schedule() не уйдёт в NULL-deref.
+  if (!task_list) {
+    new_task->next = new_task;
+    task_list = new_task;
+  } else {
+    new_task->next = task_list->next ? task_list->next : task_list;
+    task_list->next = new_task;
+  }
 }
 
 // task.c
@@ -124,12 +132,32 @@ void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2, uint64_t cr3) {
 uint64_t schedule(uint64_t current_rsp) {
     // tick++;
     if (!current_task) return current_rsp;
-    
+
     current_task->rsp = current_rsp;
-    
+
+    // Защита от поврежденного ring-list: если у кого-то next == NULL
+    // (или мы как-то выпали из круга), сбрасываемся на task_list, чтобы
+    // не словить #PF на чтении task->running по NULL+0x30.
+    task_t* start = current_task;
+    int hops = 0;
     do {
-        current_task = current_task->next;
-    } while (!current_task->running); 
+        task_t* next = current_task->next;
+        if (!next) {
+            if (task_list) {
+                current_task = task_list;
+            } else {
+                return current_rsp;
+            }
+        } else {
+            current_task = next;
+        }
+        // Сторож от вечного цикла в пустом ring-е: если за >2*tasks хопов
+        // не нашли ни одной RUNNING задачи — возвращаемся в idle/kernel.
+        if (++hops > 4096) {
+            current_task = (task_list && task_list->running) ? task_list : start;
+            break;
+        }
+    } while (!current_task->running);
 
     uint64_t new_cr3 = (current_task->cr3 == 0) ? kernel_cr3 : current_task->cr3;
     __asm__ volatile("mov %0, %%cr3" : : "r"(new_cr3) : "memory");
@@ -219,7 +247,16 @@ bool task_exec(char* full_command) {
 
             // 1. Выделяем физическую память под нужной количество страниц
             void* phys_mem = pmm_alloc_continuous(num_pages);
-            
+            if (!phys_mem) {
+                // OOM или фрагментация: без проверки мы бы замапили
+                // юзеру physical 0..N (BIOS/IDT/etc) и обнулили низкую
+                // память через HHDM — гарантированный BSOD при следующем IRQ.
+                term_print("EXEC: pmm_alloc_continuous failed (OOM/fragmentation)\n");
+                kfree(elf_raw);
+                kfree(cmd_copy);
+                return false;
+            }
+
             // 2. Мапим страницы в пространство процесса
             for (uint64_t p = 0; p < num_pages; p++) {
                 vmm_map(proc_pml4, 
@@ -243,6 +280,12 @@ bool task_exec(char* full_command) {
     term_print("EXEC: Starting Ring 3 process...\n");
     uint64_t user_argv_page = 0xB0000000; 
     void* phys_argv = pmm_alloc();
+    if (!phys_argv) {
+        term_print("EXEC: pmm_alloc for argv page failed\n");
+        kfree(elf_raw);
+        kfree(cmd_copy);
+        return false;
+    }
     vmm_map(proc_pml4, user_argv_page, (uint64_t)phys_argv, PTE_PRESENT | PTE_USER | PTE_WRITABLE);
     
     // ВАЖНО: Обнуляем страницу аргументов!
@@ -325,6 +368,7 @@ bool task_terminate_by_pid(uint64_t pid) {
     return false;
   }
 
+  if (!task_list) return false;
   task_t *curr = task_list;
   do {
     if (curr->id == pid) {
@@ -333,12 +377,19 @@ bool task_terminate_by_pid(uint64_t pid) {
       if (curr->cr3 != 0) {
         // vmm_destroy_address_space(curr->cr3); // Твоя функция очистки
       }
+      // Если убитая задача держала фокус ввода — отдаём его обратно
+      // sysgui, иначе клавиатура/мышь "залипнут" на мёртвом PID.
+      {
+        extern volatile uint64_t fg_app_pid;
+        if (fg_app_pid == pid) fg_app_pid = 0;
+      }
       char buf[64];
       sprintf(buf, "TASK: Process %d terminated.\n", (uint32_t)pid);
       term_print(buf);
       return true;
     }
     curr = curr->next;
+    if (!curr) break; // защита от рваного ring-list
   } while (curr != task_list);
 
   term_print("TASK: PID not found.\n");
@@ -361,8 +412,25 @@ int task_kill_all_user_count(void) {
   task_t *curr = start;
   do {
     // PID 1 — idle/init ядра, его нельзя убивать (см. task_kill_self).
-    if (curr->id != 1 && curr->running) {
+    //
+    // Также НЕ трогаем current_task. Раньше killall убивал и сам
+    // вызывающий процесс — типичный сценарий: пользователь печатает
+    // `killall` в ring-3 Lua-терминале (sysgui, PID 2), syscall 72
+    // обнулял sysgui->running, syscall возвращался, Lua печатал
+    // "terminated N tasks", но при следующем yield sysgui больше не
+    // шедулился — экран замирал, ввод пропадал, со стороны выглядело
+    // как "killall ничего не делает / система зависла". Семантика
+    // killall теперь = "всё кроме меня и kernel-init", что совпадает
+    // с ожиданием desktop-shell.
+    //
+    // Из emergency_kill_all_and_shell() current_task == idle (PID 1),
+    // так что доп. проверка ничего не ломает: idle и так пропускается.
+    if (curr->id != 1 && curr != current_task && curr->running) {
       curr->running = false;
+      {
+        extern volatile uint64_t fg_app_pid;
+        if (fg_app_pid == curr->id) fg_app_pid = 0;
+      }
       n++;
       // vmm_destroy_address_space(curr->cr3) умышленно НЕ вызываем
       // здесь: пользовательский процесс может быть прямо сейчас на

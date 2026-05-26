@@ -1,4 +1,5 @@
 #include "shell.h"
+#include "shellsyntx.h"
 #include "../drivers/devices/pcspeaker/pcspeaker.h"
 #include "../drivers/vesa/bmp.h"
 #include "../drivers/vesa/vesa.h"
@@ -130,20 +131,8 @@ void shell_init(void) {
 //                              КОМАНДЫ
 // =============================================================================
 
-static void cmd_help(void) {
-    sh_print(
-        "\e[33mBuiltins:\e[0m\n"
-        "  help               - show this help\n"
-        "  fetch              - system info / logo\n"
-        "  clear              - clear screen\n"
-        "  ls                 - list VFS devices\n"
-        "  run <file.elf>     - exec ELF from VFS\n"
-        "  ps                 - list processes\n"
-        "  kill <pid>         - terminate process by PID\n"
-        "  killall            - kill every user process + drop to "
-        "emergency shell\n"
-        "  reboot             - reboot the machine (triple fault)\n");
-}
+/* cmd_help() заменён на cmd_help_fn() ниже — он печатает реестр
+ * SHELL_COMMANDS[] из shellsyntx.h, чтобы не дублировать список. */
 
 static void cmd_ls(void) {
     vfs_node_t *dev = vfs_root->next;
@@ -213,8 +202,150 @@ static void cmd_reboot(void) {
 }
 
 // =============================================================================
+//                       РЕЕСТР КОМАНД (см. shellsyntx.h)
+// =============================================================================
+//
+// Каждая команда — это обёртка с сигнатурой shell_cmd_fn(args). Команды
+// без аргументов принимают `(void)args`. Реестр SHELL_COMMANDS[] — это
+// единственный источник правды; диспетчер ниже и cmd_help() читают
+// именно его.
+
+static void cmd_help_fn(const char *args);
+static void cmd_ls_fn(const char *args)     { (void)args; cmd_ls(); }
+static void cmd_fetch_fn(const char *args)  { (void)args; cmd_fetch(); }
+static void cmd_ps_fn(const char *args)     { (void)args; cmd_ps(); }
+static void cmd_reboot_fn(const char *args) { (void)args; cmd_reboot(); }
+static void cmd_kill_fn(const char *args)   { cmd_kill(args); }
+static void cmd_gui_fn(const char *args) {
+    (void)args;
+    sh_print("Starting Equinox GUI...\n");
+}
+static void cmd_clear_fn(const char *args) {
+    (void)args;
+    if (s_out == default_output) {
+        terminal_clear();
+    } else {
+        sh_print("\n\n");
+    }
+}
+static void cmd_killall_fn(const char *args) {
+    (void)args;
+    sh_print("killall: terminating user processes...\n");
+    // ВАЖНО: эту команду пользователь обычно печатает в GUI-терминале,
+    // т.е. сейчас мы ВНУТРИ keyboard IRQ (keyboard_handler ->
+    // keyboard_callback -> shell_handle_char -> dispatch -> сюда). EOI
+    // ещё не отправлен. Если позвать emergency_kill_all_and_shell()
+    // прямо здесь, он застрянет в hlt-loop в shell_emergency_enter()
+    // ДО возврата из IRQ — keyboard IRQ останется in-service на PIC,
+    // больше скан-кодов не придёт, emergency окажется "немым".
+    // Поэтому только сигналим — kmain в главном цикле подхватит флаг
+    // уже в нормальном контексте.
+    shell_emergency_requested = true;
+}
+static void cmd_run_fn(const char *args) {
+    while (*args == ' ') args++;
+    // В emergency-режиме НЕ даём запускать ELF'ы. Иначе пользователь
+    // запускает, скажем, `run bin/sysgui.elf` и получает гонку: новый
+    // task рисует поверх emergency-фреймбуфера, emergency-обработчик
+    // продолжает поедать клавиатуру в while(shell_emergency_active)
+    // hlt-цикле и перерисовывать чёрный фон поверх sysgui. Чтобы
+    // вернуться к нормальному GUI — нужен `exit` (reboot) и обычная
+    // загрузка sysgui из kmain.
+    if (shell_emergency_active) {
+        sh_print("run: disabled in emergency mode. Type 'exit' to reboot.\n");
+        return;
+    }
+    if (!*args) {
+        sh_print("run: usage: run <file.elf>\n");
+        return;
+    }
+    /* task_exec пересоздаёт буфер сам, передавать const можно. */
+    task_exec((char *)args);
+}
+
+// --- Сам реестр --------------------------------------------------------
+//
+// ВНИМАНИЕ: порядок имеет значение для shell_find_command — более
+// длинные общие префиксы должны идти РАНЬШЕ ("killall" перед "kill",
+// хотя у нас kill takes_args=true и killall takes_args=false, так что
+// конфликта нет).
+
+const shell_command_t SHELL_COMMANDS[] = {
+    { "help",    false, cmd_help_fn,    "show this help" },
+    { "fetch",   false, cmd_fetch_fn,   "system info / logo" },
+    { "clear",   false, cmd_clear_fn,   "clear screen" },
+    { "ls",      false, cmd_ls_fn,      "list VFS devices" },
+    { "ps",      false, cmd_ps_fn,      "list processes" },
+    { "kill",    true,  cmd_kill_fn,    "kill <pid> — terminate process" },
+    { "killall", false, cmd_killall_fn, "kill every user process + drop to emergency shell" },
+    { "run",     true,  cmd_run_fn,     "run <file.elf> — exec ELF from VFS" },
+    { "reboot",  false, cmd_reboot_fn,  "reboot the machine (triple fault)" },
+    { "gui",     false, cmd_gui_fn,     "(stub) start Equinox GUI" },
+};
+
+const int SHELL_COMMANDS_COUNT =
+    (int)(sizeof(SHELL_COMMANDS) / sizeof(SHELL_COMMANDS[0]));
+
+static void cmd_help_fn(const char *args) {
+    (void)args;
+    sh_print("\e[33mBuiltins:\e[0m\n");
+    for (int i = 0; i < SHELL_COMMANDS_COUNT; i++) {
+        char line[160];
+        const shell_command_t *c = &SHELL_COMMANDS[i];
+        const char *suffix = c->takes_args ? " ..." : "";
+        sprintf(line, "  %s%s - %s\n", c->verb, suffix, c->help);
+        sh_print(line);
+    }
+}
+
+const shell_command_t *shell_find_command(const char *line) {
+    for (int i = 0; i < SHELL_COMMANDS_COUNT; i++) {
+        const shell_command_t *c = &SHELL_COMMANDS[i];
+        size_t vl = strlen(c->verb);
+        if (c->takes_args) {
+            // "<verb> <args>"
+            if (strncmp(line, c->verb, vl) == 0 && line[vl] == ' ')
+                return c;
+        } else {
+            // "<verb>" точное равенство
+            if (strncmp(line, c->verb, vl) == 0 && line[vl] == '\0')
+                return c;
+        }
+    }
+    return NULL;
+}
+
+// =============================================================================
 //                              ИСПОЛНИТЕЛЬ
 // =============================================================================
+//
+// shell_dispatch_line() — общий диспетчер без побочных эффектов сессии
+// (без истории, без prompt'а). Возвращает true, если команда найдена.
+
+static bool shell_dispatch_line(const char *cmd) {
+    if (!cmd || cmd[0] == '\0') return true;
+
+    const shell_command_t *c = shell_find_command(cmd);
+    if (!c) {
+        sh_print("\e[31mCommand not found: \e[0m");
+        sh_print(cmd);
+        sh_print("\n");
+        return false;
+    }
+
+    const char *args = cmd + strlen(c->verb);
+    if (*args == ' ') args++; /* skip разделитель */
+    c->handler(args);
+    return true;
+}
+
+void shell_execute_line(const char *line, shell_output_fn out) {
+    if (!line) return;
+    shell_output_fn prev = shell_get_output();
+    if (out) shell_set_output(out);
+    shell_dispatch_line(line);
+    shell_set_output(prev);
+}
 
 static void shell_execute(char *cmd) {
     if (cmd[0] == '\0')
@@ -231,47 +362,7 @@ static void shell_execute(char *cmd) {
     history_browse_idx = history_count;
 
     sh_print("\n");
-
-    if (strcmp(cmd, "help") == 0) {
-        cmd_help();
-    } else if (strcmp(cmd, "ls") == 0) {
-        cmd_ls();
-    } else if (strcmp(cmd, "fetch") == 0) {
-        cmd_fetch();
-    } else if (strcmp(cmd, "clear") == 0) {
-        if (s_out == default_output) {
-            terminal_clear();
-        } else {
-            sh_print("\n\n");
-        }
-    } else if (strcmp(cmd, "gui") == 0) {
-        sh_print("Starting Equinox GUI...\n");
-    } else if (strcmp(cmd, "ps") == 0) {
-        cmd_ps();
-    } else if (memcmp(cmd, "kill ", 5) == 0) {
-        cmd_kill(cmd + 5);
-    } else if (strcmp(cmd, "killall") == 0) {
-        sh_print("killall: terminating user processes...\n");
-        // ВАЖНО: эту команду пользователь обычно печатает в GUI-терминале,
-        // то есть мы СЕЙЧАС находимся внутри обработчика прерывания
-        // клавиатуры (interrupt.asm: keyboard_handler -> keyboard_callback
-        // -> shell_handle_char -> shell_execute). EOI ещё не отправлен.
-        // Если позвать emergency_kill_all_and_shell() прямо здесь, он
-        // зайдёт в бесконечный hlt-цикл в shell_emergency_enter() ДО
-        // возврата из IRQ, и keyboard IRQ останется in-service на PIC —
-        // никаких новых нажатий мы не получим, аварийная оболочка
-        // окажется "немой". Поэтому только выставляем флаг: kmain в
-        // главном цикле его подхватит, уже вне IRQ-контекста.
-        shell_emergency_requested = true;
-    } else if (strcmp(cmd, "reboot") == 0) {
-        cmd_reboot();
-    } else if (memcmp(cmd, "run ", 4) == 0) {
-        task_exec(cmd + 4);
-    } else {
-        sh_print("\e[31mCommand not found: \e[0m");
-        sh_print(cmd);
-        sh_print("\n");
-    }
+    shell_dispatch_line(cmd);
 
     // В emergency-режиме prompt мы НЕ печатаем: у emergency-рендера
     // свой prompt в нижней строке, его рисует emergency_redraw().
