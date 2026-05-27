@@ -497,6 +497,41 @@ void syscall_handler(syscall_regs_t *regs) {
   }
   case 40: { // SYS_NET_DNS_RESOLVE
     const char *hostname = (const char *)regs->rdi;
+
+    // IPv4 literal short-circuit. Без этого URL вида http://10.0.2.2/
+    // и любые тесты против host-only QEMU-сети (где у хоста просто IP, а DNS
+    // не настроен) уходят в DNS-запрос к 8.8.8.8 и валятся таймаутом. Парсим
+    // строго "a.b.c.d", a-d ∈ [0,255]. На любое отклонение — fallback в DNS.
+    if (hostname) {
+      uint32_t parts[4] = {0, 0, 0, 0};
+      int part_idx = 0;
+      int digits_in_part = 0;
+      bool ok = true;
+      for (const char *p = hostname;; p++) {
+        char c = *p;
+        if (c >= '0' && c <= '9') {
+          parts[part_idx] = parts[part_idx] * 10 + (uint32_t)(c - '0');
+          if (parts[part_idx] > 255 || ++digits_in_part > 3) { ok = false; break; }
+        } else if (c == '.') {
+          if (digits_in_part == 0 || part_idx >= 3) { ok = false; break; }
+          part_idx++;
+          digits_in_part = 0;
+        } else if (c == '\0') {
+          if (part_idx != 3 || digits_in_part == 0) ok = false;
+          break;
+        } else {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) {
+        // Сетевые драйверы EquinoxOS трактуют uint32_t IP как network-byte-order
+        // (a в старшем байте). dns_get_result возвращает в той же форме.
+        regs->rax = (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3];
+        break;
+      }
+    }
+
     net_interface_t *iface = net_get_primary_interface();
     if (!iface) {
       regs->rax = 0;
