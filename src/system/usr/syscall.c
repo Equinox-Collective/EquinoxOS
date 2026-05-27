@@ -1,7 +1,6 @@
 #include "../drivers/devices/audio/ac97.h"
 #include "../drivers/vesa/vesa.h"
 #include "../fs/vfs.h"
-#include "../../gui/gui.h"
 #include "../drivers/devices/keyboard/keyboard.h"
 #include "../drivers/hardware/net/dns.h"
 #include "../drivers/hardware/net/net.h"
@@ -24,6 +23,12 @@ extern volatile uint32_t tick;
 extern void sys_draw_app_buffer(int x, int y, int w, int h, uint32_t *buffer);
 extern uint8_t keyboard_pop();
 extern void term_print(const char *str);
+
+static int k_app_win_x = 100;
+static int k_app_win_y = 100;
+static int k_app_win_w = 640;
+static int k_app_win_h = 400;
+static bool k_app_win_active = false;
 
 typedef struct {
   uint64_t rax; // syscall_number
@@ -272,10 +277,12 @@ void syscall_handler(syscall_regs_t *regs) {
       }
     }
 
-    if (app_win)
-      app_win->active = false;
+    k_app_win_active = false; // Просто сбрасываем флаг активности
 
-    yield(); // Уходим в планировщик
+    extern bool is_app_running;
+    is_app_running = false;
+
+    yield();
     break;
   case 11: // SYS_YIELD (Уступить процессор)
     yield(); // Фактический switch context через int $32
@@ -488,13 +495,17 @@ void syscall_handler(syscall_regs_t *regs) {
     break;
   }
   case 33: { // SYS_GET_WINDOW_POS
-    if (app_win) {
-      regs->rax = app_win->x;
-      regs->rbx = app_win->y;
-    } else {
-      regs->rax = 0;
-      regs->rbx = 0;
-    }
+    regs->rax = (uint64_t)k_app_win_x;
+    regs->rbx = (uint64_t)k_app_win_y;
+    break;
+  }
+
+  case 36: { // SYS_SET_WINDOW_POS (Вызывается из Lua)
+    k_app_win_x = (int)regs->rdi;
+    k_app_win_y = (int)regs->rsi;
+    k_app_win_w = (int)regs->rdx;
+    k_app_win_h = (int)regs->rcx;
+    k_app_win_active = true;
     break;
   }
   case 40: { // SYS_NET_DNS_RESOLVE

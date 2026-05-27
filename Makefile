@@ -55,7 +55,7 @@ USER_CFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -
               -fno-omit-frame-pointer $(SDK_INC) -MMD -MP
 
 # --- KERNEL SOURCES ---
-SRC_DIRS = src src/boot src/gui src/syslibc \
+SRC_DIRS = src src/boot src/syslibc \
            src/system/core \
            src/system/drivers/devices/audio \
            src/system/drivers/devices/keyboard \
