@@ -200,7 +200,7 @@ APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_RO
 # Apps that link against libbearssl.a (phase 3b+). These get their own
 # explicit rules below because they need (a) BearSSL public headers in the
 # include path and (b) libbearssl.a appended at link time.
-APP_ELFS_TLS    = $(ISO_ROOT)/bin/tlsboot.elf $(ISO_ROOT)/bin/tlstest.elf
+APP_ELFS_TLS    = $(ISO_ROOT)/bin/tlsboot.elf $(ISO_ROOT)/bin/tlstest.elf $(ISO_ROOT)/bin/catest.elf
 
 # Object builds need the Windows directory tree from setup before they start;
 # this matters when users run `make -j`.
@@ -225,6 +225,12 @@ app/tlstest.o: app/tlstest.c app/ca_anchors.h
 	$(CC) $(USER_CFLAGS) -I./third_party/bearssl/inc -c $< -o $@
 
 $(ISO_ROOT)/bin/tlstest.elf: app/tlstest.o $(SDK_OBJS) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(BEARSSL_LIB) -o $@
+
+app/catest.o: app/catest.c third_party/ca_bundle/ca_bundle.h
+	$(CC) $(USER_CFLAGS) -I./third_party/bearssl/inc -c $< -o $@
+
+$(ISO_ROOT)/bin/catest.elf: app/catest.o $(SDK_OBJS) $(BEARSSL_LIB)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(BEARSSL_LIB) -o $@
 
 sysgui_app:
