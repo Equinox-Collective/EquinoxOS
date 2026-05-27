@@ -3,6 +3,12 @@ LD = x86_64-elf-ld
 AR = x86_64-elf-ar
 ASM = nasm
 
+# Pin the default goal to 'all' so a bare `make` always does a full build.
+# Otherwise GNU Make picks the first concrete file target it sees, which after
+# the BearSSL block below is libbearssl.a — making `make clean && make` quietly
+# leave the build with no kernel.elf / no equos.iso.
+.DEFAULT_GOAL := all
+
 ifeq ($(OS),Windows_NT)
   # GitHub's Windows image adds MSYS2 to PATH for xorriso, which also exposes
   # sh.exe. GNU Make will otherwise pick that POSIX shell and then fail on the
