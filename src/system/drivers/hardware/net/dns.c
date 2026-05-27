@@ -125,41 +125,45 @@ static void dns_callback(uint32_t src_ip, uint16_t src_port, uint8_t* data, uint
     term_print("[DNS] No A record in response.\n");
 }
 
-void dns_query(net_interface_t* iface, const char* hostname) {
+void dns_query(net_interface_t* iface, const char* hostname, uint32_t server_ip) {
     if (!iface) return;
-    
+
     static bool bound = false;
     if (!bound) {
         udp_bind(53535, dns_callback); // Ephemeral port for DNS responses
         bound = true;
     }
-    
+
     resolved_ip = 0;
     strcpy(last_queried_name, hostname);
-    
+
     uint8_t buffer[512];
     memset(buffer, 0, 512);
-    
+
     dns_header_t* dns = (dns_header_t*)buffer;
     dns->id = HTONS(0xBEEF);
     dns->flags = HTONS(0x0100); // Standard Query, Recursion Desired
     dns->questions = HTONS(1);
-    
+
     uint8_t* qname = buffer + sizeof(dns_header_t);
     dns_format_name(qname, hostname);
-    
+
     int qname_len = strlen((char*)qname) + 1;
     uint8_t* qinfo = qname + qname_len;
     qinfo[1] = 1; // Type A
     qinfo[3] = 1; // Class IN
-    
+
     uint32_t total_len = sizeof(dns_header_t) + qname_len + 4;
-    
-    // Send to Google DNS (8.8.8.8)
-    udp_send_packet(iface, 0x08080808, 53535, 53, buffer, total_len);
-    
+
+    udp_send_packet(iface, server_ip, 53535, 53, buffer, total_len);
+
     char buf[128];
-    sprintf(buf, "[DNS] Querying 8.8.8.8 for %s...\n", hostname);
+    sprintf(buf, "[DNS] Querying %u.%u.%u.%u for %s...\n",
+            (unsigned)((server_ip >> 24) & 0xFF),
+            (unsigned)((server_ip >> 16) & 0xFF),
+            (unsigned)((server_ip >> 8)  & 0xFF),
+            (unsigned)(server_ip         & 0xFF),
+            hostname);
     term_print(buf);
 }
 
