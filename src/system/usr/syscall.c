@@ -555,25 +555,37 @@ void syscall_handler(syscall_regs_t *regs) {
     // Enable interrupts so network_thread can process packets
     __asm__ volatile("sti");
 
-    stac();
-    dns_query(iface, hostname);
-    clac();
+    /* Multi-resolver retry. QEMU SLIRP routinely proxies 8.8.8.8 to a
+     * host resolver that returns dead pool members (we kept seeing
+     * 8.6.112.6 / 8.47.69.6 for example.com — they SYN-ACK but never
+     * answer GETs). 1.1.1.1 and 9.9.9.9 reach different upstream
+     * answers via the same SLIRP proxy, so failover actually helps
+     * in practice. Each server gets ~400 timer ticks before we move
+     * on; total worst-case latency ~1.2 s, same order as the old
+     * single-server 1000-tick wait. */
+    static const uint32_t dns_servers[] = {
+        0x08080808, /* 8.8.8.8 — Google */
+        0x01010101, /* 1.1.1.1 — Cloudflare */
+        0x09090909, /* 9.9.9.9 — Quad9 */
+    };
+    uint32_t resolved = 0;
+    for (unsigned s = 0;
+         s < sizeof(dns_servers)/sizeof(dns_servers[0]) && resolved == 0;
+         s++) {
+      stac();
+      dns_query(iface, hostname, dns_servers[s]);
+      clac();
 
-    // Wait for resolution — interrupts MUST be on for network_thread
-    uint32_t timeout = 1000;
-    while (timeout > 0) {
-      uint32_t ip = dns_get_result(hostname);
-      if (ip != 0) {
-        __asm__ volatile("cli");
-        regs->rax = ip;
-        goto dns_done;
+      uint32_t timeout = 400;
+      while (timeout > 0) {
+        uint32_t ip = dns_get_result(hostname);
+        if (ip != 0) { resolved = ip; break; }
+        __asm__ volatile("hlt"); // sleep until next interrupt (timer)
+        timeout--;
       }
-      __asm__ volatile("hlt"); // sleep until next interrupt (timer)
-      timeout--;
     }
     __asm__ volatile("cli");
-    regs->rax = 0;
-  dns_done:
+    regs->rax = resolved;
     break;
   }
   case 41: { // SYS_NET_HTTP_GET
