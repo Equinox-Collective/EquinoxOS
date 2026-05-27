@@ -57,21 +57,6 @@ static void dns_callback(uint32_t src_ip, uint16_t src_port, uint8_t* data, uint
     (void)src_ip; (void)src_port;
     if (!data || len < sizeof(dns_header_t)) return;
 
-    /* DEBUG: dump first 64 bytes of every DNS response so we can verify
-     * the wire format end-to-end (parser bugs vs. SLIRP mangling vs.
-     * legit-but-unexpected response). Cheap, prints once per response. */
-    {
-        char hex[3 * 64 + 32];
-        uint32_t dlen = len < 64 ? len : 64;
-        int off = 0;
-        off += sprintf(hex + off, "[DNS] raw (%u B):", (unsigned)len);
-        for (uint32_t k = 0; k < dlen; k++) {
-            off += sprintf(hex + off, " %02x", data[k]);
-        }
-        sprintf(hex + off, "\n");
-        term_print(hex);
-    }
-
     dns_header_t* dns = (dns_header_t*)data;
 
     uint16_t nq  = HTONS(dns->questions);
