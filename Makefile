@@ -269,13 +269,13 @@ iso: kernel.elf apps doom.elf
 #                     в qemu.log. Использовать только при отладке падений.
 
 QEMU       := qemu-system-x86_64
-# `-cpu max` экспонирует максимальный доступный набор CPUID-фичей хоста:
-# в т.ч. RDRAND, RDSEED, AES-NI. Без него WHPX по умолчанию режет CPUID до
-# базового набора и ядро видит "RDRAND unavailable" → soft fallback. Нужен
-# для TLS-фазы (BearSSL предпочитает аппаратный AES-NI там где есть, и
-# мы хотим честный энтропийный источник для handshake'а).
+# Базовый CPU = qemu64 (стабильно работает на WHPX), плюс явно
+# включаем RDRAND/RDSEED/AES-NI поверх. Чистый `-cpu max` с WHPX
+# валится с "Unexpected VP exit code 4" — гипервизор не умеет
+# часть фичей, которые max объявляет. qemu64+флаги — самый
+# совместимый способ дать ядру RDRAND под WHPX/KVM/HVF/TCG.
 QEMU_BASE  := -m 512M -boot d \
-              -cpu max \
+              -cpu qemu64,+rdrand,+rdseed,+aes \
               -drive file=hdd.img,format=raw,index=0,media=disk \
               -cdrom equos.iso \
               -serial stdio \
