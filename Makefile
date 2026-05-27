@@ -276,7 +276,12 @@ app/htmlview_browser.o: app/htmlview.c sdk/include/http_client.h sdk/include/url
 $(ISO_ROOT)/bin/browser.elf: app/htmlview_browser.o $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(BEARSSL_LIB)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(HTTP_CLIENT_OBJ) $(BEARSSL_LIB) -o $@
 
-sysgui_app:
+# enGUI's app/sysgui/Makefile links sysgui.elf via `$(wildcard ../../sdk/lib/*.o)`,
+# so under parallel make (`make -j` on Linux CI) sysgui_app would race against the
+# SDK_OBJS pattern rule and link against an empty/partial set — failing with a wall
+# of `undefined reference to memcpy / floor / eid_*`. Windows CI runs serially so
+# it doesn't hit this. Declare the dependency explicitly so -j is safe.
+sysgui_app: $(SDK_OBJS)
 	@echo "=== Building sysgui (enGUI) ==="
 	$(MAKE) -C app/sysgui
 	@$(call CP_F,app/sysgui/sysgui.elf,iso_root/bin/sysgui.elf)
