@@ -151,7 +151,8 @@ uint8_t *http_response_buf = NULL;
 uint32_t http_response_len = 0;
 bool     http_finished     = false;
 
-static void wget_on_data(uint8_t *data, uint32_t len) {
+static void wget_on_data(tcp_socket_t *sock, uint8_t *data, uint32_t len) {
+  (void)sock;
   if (!http_response_buf) {
     http_response_buf = kmalloc(65536);
     if (!http_response_buf) return;
@@ -260,7 +261,7 @@ void handle_tcp(net_interface_t *iface, uint8_t *packet, uint32_t ip_hdr_len) {
       /* Three cases: in-order (consume + drain), past (dup, ignore), future
        * (stash in reorder buffer). */
       if (seq == sock->rcv_nxt) {
-        if (sock->on_data) sock->on_data(payload, payload_len);
+        if (sock->on_data) sock->on_data(sock, payload, payload_len);
         sock->rcv_nxt += payload_len;
         tcp_reorder_drain(sock);
         tcp_send_pure_ack(iface, sock);
@@ -299,7 +300,7 @@ void handle_tcp(net_interface_t *iface, uint8_t *packet, uint32_t ip_hdr_len) {
     bool our_fin_acked = ((int32_t)(ack - sock->snd_nxt) >= 0);
 
     if (payload_len > 0 && seq == sock->rcv_nxt) {
-      if (sock->on_data) sock->on_data(payload, payload_len);
+      if (sock->on_data) sock->on_data(sock, payload, payload_len);
       sock->rcv_nxt += payload_len;
       tcp_reorder_drain(sock);
       tcp_send_pure_ack(iface, sock);
@@ -329,7 +330,7 @@ void handle_tcp(net_interface_t *iface, uint8_t *packet, uint32_t ip_hdr_len) {
    * ==================================================================== */
   case TCP_FIN_WAIT_2: {
     if (payload_len > 0 && seq == sock->rcv_nxt) {
-      if (sock->on_data) sock->on_data(payload, payload_len);
+      if (sock->on_data) sock->on_data(sock, payload, payload_len);
       sock->rcv_nxt += payload_len;
       tcp_reorder_drain(sock);
       tcp_send_pure_ack(iface, sock);
@@ -458,20 +459,39 @@ void tcp_tick(uint32_t now_ms) {
 /* The rtx_tick callback above needs the interface but we can only get it
  * lazily, so wrap. */
 extern net_interface_t *net_get_primary_interface(void);
+
+/* Weak hook into the socket layer. Defined in socket.c. tcp.c can't include
+ * socket.h directly (layering — socket sits on top of tcp), so we forward-
+ * declare and call. If you build a stripped kernel without socket.c, link
+ * with a `void socket_on_state_change(tcp_socket_t *){}` stub. */
+void socket_on_state_change(tcp_socket_t *sock);
+
 void tcp_tick_with_iface(uint32_t now_ms) {
   net_interface_t *iface = net_get_primary_interface();
   if (!iface) return;
   for (int i = 0; i < TCP_MAX_SOCKETS; i++) {
     tcp_socket_t *s = &tcp_sockets[i];
-    if (!s->active) continue;
+    if (!s->active) {
+      /* Still notify on the active -> CLOSED edge so the socket layer can
+       * detach its fd. After the first notification, last_notified_state is
+       * TCP_CLOSED and we stop firing. */
+      if (s->last_notified_state != TCP_CLOSED) {
+        s->state = TCP_CLOSED;
+        socket_on_state_change(s);
+        s->last_notified_state = TCP_CLOSED;
+      }
+      continue;
+    }
     if (s->state == TCP_TIME_WAIT) {
       if ((int32_t)(now_ms - s->time_wait_deadline_ms) >= 0)
         tcp_socket_free(s);
-      continue;
-    }
-    if (tcp_rtx_tick(iface, s, now_ms)) {
+    } else if (tcp_rtx_tick(iface, s, now_ms)) {
       tcp_socket_free(s);
       if (s->on_data == wget_on_data) http_finished = true;
+    }
+    if (s->state != s->last_notified_state) {
+      socket_on_state_change(s);
+      s->last_notified_state = s->state;
     }
   }
 }
