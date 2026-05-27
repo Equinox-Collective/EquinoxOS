@@ -1541,9 +1541,15 @@ static void parse_html(const char *html, uint32_t size) {
                    tag_eq(tag, "main") || tag_eq(tag, "nav") ||
                    tag_eq(tag, "aside") || tag_eq(tag, "blockquote")) {
           flush_current(current, &current_len, style, in_list);
-          /* Add padding blank lines if CSS padding is set */
+          /* Add padding blank lines if CSS padding is set —
+           * but only if we are NOT currently sitting on a grid
+           * container level (otherwise those blanks land between
+           * cells with grid_cols=0 and snap the right column
+           * down underneath the left one). */
           int pad = style_stack[style_depth].padding;
-          if (pad > 0) {
+          if (style_stack[style_depth].grid_cols > 1) {
+            /* between cells of a grid: emit nothing */
+          } else if (pad > 0) {
             for (int p = 0; p < pad; p++)
               push_line("", 0, STYLE_NORMAL, false);
           } else {
@@ -1556,7 +1562,9 @@ static void parse_html(const char *html, uint32_t size) {
                    tag_eq(tag, "/aside") || tag_eq(tag, "/blockquote")) {
           flush_current(current, &current_len, style, in_list);
           int pad = style_stack[style_depth].padding;
-          if (pad > 0) {
+          if (style_stack[style_depth].grid_cols > 1) {
+            /* between cells of a grid: emit nothing */
+          } else if (pad > 0) {
             for (int p = 0; p < pad; p++)
               push_line("", 0, STYLE_NORMAL, false);
           } else {
