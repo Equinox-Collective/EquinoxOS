@@ -60,6 +60,11 @@ typedef struct {
   int max_width;  /* max-width in pixels (0 = unset)   */
   int font_size;  /* font-size hint: 0=normal, 1=large, 2=xlarge */
   bool uppercase; /* text-transform: uppercase         */
+  /* Layout — set by `display:grid|flex` and
+   * `grid-template-columns:repeat(N,...)` (or `1fr 1fr ...`). When
+   * this element is rendered, its direct children get laid out
+   * side-by-side, each owning a 1/N slice of the content area. */
+  int grid_cols;  /* 0 = not a grid/flex container, N = N columns */
 } css_rule_t;
 
 static css_rule_t css_rules[MAX_CSS_RULES];
@@ -186,6 +191,11 @@ typedef struct {
   int font_size;  /* 0=normal, 1=large, 2=xlarge */
   bool uppercase; /* text-transform: uppercase */
   char link_url[128];
+  /* Grid layout — see style_state_t. 0 (or 1) means full-width;
+   * 2..6 places this line inside one cell of an N-column grid. */
+  int grid_cols;
+  int grid_col;
+  int grid_row;
 } line_t;
 
 static uint32_t fb[WIN_W * WIN_H];
@@ -222,6 +232,23 @@ typedef struct {
   int max_width;
   int font_size;
   bool uppercase;
+  /* Grid layout state ----------------------------------------------
+   * `grid_cols`     – if THIS element is itself a grid/flex container,
+   *                   how many columns its direct children should be
+   *                   placed into. 0 = not a container.
+   * `grid_child_idx`– running counter of direct-child blocks already
+   *                   handed out a column. Incremented when a child
+   *                   push_style_state()'s under us.
+   * `my_cols/my_col/my_row` – the cell THIS element is rendered in
+   *                   (inherited downward so text deep inside a cell
+   *                    still knows its column). 0 / 0 / 0 outside any
+   *                    grid.
+   */
+  int grid_cols;
+  int grid_child_idx;
+  int my_cols;
+  int my_col;
+  int my_row;
 } style_state_t;
 
 static eid_font_t *h_font = NULL;
@@ -239,7 +266,25 @@ static void reset_style_stack(void) {
 
 static void push_style_state(void) {
   if (style_depth < MAX_STYLE_STACK - 1) {
-    style_stack[style_depth + 1] = style_stack[style_depth];
+    style_state_t *parent = &style_stack[style_depth];
+    style_state_t *child = &style_stack[style_depth + 1];
+    *child = *parent;
+    /* The child is a fresh element — by default it is not itself a
+     * grid container and has no children yet. (apply_css_for_element
+     * may later set child->grid_cols when this element is the next
+     * grid container down.) */
+    child->grid_cols = 0;
+    child->grid_child_idx = 0;
+    /* If our parent IS a grid container, take the next cell. */
+    if (parent->grid_cols > 1) {
+      int idx = parent->grid_child_idx;
+      child->my_cols = parent->grid_cols;
+      child->my_col = idx % parent->grid_cols;
+      child->my_row = idx / parent->grid_cols;
+      parent->grid_child_idx = idx + 1;
+    }
+    /* else: my_cols/my_col/my_row already copied from parent, so
+     * grandchildren stay in the same cell as their grand-parent. */
     style_depth++;
   }
 }
@@ -267,6 +312,12 @@ static void apply_css_to_current_state(const css_rule_t *r) {
     style_stack[style_depth].font_size = r->font_size;
   if (r->uppercase)
     style_stack[style_depth].uppercase = true;
+  /* Grid-container declaration: turn THIS element into a grid so the
+   * next direct-child push_style_state() splits its kids by column. */
+  if (r->grid_cols > 1) {
+    style_stack[style_depth].grid_cols = r->grid_cols;
+    style_stack[style_depth].grid_child_idx = 0;
+  }
 }
 
 static void pop_style_state(void) {
@@ -478,7 +529,43 @@ static void apply_css_property(css_rule_t *rule, const char *prop,
   } else if (strncmp(prop, "display", 7) == 0) {
     if (strstr(val, "none")) {
       rule->display_none = true;
+    } else if (strstr(val, "grid") || strstr(val, "flex")) {
+      /* Tentative — `grid-template-columns` (or counting `1fr` tokens
+       * for plain `display:flex` rows) refines `grid_cols` below.
+       * Default 1 means "container exists but we don't know N yet" —
+       * children won't be split unless a later prop sets N > 1. */
+      if (rule->grid_cols == 0)
+        rule->grid_cols = 1;
     }
+  } else if (strncmp(prop, "grid-template-columns", 21) == 0) {
+    int n = 0;
+    const char *rep = strstr(val, "repeat(");
+    if (rep) {
+      rep += 7;
+      while (*rep == ' ')
+        rep++;
+      while (*rep >= '0' && *rep <= '9') {
+        n = n * 10 + (*rep - '0');
+        rep++;
+      }
+    } else {
+      /* Count whitespace-separated tokens — "1fr 1fr 1fr" → 3.
+       * Auto-fit / auto-fill we give up on and stick with 0. */
+      if (!strstr(val, "auto-fit") && !strstr(val, "auto-fill")) {
+        bool in_tok = false;
+        for (const char *v = val; *v; v++) {
+          if (*v == ' ' || *v == '\t') {
+            in_tok = false;
+          } else {
+            if (!in_tok)
+              n++;
+            in_tok = true;
+          }
+        }
+      }
+    }
+    if (n > 0 && n <= 6)
+      rule->grid_cols = n;
   } else if (strncmp(prop, "padding", 7) == 0 && prop[7] == '\0') {
     /* Convert px to line-units: rough heuristic */
     int px = 0;
@@ -895,47 +982,61 @@ static void apply_css_for_element(const char *tag) {
   extract_attr(tag, "id", id, MAX_CSS_CLASS);
   extract_attr(tag, "style", inline_style, sizeof(inline_style));
 
-  /* 1. Stylesheet rules (element, .class, #id, element.class selectors) */
+  /* 1. Stylesheet rules (element, .class, #id, element.class selectors).
+   *
+   * For descendant combinators ('.stats .grid', 'header nav a', ...) we
+   * collapse to matching just the right-most simple selector — i.e. we
+   * pretend the rule is '.grid' / 'a' here. That's looser than real CSS
+   * but on real sites the right-most token is usually specific enough
+   * (e.g. `.grid` only appears inside `.stats`), and properties like
+   * `display:grid` need to fire on the page or layout falls apart. */
   for (int i = 0; i < css_rule_count; i++) {
     const css_rule_t *r = &css_rules[i];
     bool match = false;
+    const char *sel = r->selector;
+    const char *last_space = NULL;
+    for (const char *q = sel; *q; q++)
+      if (*q == ' ')
+        last_space = q;
+    if (last_space)
+      sel = last_space + 1;
 
-    if (r->selector[0] == '.') {
-      if (cls[0] && has_class(cls, r->selector + 1))
+    if (sel[0] == '.') {
+      if (cls[0] && has_class(cls, sel + 1))
         match = true;
-    } else if (r->selector[0] == '#') {
-      if (id[0] && strcmp(r->selector + 1, id) == 0)
+    } else if (sel[0] == '#') {
+      if (id[0] && strcmp(sel + 1, id) == 0)
         match = true;
     } else {
       /* Element or Element.class or Element#id */
       char sel_elem[MAX_SELECTOR];
       int dot_idx = -1;
       int hash_idx = -1;
-      for (int k = 0; r->selector[k]; k++) {
-        if (r->selector[k] == '.') {
+      for (int k = 0; sel[k]; k++) {
+        if (sel[k] == '.') {
           dot_idx = k;
           break;
         }
-        if (r->selector[k] == '#') {
+        if (sel[k] == '#') {
           hash_idx = k;
           break;
         }
       }
 
       if (dot_idx != -1) {
-        strncpy(sel_elem, r->selector, dot_idx);
+        strncpy(sel_elem, sel, dot_idx);
         sel_elem[dot_idx] = '\0';
         if (strcmp(sel_elem, elem) == 0 &&
-            has_class(cls, r->selector + dot_idx + 1))
+            has_class(cls, sel + dot_idx + 1))
           match = true;
       } else if (hash_idx != -1) {
-        strncpy(sel_elem, r->selector, hash_idx);
+        strncpy(sel_elem, sel, hash_idx);
         sel_elem[hash_idx] = '\0';
         if (strcmp(sel_elem, elem) == 0 &&
-            strcmp(id, r->selector + hash_idx + 1) == 0)
+            strcmp(id, sel + hash_idx + 1) == 0)
           match = true;
       } else {
-        if (elem[0] && strcmp(r->selector, elem) == 0)
+        if (elem[0] && strcmp(sel, elem) == 0)
           match = true;
       }
     }
@@ -1093,6 +1194,9 @@ static void push_line(const char *text, int len, line_style_t style,
   lines[line_count].padding = style_stack[style_depth].padding;
   lines[line_count].font_size = style_stack[style_depth].font_size;
   lines[line_count].uppercase = style_stack[style_depth].uppercase;
+  lines[line_count].grid_cols = style_stack[style_depth].my_cols;
+  lines[line_count].grid_col = style_stack[style_depth].my_col;
+  lines[line_count].grid_row = style_stack[style_depth].my_row;
 
   if (style == STYLE_LINK) {
     extract_attr(tag_context, "href", lines[line_count].link_url, 127);
@@ -1113,7 +1217,18 @@ static void blank_line(void) {
 
 static void append_word(char *line, int *len, const char *word, int word_len,
                         line_style_t style, bool indent) {
-  int max_chars = indent ? (LINE_CHARS - 4) : LINE_CHARS;
+  /* Cell-aware wrap: if we're inside a grid cell, our usable width
+   * is only a 1/N slice of the screen. Without this, text from a
+   * single card would still wrap at the full 74-char window and
+   * spill into other cells when the column-aware draw loop offsets
+   * it to cell_x. */
+  int cols = style_stack[style_depth].my_cols;
+  int base = LINE_CHARS;
+  if (cols > 1)
+    base = LINE_CHARS / cols;
+  if (base < 8)
+    base = 8;
+  int max_chars = indent ? (base - 4) : base;
   if (word_len <= 0)
     return;
 
@@ -1638,6 +1753,18 @@ static void draw_text_line(int x, int y, const line_t *ln) {
   line_style_t style = ln->style;
   const char *text = ln->text;
 
+  /* If this line belongs to a grid cell, all the "full-width"
+   * decorations below (HR rule, full-width background, align:center)
+   * have to be clamped to the cell — otherwise card 1's background
+   * spills across cards 2/3/4 and the layout looks like one giant
+   * blob. */
+  int cell_left = CONTENT_X;
+  int cell_width = CONTENT_W;
+  if (ln->grid_cols > 1) {
+    cell_width = (WIN_W - 36) / ln->grid_cols;
+    cell_left = CONTENT_X + ln->grid_col * cell_width;
+  }
+
   int w = strlen(text) * 8;
   /* Use TTF width estimate if using TTF font */
   bool use_ttf = false;
@@ -1661,9 +1788,9 @@ static void draw_text_line(int x, int y, const line_t *ln) {
   }
 
   if (ln->css_align == ALIGN_CENTER) {
-    x = CONTENT_X + (CONTENT_W - w) / 2;
+    x = cell_left + (cell_width - w) / 2;
   } else if (ln->css_align == ALIGN_RIGHT) {
-    x = CONTENT_X + CONTENT_W - w;
+    x = cell_left + cell_width - w;
   }
 
   uint32_t color = ln->css_color ? ln->css_color : color_for_style(style);
@@ -1671,8 +1798,11 @@ static void draw_text_line(int x, int y, const line_t *ln) {
   /* CSS background override */
   if (ln->css_bg) {
     if (ln->full_width_bg) {
-      /* Fill the entire window width for block-level backgrounds */
-      eid_draw_rect(fb, WIN_W, WIN_H, 0, y - 2, WIN_W, LINE_H, ln->css_bg);
+      /* Fill the entire window width for block-level backgrounds
+       * (or the cell when this line lives inside a grid cell). */
+      int bgx = (ln->grid_cols > 1) ? cell_left - 4 : 0;
+      int bgw = (ln->grid_cols > 1) ? cell_width : WIN_W;
+      eid_draw_rect(fb, WIN_W, WIN_H, bgx, y - 2, bgw, LINE_H, ln->css_bg);
     } else {
       int bg_w = w + 12;
       if (bg_w < 24)
@@ -1689,8 +1819,8 @@ static void draw_text_line(int x, int y, const line_t *ln) {
   }
 
   if (style == STYLE_HR) {
-    eid_draw_line(fb, WIN_W, WIN_H, CONTENT_X, y + 8, CONTENT_X + CONTENT_W,
-                  y + 8, CLR_BORDER);
+    eid_draw_line(fb, WIN_W, WIN_H, cell_left, y + 8,
+                  cell_left + cell_width, y + 8, CLR_BORDER);
     return;
   }
 
@@ -1778,29 +1908,74 @@ static void render(const char *filename) {
     scroll_line = max_scroll;
 
   int cur_y = CONTENT_Y + 14; /* Offset for the page title bar */
+  /* Per-column Y cursors for the grid renderer. per_col_y[c] tracks
+   * how far down column c has already been filled within the current
+   * grid run. When we hit a non-grid line (or the run ends), we
+   * sync cur_y up to max(per_col_y[*]) so the next full-width line
+   * starts below all cells. */
+  int per_col_y[6];
+  for (int c = 0; c < 6; c++)
+    per_col_y[c] = cur_y;
+  int last_grid_cols = 0;
+  int last_grid_row = -1;
   for (int i = 0; i < v_lines; i++) {
     int idx = scroll_line + i;
     if (idx >= line_count)
       break;
 
-    int cur_x = CONTENT_X + (lines[idx].indent ? 18 : 0);
-    draw_text_line(cur_x, cur_y, &lines[idx]);
+    const line_t *ln = &lines[idx];
+    int g_cols = (ln->grid_cols > 1) ? ln->grid_cols : 0;
+
+    /* Grid-run transitions: when the column count or row index
+     * changes, sync cur_y so the next row / non-grid section
+     * starts BELOW everything that was already drawn. */
+    if (g_cols != last_grid_cols ||
+        (g_cols > 0 && ln->grid_row != last_grid_row)) {
+      int sync_y = cur_y;
+      int span = last_grid_cols > 0 ? last_grid_cols : 1;
+      for (int c = 0; c < span && c < 6; c++)
+        if (per_col_y[c] > sync_y)
+          sync_y = per_col_y[c];
+      cur_y = sync_y;
+      for (int c = 0; c < 6; c++)
+        per_col_y[c] = cur_y;
+      last_grid_cols = g_cols;
+      last_grid_row = ln->grid_row;
+    }
+
+    int cur_x;
+    int draw_y;
+    if (g_cols > 0) {
+      int cell_w = (WIN_W - 36) / g_cols;
+      cur_x = CONTENT_X + ln->grid_col * cell_w + (ln->indent ? 18 : 0);
+      draw_y = per_col_y[ln->grid_col];
+    } else {
+      cur_x = CONTENT_X + (ln->indent ? 18 : 0);
+      draw_y = cur_y;
+    }
+    draw_text_line(cur_x, draw_y, ln);
 
     /* Handle link interaction */
-    if (lines[idx].style == STYLE_LINK && lines[idx].link_url[0]) {
-      uint32_t id = eid_get_id(lines[idx].link_url, cur_x, cur_y);
+    if (ln->style == STYLE_LINK && ln->link_url[0]) {
+      uint32_t id = eid_get_id(ln->link_url, cur_x, draw_y);
       uint32_t state = eid_process_interaction(
-          &ui, id, cur_x, cur_y, strlen(lines[idx].text) * 8, LINE_H);
+          &ui, id, cur_x, draw_y, strlen(ln->text) * 8, LINE_H);
       if (state & EID_STATE_CLICKED) {
         char resolved[128];
-        resolve_url(current_url, lines[idx].link_url, resolved);
+        resolve_url(current_url, ln->link_url, resolved);
         strcpy(current_url, resolved);
         load_page(current_url);
         return; /* Avoid drawing more in this frame */
       }
     }
 
-    cur_y += LINE_H;
+    if (g_cols > 0) {
+      per_col_y[ln->grid_col] += LINE_H;
+    } else {
+      cur_y += LINE_H;
+      for (int c = 0; c < 6; c++)
+        per_col_y[c] = cur_y;
+    }
   }
 
   /* Scrollbar */
