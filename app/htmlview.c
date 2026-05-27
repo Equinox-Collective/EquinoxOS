@@ -1581,6 +1581,14 @@ static void render(const char *filename) {
 #include <url.h>
 #include "../third_party/ca_bundle/ca_bundle.h"
 
+/* Optional IP override applied to the FIRST eq_http_get() call only.
+ * Convenient for working around the flaky QEMU SLIRP DNS proxy: pass a
+ * dotted-quad IP as argv[2] (`run bin/browser.elf <url> <ip>`). Subsequent
+ * navigations (via L: edit URL or clicked links) go through normal DNS.
+ *
+ * Stored in network byte order, zero = unused. */
+static uint32_t g_first_load_ip_override_be = 0;
+
 static void load_page(const char *url) {
   print("[BROWSER] Navigating to: ");
   print(url);
@@ -1612,6 +1620,10 @@ static void load_page(const char *url) {
   opts.recv_timeout_ms   = 20000;
   opts.body_limit_bytes  = 1u * 1024u * 1024u;
   opts.verbose           = 1;
+  if (g_first_load_ip_override_be) {
+    opts.ip_override_be = g_first_load_ip_override_be;
+    g_first_load_ip_override_be = 0;  /* one-shot: only the boot URL */
+  }
 
   eq_http_response_t resp;
   memset(&resp, 0, sizeof resp);
@@ -1731,6 +1743,12 @@ int main(int argc, char **argv) {
      * its original "index.html" local-file default. */
     strcpy(current_url, "http://example.com/");
   }
+  /* Optional argv[2]: dotted-quad IP override for the first load_page().
+   * Same convention as urlget — useful while QEMU SLIRP DNS is flaky. */
+  if (argc > 2 && argv[2] != 0) {
+    uint32_t ip_be = net_dns_resolve(argv[2]);  /* parses dotted-quad too */
+    if (ip_be) g_first_load_ip_override_be = ip_be;
+  }
 #endif
 
   for (int i = 0; i < WIN_W * WIN_H; i++)
@@ -1748,6 +1766,14 @@ int main(int argc, char **argv) {
     if (max_scroll < 0)
       max_scroll = 0;
 
+    /* Track Shift across frames so typing ':', '/', '?', '#', etc. in the
+     * URL bar works. The PS/2 driver delivers both make and break codes
+     * via the ring buffer; we just watch for 0x2A/0x36 (Shift down) and
+     * 0xAA/0xB6 (Shift up). */
+    static bool shift_held = false;
+    if (key == 0x2A || key == 0x36) shift_held = true;
+    else if (key == 0xAA || key == 0xB6) shift_held = false;
+
     if (key == 0x01)
       break;
 
@@ -1761,8 +1787,29 @@ int main(int argc, char **argv) {
           current_url[url_cursor] = '\0';
         }
       } else {
+        /* Shifted symbols needed for URLs: ':' = Shift+';', '?' = Shift+'/',
+         * '#' = Shift+'3', '&' = Shift+'7', '=' is unshifted. Cover the
+         * full upper-row remap inline. */
         char c = scancode_to_ascii(key);
-        if (c >= 32 && c < 127 && url_cursor < 120) {
+        if (shift_held && c) {
+          static const char shift_map[128] = {
+            [0x02]='!', [0x03]='@', [0x04]='#', [0x05]='$', [0x06]='%',
+            [0x07]='^', [0x08]='&', [0x09]='*', [0x0A]='(', [0x0B]=')',
+            [0x0C]='_', [0x0D]='+',
+            [0x10]='Q', [0x11]='W', [0x12]='E', [0x13]='R', [0x14]='T',
+            [0x15]='Y', [0x16]='U', [0x17]='I', [0x18]='O', [0x19]='P',
+            [0x1A]='{', [0x1B]='}',
+            [0x1E]='A', [0x1F]='S', [0x20]='D', [0x21]='F', [0x22]='G',
+            [0x23]='H', [0x24]='J', [0x25]='K', [0x26]='L',
+            [0x27]=':', [0x28]='"', [0x29]='~', [0x2B]='|',
+            [0x2C]='Z', [0x2D]='X', [0x2E]='C', [0x2F]='V', [0x30]='B',
+            [0x31]='N', [0x32]='M',
+            [0x33]='<', [0x34]='>', [0x35]='?',
+          };
+          if (key < sizeof shift_map && shift_map[key])
+            c = shift_map[key];
+        }
+        if (c >= 32 && c < 127 && url_cursor < (int)(sizeof current_url - 1)) {
           current_url[url_cursor++] = c;
           current_url[url_cursor] = '\0';
         }
