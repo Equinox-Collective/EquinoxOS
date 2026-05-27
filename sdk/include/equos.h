@@ -57,6 +57,17 @@
 #define SYS_SHELL_EXEC  73
 #define SYS_GET_FG_APP  74   /* () -> PID активного foreground-app, 0 если нет */
 
+/* --- Entropy --------------------------------------------------------------
+ * Fill a userspace buffer with cryptographically usable random bytes
+ * (RDRAND-backed; soft fallback on ancient CPUs). See sdk/include/sys/random.h.
+ *
+ *   rdi = void    *buf
+ *   rsi = uint32_t len
+ *   rdx = uint32_t flags  (reserved, must be 0)
+ *
+ * Returns 0 on success, -1 on bad args. Never partial.                    */
+#define SYS_GETRANDOM   86
+
 typedef struct {
   uint64_t pid;
   uint64_t cr3;

@@ -18,6 +18,7 @@
 #include "system/mem/shm.h"
 #include "system/usr/task.h"
 #include "system/misc/timer.h"
+#include "system/misc/random.h"
 #include "system/mem/vmm.h"
 #include "system/hal/hal.h"
 #include "system/usr/ipc.h"
@@ -384,6 +385,10 @@ void kmain(void) {
   serial_puts(COM1, "GDT initialized\n");
   init_sse();
   serial_puts(COM1, "SSE initialized\n");
+  rdrand_init();
+  serial_puts(COM1, rdrand_supported()
+                        ? "RDRAND available\n"
+                        : "RDRAND unavailable, using soft entropy fallback\n");
   pmm_init();
   serial_puts(COM1, "PMM initialized\n");
   vmm_init();
