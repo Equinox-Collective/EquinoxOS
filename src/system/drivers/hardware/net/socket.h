@@ -67,6 +67,9 @@ typedef struct {
   uint32_t       rx_size;       /* current ring capacity                     */
   uint32_t       rcv_timeout_ms;/* 0 = use default                           */
   int32_t        err;
+  uint64_t       owner_pid;     /* current_task->id at sock_create time;
+                                   used by sock_close_owned_by(pid) to
+                                   reap leaked fds on SYS_EXIT.            */
 } socket_entry_t;
 
 /* fd table API ------------------------------------------------------------- */
@@ -78,6 +81,13 @@ int sock_recv(int fd, uint8_t *buf, uint32_t len);
 int sock_close(int fd);
 int sock_setsockopt(int fd, int level, int optname,
                     const void *val, uint32_t vallen);
+
+/* Reap every fd whose owner_pid matches `pid`. Called from SYS_EXIT so
+ * a crashing or exiting process doesn't leave dangling TCBs behind that
+ * would later log "[TCP] segment for unknown port …" on every
+ * retransmit from the peer. Safe to call with no sockets owned —
+ * returns the count actually closed. */
+int sock_close_owned_by(uint64_t pid);
 
 /* Internal: callback wired into tcp_connect() so the TCP layer can deliver
  * in-order, reassembled bytes for a particular TCB. Looked up by tcb ptr. */

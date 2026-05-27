@@ -259,6 +259,23 @@ void syscall_handler(syscall_regs_t *regs) {
     // чтобы драйвер не пытался читать из удаленных страниц
     ac97_stop();
 
+    /* 0. Закрываем все сокеты этого процесса, иначе TCB остаются
+     * "активными" и каждый ретрансмит сервера долбит kernel-лог
+     * сообщениями "[TCP] segment for unknown port …". sock_close
+     * мягко гасит TCB (FIN) — реальное освобождение слота произойдёт
+     * в tcp_tick, когда удалённая сторона ACK'нет наш FIN или истечёт
+     * TIME_WAIT. До тех пор пакеты для local_port всё ещё попадают в
+     * нужный TCB и игнорируются (CLOSE_WAIT/TIME_WAIT) без спама. */
+    {
+      extern int sock_close_owned_by(uint64_t pid);
+      int n = sock_close_owned_by(current_task->id);
+      if (n > 0) {
+        char mb[64];
+        sprintf(mb, "[SYS] Reaped %d socket(s) on exit\n", n);
+        term_print(mb);
+      }
+    }
+
     // 1. Освобождаем физическую память процесса!
     // Эту функцию мы написали в прошлом шаге (в vmm.c)
     extern void vmm_destroy_address_space(uint64_t cr3_phys);
