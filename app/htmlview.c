@@ -1191,9 +1191,56 @@ static void copy_title_from_html(const char *html, uint32_t size) {
       }
 
       int out = 0;
-      for (uint32_t j = start; j < end && out < 63; j++) {
-        if (!ascii_isspace(html[j]) || (out > 0 && page_title[out - 1] != ' '))
-          page_title[out++] = ascii_isspace(html[j]) ? ' ' : html[j];
+      uint32_t j = start;
+      while (j < end && out < 63) {
+        unsigned char b0 = (unsigned char)html[j];
+
+        /* Same UTF-8 → ASCII fallback as in the body text loop. The
+         * <title> ends up rendered to the page-title strip via plain
+         * eid_draw_text with a single-byte font, so leaving raw multi-
+         * byte sequences in produces 2-3 garbage glyphs (e.g. "—"
+         * shows as "ÔÇö"). */
+        if (b0 >= 0x80) {
+          unsigned char b1 = (j + 1 < end) ? (unsigned char)html[j + 1] : 0;
+          unsigned char b2 = (j + 2 < end) ? (unsigned char)html[j + 2] : 0;
+          const char *r = "?";
+          int eaten = 1;
+          char tmp[2] = {0, 0};
+          if (b0 == 0xC2 && b1 == 0xA0) { r = " ";  eaten = 2; }
+          else if (b0 == 0xC2 && b1 == 0xB7) { r = "*"; eaten = 2; }
+          else if (b0 == 0xE2 && b1 == 0x80) {
+            eaten = 3;
+            switch (b2) {
+            case 0x90: case 0x91: case 0x92: case 0x93:
+            case 0x94: case 0x95: r = "-"; break;
+            case 0x98: case 0x99: case 0x9A: case 0x9B:
+              tmp[0] = '\''; r = tmp; break;
+            case 0x9C: case 0x9D: case 0x9E: case 0x9F: r = "\""; break;
+            case 0xA2: r = "*"; break;
+            case 0xA6: r = "..."; break;
+            default:   r = "?"; break;
+            }
+          } else if (b0 == 0xE2 && b1 == 0x86) {
+            eaten = 3;
+            switch (b2) {
+            case 0x90: r = "<-"; break;
+            case 0x91: r = "^";  break;
+            case 0x92: r = "->"; break;
+            case 0x93: r = "v";  break;
+            default:   r = "->"; break;
+            }
+          } else if (b0 >= 0xF0) { eaten = 4; }
+          else if (b0 >= 0xE0)   { eaten = 3; }
+          else if (b0 >= 0xC0)   { eaten = 2; }
+          for (int k = 0; r[k] && out < 63; k++)
+            page_title[out++] = r[k];
+          j += eaten;
+          continue;
+        }
+
+        if (!ascii_isspace((char)b0) || (out > 0 && page_title[out - 1] != ' '))
+          page_title[out++] = ascii_isspace((char)b0) ? ' ' : (char)b0;
+        j++;
       }
       page_title[out] = '\0';
       return;
