@@ -1918,7 +1918,15 @@ static void render(const char *filename) {
     per_col_y[c] = cur_y;
   int last_grid_cols = 0;
   int last_grid_row = -1;
-  for (int i = 0; i < v_lines; i++) {
+  /* The content area ends here. We can't just stop after v_lines
+   * iterations the way we used to — inside a grid run the lines
+   * stack column-by-column (col 0 first, then col 1...), so a
+   * naive "v_lines lines = v_lines * LINE_H pixels" assumption
+   * would chop off the entire right column. Instead, iterate every
+   * line that could plausibly be on screen and stop only when both
+   * the master cur_y AND every column cursor are past the bottom. */
+  int content_end_y = WIN_H - 20;
+  for (int i = 0;; i++) {
     int idx = scroll_line + i;
     if (idx >= line_count)
       break;
@@ -1976,6 +1984,20 @@ static void render(const char *filename) {
       for (int c = 0; c < 6; c++)
         per_col_y[c] = cur_y;
     }
+
+    /* Early-exit when every cursor is past the bottom of the
+     * visible area — both the master cur_y and every per-column
+     * cursor inside an active grid run. */
+    bool all_below = cur_y > content_end_y;
+    if (all_below && g_cols > 0) {
+      for (int c = 0; c < g_cols && c < 6; c++)
+        if (per_col_y[c] <= content_end_y) {
+          all_below = false;
+          break;
+        }
+    }
+    if (all_below)
+      break;
   }
 
   /* Scrollbar */
