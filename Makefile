@@ -154,7 +154,7 @@ doom.elf: setup $(SDK_OBJS) $(DOOM_OBJS)
 # --- APPS BUILD RULES --------------------------------------------------------
 APP_SRCS = $(wildcard app/*.c)
 APP_OBJS = $(patsubst app/%.c,app/%.o,$(APP_SRCS))
-APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_ROOT)/bin/htmlview.elf $(ISO_ROOT)/bin/niplay.elf $(ISO_ROOT)/bin/widget_demo.elf $(ISO_ROOT)/bin/ipc_test.elf
+APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_ROOT)/bin/htmlview.elf $(ISO_ROOT)/bin/niplay.elf $(ISO_ROOT)/bin/widget_demo.elf $(ISO_ROOT)/bin/ipc_test.elf $(ISO_ROOT)/bin/randtest.elf
 
 # Object builds need the Windows directory tree from setup before they start;
 # this matters when users run `make -j`.
