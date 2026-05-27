@@ -201,9 +201,18 @@ void handle_tcp(net_interface_t *iface, uint8_t *packet, uint32_t ip_hdr_len) {
   if (!sock) {
     /* Don't spam — only log if it's not just a stray ACK to a closed port. */
     if ((th->flags & TCP_RST) == 0) {
-      char mbuf[80];
-      sprintf(mbuf, "[TCP] segment for unknown port %u\n",
-              (unsigned)dest_port);
+      uint16_t src_port = HTONS(th->src_port);
+      char mbuf[160];
+      sprintf(mbuf,
+              "[TCP] segment for unknown port %u (src %u.%u.%u.%u:%u flags=0x%x ihl=%u)\n",
+              (unsigned)dest_port,
+              (unsigned)((src_ip >> 24) & 0xFF),
+              (unsigned)((src_ip >> 16) & 0xFF),
+              (unsigned)((src_ip >> 8)  & 0xFF),
+              (unsigned)( src_ip        & 0xFF),
+              (unsigned)src_port,
+              (unsigned)th->flags,
+              (unsigned)ip_hdr_len);
       term_print(mbuf);
     }
     return;
@@ -424,6 +433,18 @@ tcp_socket_t *tcp_connect(net_interface_t *iface, uint32_t dest_ip,
     s->on_data     = callback;
     s->active      = true;
 
+    {
+      char cbuf[128];
+      sprintf(cbuf,
+              "[TCP] connect: local=%u remote=%u.%u.%u.%u:%u (slot %d)\n",
+              (unsigned)s->local_port,
+              (unsigned)((dest_ip >> 24) & 0xFF),
+              (unsigned)((dest_ip >> 16) & 0xFF),
+              (unsigned)((dest_ip >> 8)  & 0xFF),
+              (unsigned)( dest_ip        & 0xFF),
+              (unsigned)port, i);
+      term_print(cbuf);
+    }
     tcp_send_packet(iface, s, TCP_SYN, NULL, 0);
     return s;
   }
