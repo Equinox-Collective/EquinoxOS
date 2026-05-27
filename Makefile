@@ -200,7 +200,13 @@ APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_RO
 # Apps that link against libbearssl.a (phase 3b+). These get their own
 # explicit rules below because they need (a) BearSSL public headers in the
 # include path and (b) libbearssl.a appended at link time.
-APP_ELFS_TLS    = $(ISO_ROOT)/bin/tlsboot.elf $(ISO_ROOT)/bin/tlstest.elf $(ISO_ROOT)/bin/catest.elf $(ISO_ROOT)/bin/httpsget.elf
+APP_ELFS_TLS    = $(ISO_ROOT)/bin/tlsboot.elf $(ISO_ROOT)/bin/tlstest.elf $(ISO_ROOT)/bin/catest.elf $(ISO_ROOT)/bin/httpsget.elf $(ISO_ROOT)/bin/urlget.elf
+
+# Phase 5: HTTP/HTTPS client library. Lives in its own directory so it
+# isn't auto-folded into $(SDK_OBJS) — apps that need it append
+# $(HTTP_CLIENT_OBJ) explicitly. Built with bearssl includes because
+# the .c #includes <bearssl.h> / <bearssl_io.h>.
+HTTP_CLIENT_OBJ := sdk/lib_http/http_client.o
 
 # Object builds need the Windows directory tree from setup before they start;
 # this matters when users run `make -j`.
@@ -241,6 +247,17 @@ app/httpsget.o: app/httpsget.c third_party/ca_bundle/ca_bundle.h
 
 $(ISO_ROOT)/bin/httpsget.elf: app/httpsget.o $(SDK_OBJS) $(BEARSSL_LIB)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(BEARSSL_LIB) -o $@
+
+# urlget — phase 5 wrapper around the new http_client library. Same link
+# soup as the other TLS apps + the dedicated http_client object.
+sdk/lib_http/http_client.o: sdk/lib_http/http_client.c sdk/include/http_client.h sdk/include/url.h
+	$(CC) $(USER_CFLAGS) -I./third_party/bearssl/inc -c $< -o $@
+
+app/urlget.o: app/urlget.c sdk/include/http_client.h sdk/include/url.h third_party/ca_bundle/ca_bundle.h
+	$(CC) $(USER_CFLAGS) -I./third_party/bearssl/inc -c $< -o $@
+
+$(ISO_ROOT)/bin/urlget.elf: app/urlget.o $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(HTTP_CLIENT_OBJ) $(BEARSSL_LIB) -o $@
 
 sysgui_app:
 	@echo "=== Building sysgui (enGUI) ==="
