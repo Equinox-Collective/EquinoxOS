@@ -15,6 +15,7 @@
 #include "../mem/vmm.h"
 #include "../shell/shellsyntx.h"
 #include "../core/cpu.h"
+#include "../misc/random.h"
 #include "ipc.h"
 #include <stdint.h>
 
@@ -743,6 +744,29 @@ void syscall_handler(syscall_regs_t *regs) {
     // даёт жёсткое мерцание + просадку FPS.
     extern volatile uint64_t fg_app_pid;
     regs->rax = fg_app_pid;
+    break;
+  }
+  case 86: { /* SYS_GETRANDOM (buf, len, flags) -> int rc
+              *   rdi = void   *buf    — userspace destination
+              *   rsi = uint32  len    — bytes to fill
+              *   rdx = uint32  flags  — reserved (must be 0 for now)
+              * Always returns 0 on success, -1 on bad args.
+              * No partial fills: either len bytes are written or none. */
+    void    *buf   = (void *)regs->rdi;
+    uint32_t len   = (uint32_t)regs->rsi;
+    uint32_t flags = (uint32_t)regs->rdx;
+    if (!buf || flags != 0) {
+      regs->rax = (uint64_t)(int64_t)-1;
+      break;
+    }
+    if (len == 0) {
+      regs->rax = 0;
+      break;
+    }
+    stac();
+    int rc = rdrand_bytes(buf, len);
+    clac();
+    regs->rax = (uint64_t)(int64_t)rc;
     break;
   }
   default:
