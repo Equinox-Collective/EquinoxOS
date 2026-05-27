@@ -10,3 +10,5 @@ test.bin
 qemu.log
 hdd.img
 *.d
+*.a
+third_party/bearssl/libbearssl.a

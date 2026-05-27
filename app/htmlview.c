@@ -1568,6 +1568,96 @@ static void render(const char *filename) {
                 "L: Edit URL  Up/Down: Scroll  Esc: Exit", CLR_MUTED);
 }
 
+#ifdef BROWSER_BUILD
+/* ----------------------------------------------------------------------- *
+ * BROWSER_BUILD load_page() — used by browser.elf (phase 6).
+ *
+ * Goes through the proper phase-5 HTTP/HTTPS client. Handles both http://
+ * and https:// URLs end-to-end with redirect following; falls back to the
+ * SYS_READ_FILE path for argv[1]s that aren't URLs (e.g. local *.html in
+ * iso_root/res). Replaces the legacy net_http_get() path inline below.
+ * ----------------------------------------------------------------------- */
+#include <http_client.h>
+#include <url.h>
+#include "../third_party/ca_bundle/ca_bundle.h"
+
+/* Optional IP override applied to the FIRST eq_http_get() call only.
+ * Convenient for working around the flaky QEMU SLIRP DNS proxy: pass a
+ * dotted-quad IP as argv[2] (`run bin/browser.elf <url> <ip>`). Subsequent
+ * navigations (via L: edit URL or clicked links) go through normal DNS.
+ *
+ * Stored in network byte order, zero = unused. */
+static uint32_t g_first_load_ip_override_be = 0;
+
+static void load_page(const char *url) {
+  print("[BROWSER] Navigating to: ");
+  print(url);
+  print("\n");
+
+  /* --- File path (local resource) -------------------------------- */
+  if (strncasecmp(url, "http://", 7) != 0 &&
+      strncasecmp(url, "https://", 8) != 0) {
+    uint32_t fsize = 0;
+    char *data = (char *)_syscall(SYS_READ_FILE, (uint64_t)url,
+                                  (uint64_t)&fsize, 0, 0, 0);
+    if (!data) {
+      line_count = 0;
+      push_line("File not found", 14, STYLE_H1, false);
+      push_line(url, strlen(url), STYLE_MUTED, false);
+      return;
+    }
+    if (!is_navigating_history) push_history(url);
+    parse_html(data, fsize);
+    return;
+  }
+
+  /* --- HTTP/HTTPS via the phase-5 client library ----------------- */
+  eq_http_options_t opts;
+  memset(&opts, 0, sizeof opts);
+  opts.trust_anchors     = TAs_MOZ;
+  opts.trust_anchors_num = TAs_MOZ_NUM;
+  opts.follow_redirects  = 5;
+  opts.recv_timeout_ms   = 20000;
+  opts.body_limit_bytes  = 1u * 1024u * 1024u;
+  opts.verbose           = 1;
+  if (g_first_load_ip_override_be) {
+    opts.ip_override_be = g_first_load_ip_override_be;
+    g_first_load_ip_override_be = 0;  /* one-shot: only the boot URL */
+  }
+
+  eq_http_response_t resp;
+  memset(&resp, 0, sizeof resp);
+  int rc = eq_http_get(url, &opts, &resp);
+
+  if (rc != EQ_HTTP_OK || !resp.body || resp.body_len == 0) {
+    line_count = 0;
+    char errbuf[80];
+    sprintf(errbuf, "Network error  rc=%d  http=%d  tls=%d",
+            rc, resp.status_code, resp.tls_last_err);
+    push_line(errbuf, strlen(errbuf), STYLE_H1, false);
+    push_line(url, strlen(url), STYLE_MUTED, false);
+    eq_http_response_free(&resp);
+    return;
+  }
+
+  if (!is_navigating_history) push_history(url);
+
+  /* If the server redirected us, surface the final URL in the address
+   * bar so subsequent relative links resolve correctly. The URL field
+   * is sized at 127 bytes — truncate quietly rather than overflow. */
+  if (resp.final_url && resp.redirects_followed > 0) {
+    size_t flen = strlen(resp.final_url);
+    if (flen >= sizeof current_url) flen = sizeof current_url - 1;
+    memcpy(current_url, resp.final_url, flen);
+    current_url[flen] = '\0';
+  }
+
+  parse_html(resp.body, (uint32_t)resp.body_len);
+  eq_http_response_free(&resp);
+}
+
+#else  /* !BROWSER_BUILD — original htmlview load_page() */
+
 static void load_page(const char *url) {
   print("[BROWSER] Navigating to: ");
   print(url);
@@ -1626,6 +1716,8 @@ static void load_page(const char *url) {
   }
 }
 
+#endif /* BROWSER_BUILD */
+
 int main(int argc, char **argv) {
   eid_init();
 
@@ -1639,8 +1731,25 @@ int main(int argc, char **argv) {
   }
 
   if (argc > 1 && argv[1] != 0) {
-    strcpy(current_url, argv[1]);
+    /* User passed a target. Truncate quietly into current_url[]. */
+    size_t alen = strlen(argv[1]);
+    if (alen >= sizeof current_url) alen = sizeof current_url - 1;
+    memcpy(current_url, argv[1], alen);
+    current_url[alen] = '\0';
   }
+#ifdef BROWSER_BUILD
+  else {
+    /* browser.elf defaults to a real internet page; htmlview.elf keeps
+     * its original "index.html" local-file default. */
+    strcpy(current_url, "http://example.com/");
+  }
+  /* Optional argv[2]: dotted-quad IP override for the first load_page().
+   * Same convention as urlget — useful while QEMU SLIRP DNS is flaky. */
+  if (argc > 2 && argv[2] != 0) {
+    uint32_t ip_be = net_dns_resolve(argv[2]);  /* parses dotted-quad too */
+    if (ip_be) g_first_load_ip_override_be = ip_be;
+  }
+#endif
 
   for (int i = 0; i < WIN_W * WIN_H; i++)
     fb[i] = CLR_BG;
@@ -1657,6 +1766,14 @@ int main(int argc, char **argv) {
     if (max_scroll < 0)
       max_scroll = 0;
 
+    /* Track Shift across frames so typing ':', '/', '?', '#', etc. in the
+     * URL bar works. The PS/2 driver delivers both make and break codes
+     * via the ring buffer; we just watch for 0x2A/0x36 (Shift down) and
+     * 0xAA/0xB6 (Shift up). */
+    static bool shift_held = false;
+    if (key == 0x2A || key == 0x36) shift_held = true;
+    else if (key == 0xAA || key == 0xB6) shift_held = false;
+
     if (key == 0x01)
       break;
 
@@ -1670,8 +1787,29 @@ int main(int argc, char **argv) {
           current_url[url_cursor] = '\0';
         }
       } else {
+        /* Shifted symbols needed for URLs: ':' = Shift+';', '?' = Shift+'/',
+         * '#' = Shift+'3', '&' = Shift+'7', '=' is unshifted. Cover the
+         * full upper-row remap inline. */
         char c = scancode_to_ascii(key);
-        if (c >= 32 && c < 127 && url_cursor < 120) {
+        if (shift_held && c) {
+          static const char shift_map[128] = {
+            [0x02]='!', [0x03]='@', [0x04]='#', [0x05]='$', [0x06]='%',
+            [0x07]='^', [0x08]='&', [0x09]='*', [0x0A]='(', [0x0B]=')',
+            [0x0C]='_', [0x0D]='+',
+            [0x10]='Q', [0x11]='W', [0x12]='E', [0x13]='R', [0x14]='T',
+            [0x15]='Y', [0x16]='U', [0x17]='I', [0x18]='O', [0x19]='P',
+            [0x1A]='{', [0x1B]='}',
+            [0x1E]='A', [0x1F]='S', [0x20]='D', [0x21]='F', [0x22]='G',
+            [0x23]='H', [0x24]='J', [0x25]='K', [0x26]='L',
+            [0x27]=':', [0x28]='"', [0x29]='~', [0x2B]='|',
+            [0x2C]='Z', [0x2D]='X', [0x2E]='C', [0x2F]='V', [0x30]='B',
+            [0x31]='N', [0x32]='M',
+            [0x33]='<', [0x34]='>', [0x35]='?',
+          };
+          if (key < sizeof shift_map && shift_map[key])
+            c = shift_map[key];
+        }
+        if (c >= 32 && c < 127 && url_cursor < (int)(sizeof current_url - 1)) {
           current_url[url_cursor++] = c;
           current_url[url_cursor] = '\0';
         }

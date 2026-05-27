@@ -77,6 +77,14 @@
  * Returns 0 on success, -1 on bad args. Never partial.                    */
 #define SYS_GETRANDOM   86
 
+/* SYS_GET_WALL_TIME — current UTC time from the CMOS / MC146818 RTC.
+ *
+ *   rdi = uint64_t *out   — userspace pointer; receives Unix seconds.
+ *
+ * Returns 0 on success, -1 if `out` is NULL. The kernel does a UIP-safe
+ * read so the value is consistent across the seconds tick boundary.    */
+#define SYS_GET_WALL_TIME 87
+
 typedef struct {
   uint64_t pid;
   uint64_t cr3;

@@ -30,6 +30,7 @@
 #include "net.h"
 #include "../../../../system/mem/memory.h"
 #include "../../../../system/misc/timer.h"
+#include "../../../../system/usr/task.h"
 #include "../../../../syslibc/string.h"
 #include "../../../../syslibc/stdio.h"
 
@@ -137,6 +138,10 @@ int sock_create(void) {
     if (sockets[i].state == SOCK_STATE_FREE) {
       memset(&sockets[i], 0, sizeof(sockets[i]));
       sockets[i].state = SOCK_STATE_CLOSED; /* "exists but not connected" */
+      /* Tag with owning pid so SYS_EXIT can sweep it on abrupt exit.
+       * current_task is set up before any user code runs, so this is
+       * safe from any process context. */
+      sockets[i].owner_pid = current_task ? current_task->id : 0;
       return i;
     }
   }
@@ -265,4 +270,22 @@ int sock_setsockopt(int fd, int level, int optname,
     default:
       return SOCK_ERR_INVAL;
   }
+}
+
+int sock_close_owned_by(uint64_t pid) {
+  int closed = 0;
+  for (int fd = 0; fd < SOCK_MAX; fd++) {
+    socket_entry_t *e = &sockets[fd];
+    if (e->state == SOCK_STATE_FREE) continue;
+    if (e->owner_pid != pid)         continue;
+    /* sock_close already does the right thing: it asks tcp_close to send
+     * a FIN if the connection is ESTABLISHED, frees the ring buffer,
+     * and marks the entry FREE. The TCB will linger in FIN_WAIT_1 /
+     * TIME_WAIT until tcp_tick collects it; that's harmless — packets
+     * for the local port keep matching the (still-active) TCB so the
+     * "unknown port" log stays quiet. */
+    sock_close(fd);
+    closed++;
+  }
+  return closed;
 }

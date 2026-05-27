@@ -36,6 +36,14 @@
 #define TCP_INITIAL_RTO_MS     500
 #define TCP_MAX_RTO_MS         8000
 #define TCP_MAX_RETRIES        5
+/* Pure-FIN retransmissions (no payload) get a lower budget. After
+ * sock_close() the application has already moved on; spending 15+ s
+ * retransmitting an unacked FIN just spams the log without helping
+ * anyone. Two attempts is enough to cope with a single lost FIN; if
+ * the peer's host disappeared (very common under QEMU SLIRP once the
+ * userspace socket is closed), we give up quietly and tcp_socket_free
+ * tears the TCB down. */
+#define TCP_FIN_MAX_RETRIES    2
 /* TIME_WAIT duration — RFC says 2*MSL (~ 60 s). We use a much shorter value
  * to free socket slots quickly on this single-user OS. */
 #define TCP_TIME_WAIT_MS       2000

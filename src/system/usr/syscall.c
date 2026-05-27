@@ -16,6 +16,7 @@
 #include "../shell/shellsyntx.h"
 #include "../core/cpu.h"
 #include "../misc/random.h"
+#include "../misc/rtc.h"
 #include "ipc.h"
 #include <stdint.h>
 
@@ -257,6 +258,23 @@ void syscall_handler(syscall_regs_t *regs) {
     // ВАЖНО: Останавливаем звук ДО очистки памяти,
     // чтобы драйвер не пытался читать из удаленных страниц
     ac97_stop();
+
+    /* 0. Закрываем все сокеты этого процесса, иначе TCB остаются
+     * "активными" и каждый ретрансмит сервера долбит kernel-лог
+     * сообщениями "[TCP] segment for unknown port …". sock_close
+     * мягко гасит TCB (FIN) — реальное освобождение слота произойдёт
+     * в tcp_tick, когда удалённая сторона ACK'нет наш FIN или истечёт
+     * TIME_WAIT. До тех пор пакеты для local_port всё ещё попадают в
+     * нужный TCB и игнорируются (CLOSE_WAIT/TIME_WAIT) без спама. */
+    {
+      extern int sock_close_owned_by(uint64_t pid);
+      int n = sock_close_owned_by(current_task->id);
+      if (n > 0) {
+        char mb[64];
+        sprintf(mb, "[SYS] Reaped %d socket(s) on exit\n", n);
+        term_print(mb);
+      }
+    }
 
     // 1. Освобождаем физическую память процесса!
     // Эту функцию мы написали в прошлом шаге (в vmm.c)
@@ -554,25 +572,37 @@ void syscall_handler(syscall_regs_t *regs) {
     // Enable interrupts so network_thread can process packets
     __asm__ volatile("sti");
 
-    stac();
-    dns_query(iface, hostname);
-    clac();
+    /* Multi-resolver retry. QEMU SLIRP routinely proxies 8.8.8.8 to a
+     * host resolver that returns dead pool members (we kept seeing
+     * 8.6.112.6 / 8.47.69.6 for example.com — they SYN-ACK but never
+     * answer GETs). 1.1.1.1 and 9.9.9.9 reach different upstream
+     * answers via the same SLIRP proxy, so failover actually helps
+     * in practice. Each server gets ~400 timer ticks before we move
+     * on; total worst-case latency ~1.2 s, same order as the old
+     * single-server 1000-tick wait. */
+    static const uint32_t dns_servers[] = {
+        0x08080808, /* 8.8.8.8 — Google */
+        0x01010101, /* 1.1.1.1 — Cloudflare */
+        0x09090909, /* 9.9.9.9 — Quad9 */
+    };
+    uint32_t resolved = 0;
+    for (unsigned s = 0;
+         s < sizeof(dns_servers)/sizeof(dns_servers[0]) && resolved == 0;
+         s++) {
+      stac();
+      dns_query(iface, hostname, dns_servers[s]);
+      clac();
 
-    // Wait for resolution — interrupts MUST be on for network_thread
-    uint32_t timeout = 1000;
-    while (timeout > 0) {
-      uint32_t ip = dns_get_result(hostname);
-      if (ip != 0) {
-        __asm__ volatile("cli");
-        regs->rax = ip;
-        goto dns_done;
+      uint32_t timeout = 400;
+      while (timeout > 0) {
+        uint32_t ip = dns_get_result(hostname);
+        if (ip != 0) { resolved = ip; break; }
+        __asm__ volatile("hlt"); // sleep until next interrupt (timer)
+        timeout--;
       }
-      __asm__ volatile("hlt"); // sleep until next interrupt (timer)
-      timeout--;
     }
     __asm__ volatile("cli");
-    regs->rax = 0;
-  dns_done:
+    regs->rax = resolved;
     break;
   }
   case 41: { // SYS_NET_HTTP_GET
@@ -844,6 +874,24 @@ void syscall_handler(syscall_regs_t *regs) {
     int rc = rdrand_bytes(buf, len);
     clac();
     regs->rax = (uint64_t)(int64_t)rc;
+    break;
+  }
+  case 87: { /* SYS_GET_WALL_TIME (uint64_t *out_unix_secs) -> int rc
+              *   rdi = uint64_t *out — must be non-NULL, user-mapped.
+              * Writes the current UTC time (whole seconds since the
+              * Unix epoch) read from the CMOS RTC. The kernel-side
+              * helper rtc_unix_time() does its own UIP/recheck loop,
+              * so the result is consistent across the seconds tick. */
+    uint64_t *out = (uint64_t *)regs->rdi;
+    if (!out) {
+      regs->rax = (uint64_t)(int64_t)-1;
+      break;
+    }
+    uint64_t now = rtc_unix_time();
+    stac();
+    *out = now;
+    clac();
+    regs->rax = 0;
     break;
   }
 

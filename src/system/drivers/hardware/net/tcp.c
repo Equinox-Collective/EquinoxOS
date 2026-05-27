@@ -22,6 +22,7 @@
 #include "../../../../syslibc/stdio.h"
 #include "../../../../syslibc/string.h"
 #include "../../../../system/mem/memory.h"
+#include "../../../misc/random.h"
 #include "ipv4.h"
 
 extern void term_print(const char *str);
@@ -416,7 +417,14 @@ tcp_socket_t *tcp_connect(net_interface_t *iface, uint32_t dest_ip,
     s->remote_ip   = dest_ip;
     s->remote_port = port;
     s->local_port  = 50000 + i; /* ephemeral */
-    s->snd_nxt     = 1000;      /* TODO: random ISN once we have RNG */
+    /* Random Initial Send Sequence number per RFC 6528 — burns one RDRAND
+     * call (or soft fallback on TCG). Keeping the high bit clear avoids
+     * an early wrap during a long-running connection: 2^31 bytes is still
+     * 2 GiB before SEQ overflow, which is far past anything urlget /
+     * browser pushes today. */
+    uint64_t isn_seed = 0;
+    rdrand_bytes(&isn_seed, sizeof isn_seed);
+    s->snd_nxt     = (uint32_t)(isn_seed & 0x7FFFFFFFu);
     s->snd_una     = s->snd_nxt;
     s->rcv_nxt     = 0;
     s->rcv_wnd     = TCP_RX_BUF_SIZE;
