@@ -54,7 +54,10 @@ typedef enum {
   TCP_TIME_WAIT
 } tcp_state_t;
 
-typedef void (*tcp_callback_t)(uint8_t *data, uint32_t len);
+/* Forward decl so the callback can take a typed socket ptr. */
+struct tcp_socket;
+typedef void (*tcp_callback_t)(struct tcp_socket *sock,
+                               uint8_t *data, uint32_t len);
 
 /* One outstanding outbound segment held in the retransmission queue. We keep
  * a kmalloc'd copy of the original TCP header + payload so that, on timeout,
@@ -79,7 +82,7 @@ typedef struct {
   uint8_t *data;
 } tcp_reorder_entry_t;
 
-typedef struct {
+typedef struct tcp_socket {
   /* Identity ----------------------------------------------------------- */
   uint32_t remote_ip;
   uint16_t local_port;
@@ -87,6 +90,10 @@ typedef struct {
 
   /* State machine ------------------------------------------------------ */
   tcp_state_t state;
+  /* Last value the socket layer was notified about. Used by tcp_tick to
+   * fire socket_on_state_change() exactly once per transition without
+   * touching every assignment site inside the state machine. */
+  tcp_state_t last_notified_state;
 
   /* Sequence numbers --------------------------------------------------- */
   uint32_t snd_nxt;        /* next byte we'll send (SND.NXT)                */
