@@ -54,6 +54,7 @@
 #include <bearssl.h>
 #include <bearssl_io.h>
 #include <sys/socket.h>
+#include <sys/wall_time.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -104,15 +105,21 @@ int main(int argc, char **argv) {
     printf("[tlstest] bearssl init_full (TAs=%u)     ... ok\n",
            (unsigned)TAs_NUM);
 
-    /* Tell the X.509 validator what "now" is. Without this the engine
-     * defaults to days=0 / seconds=0 (i.e. 0 AD) and rejects every cert
-     * with BR_ERR_X509_TIME_UNKNOWN (53), because EquinoxOS doesn't yet
-     * expose a wall-clock syscall — SYS_GET_TIME returns ms since boot,
-     * not UTC. Hardcoded to 2026-08-01 UTC, comfortably inside the
-     * cert.pem validity window (2026-05-27 .. 2027-05-27). Phase 4+
-     * should replace this with a real wall-clock once we have one. */
-    br_x509_minimal_set_time(&g_xc, 740194u /* days, 2026-08-01 */, 0u);
-    printf("[tlstest] x509 set_time 2026-08-01 UTC   ... ok\n");
+    /* Pull current UTC from the CMOS RTC and feed it to BearSSL's
+     * x509_minimal so NotBefore/NotAfter actually mean something. The
+     * earlier hardcoded "2026-08-01" stand-in is gone; if the RTC is
+     * wedged the handshake will now fail loudly with
+     * BR_ERR_X509_EXPIRED / NOT_YET_VALID instead of silently passing.*/
+    uint64_t now_unix = 0;
+    if (sys_get_wall_time(&now_unix) != 0) {
+        printf("[tlstest] sys_get_wall_time              ... FAIL\n");
+        return 1;
+    }
+    uint32_t br_days, br_secs;
+    unix_to_bearssl_time(now_unix, &br_days, &br_secs);
+    br_x509_minimal_set_time(&g_xc, br_days, br_secs);
+    printf("[tlstest] x509 set_time (unix=%llu, d=%u, s=%u) ... ok\n",
+           (unsigned long long)now_unix, (unsigned)br_days, (unsigned)br_secs);
 
     br_ssl_engine_set_buffer(&g_sc.eng, g_iobuf, sizeof g_iobuf, 1);
     printf("[tlstest] set buffer (%u bytes bidi)  ... ok\n",
