@@ -5,8 +5,21 @@
 // volatile крайне важен, чтобы компилятор не оптимизировал проверки в sleep()
 volatile uint32_t tick = 0;
 
+/* TCP periodic tick — defined in src/system/drivers/hardware/net/tcp.c.
+ * Walks every TCB once per millisecond, retransmits unacked segments whose
+ * RTO has elapsed, drains TIME_WAIT timers. Declared here (instead of via
+ * a header) to avoid pulling the whole net stack into the timer TU. */
+void tcp_tick_with_iface(uint32_t now_ms);
+
 void timer_callback() {
-  tick++; // Просто инкремент
+  tick++;
+  /* Run the TCP tick at ~100 Hz instead of every PIT IRQ — touching all
+   * TCBs every millisecond would be wasteful at 1 kHz. The granularity
+   * still gives ~10 ms RTO precision, which is well below the 500 ms
+   * starting RTO. */
+  if ((tick & 0x0F) == 0) {
+    tcp_tick_with_iface(tick);
+  }
 }
 
 // В timer.c
