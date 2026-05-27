@@ -1,5 +1,4 @@
 #include "keyboard.h"
-#include "../../../../gui/gui.h"
 #include "../../../core/io.h"
 #include "../../../shell/shell.h"
 #include <stdbool.h>
@@ -96,13 +95,7 @@ static int scancode_to_fkey(uint8_t code) {
 void keyboard_callback(void) {
   uint8_t scancode = inb(0x60);
 
-  // 1. Extended prefix. Запоминаем для собственной интерпретации
-  // модификаторов (super/правый-ctrl и т.д.) И одновременно кладём 0xE0
-  // в кольцевой буфер: иначе ring-3 приложения, читающие через
-  // SYS_GET_SCANCODE (например, doom — см. DG_GetKey в
-  // app/doom/doomgeneric_equos.c), никогда не увидят prefix\'а и не
-  // распознают стрелки/правые модификаторы. Реальный код придёт
-  // следующим прерыванием.
+  // 1. Extended prefix
   if (scancode == 0xE0) {
     extended = true;
     keyboard_push(0xE0);
@@ -114,20 +107,7 @@ void keyboard_callback(void) {
   bool was_extended = extended;
   extended = false;
 
-  // 2. Модификаторы.
-  //    Левый Ctrl: 0x1D / 0x9D. Правый Ctrl: E0 0x1D / E0 0x9D.
-  //    Левый Alt:  0x38 / 0xB8. Правый Alt (AltGr): E0 0x38 / E0 0xB8.
-  //    Левый Shift:0x2A / 0xAA. Правый Shift:      0x36 / 0xB6.
-  //    Super (Win) — ТОЛЬКО extended: E0 0x5B / E0 0x5C.
-  //
-  // ВАЖНО про Shift: shift_pressed раньше обновлялся только как побочный
-  // эффект из get_ascii_char(), а get_ascii_char() ниже не вызывается для
-  // release-скан-кодов (есть `if (is_release) return;`). В итоге, если
-  // пользователь нажимал Shift и одновременно ловил emergency (Super+Alt
-  // +F10) — release-код 0xAA пролетал мимо, shift_pressed залипал в true
-  // и весь последующий ввод шёл в верхнем регистре, причём отменить это
-  // было невозможно. Теперь обновляем shift_pressed прямо здесь, на
-  // press и release, до раннего возврата по is_release.
+  // 2. Обновление модификаторов
   if (code == 0x1D) {
     ctrl_pressed = !is_release;
   } else if (code == 0x38) {
@@ -138,54 +118,32 @@ void keyboard_callback(void) {
     super_pressed = !is_release;
   }
 
-  // 3. Полные скан-коды (с битом отпускания) — в кольцо для опроса.
+  // 3. Кладем ВСЕ сканкоды в буфер для sysgui (Lua) и приложений
   keyboard_push(scancode);
 
-  if (is_release) return; // дальше нас интересуют только нажатия
+  if (is_release)
+    return;
 
-  // 4. Системные хоткеи. SUPER+ALT+F10 — emergency-режим оболочки
-  // (killall + чёрный экран). Обрабатывается ВНЕ зависимости от того,
-  // кто сейчас в фокусе.
+  // 4. Системные хоткеи (Emergency Shell)
   int fkey = scancode_to_fkey(code);
   if (fkey > 0 && super_pressed && alt_pressed && fkey == 10) {
-    // Из IRQ ничего тяжёлого не делаем — просто сигналим главному
-    // циклу в kmain.
     shell_emergency_requested = true;
     return;
   }
 
-  // 5. Куда отдавать ввод.
+  // 5. Если активен Emergency Shell — отдаем ввод ему
   if (shell_emergency_active) {
     if (fkey > 0) {
       shell_emergency_handle_fkey(fkey);
       return;
     }
-    // Сначала shift/extended выпиливаем — get_ascii_char уже учитывает
-    // shift_pressed по сайд-эффекту выше.
     char c = was_extended ? 0 : get_ascii_char(scancode);
-    if (c > 0) shell_emergency_handle_char(c);
+    if (c > 0)
+      shell_emergency_handle_char(c);
     return;
   }
 
-  // Не-emergency. Передаём по фокусу.
-  char c = was_extended ? 0 : get_ascii_char(scancode);
-
-  if (focused_window == term_win) {
-    if (c > 0) {
-      shell_handle_char(c);
-    } else {
-      // F-клавиши в обычной shell-сессии — отдаём на верхний уровень.
-      if (fkey > 0) {
-        shell_handle_fkey(fkey);
-        return;
-      }
-      switch (code) {
-      case 0x48: shell_handle_char('\x11'); break; // Up
-      case 0x50: shell_handle_char('\x12'); break; // Down
-      case 0x0F: shell_handle_char('\t');   break; // Tab
-      }
-    }
-  } else if (focused_window == notepad_win && c > 0) {
-    notepad_handle_char(c);
-  }
+  // --- ВСЁ! Больше ядро ничего не должно делать ---
+  // Раньше здесь были проверки if (focused_window == term_win).
+  // Теперь их нет. sysgui заберет данные из keyboard_pop().
 }

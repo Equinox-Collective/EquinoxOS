@@ -4,6 +4,7 @@ print("enGUI Desktop Environment: Windows & Apps loaded!")
 local windows = {}
 local focused_window = nil
 local last_mdown = false
+local resizing_win = nil
 
 -- Флаг грязного кадра: Lua выставляет в true, если нужна перерисовка
 -- (matrix mode, мигающий курсор). C читает через getLastKey() side-effect.
@@ -14,7 +15,7 @@ local shift_pressed = false
 -- Кэш последнего значения blink для отслеживания переходов
 local last_blink_state = -1
 
--- --- КЛАСС WINDOW (ООП МЕНЕДЖЕР ОКОН) ---
+-- ---КЛАСС WINDOW (ООП МЕНЕДЖЕР ОКОН) ---
 local Window = {}
 Window.__index = Window
 
@@ -26,6 +27,9 @@ function Window.new(title, x, y, w, h, draw_cb)
     self.w = w
     self.h = h
     self.active = true
+    self.borderless = false   -- Флаг: без рамок и заголовка
+    self.fullscreen = false   -- Флаг: на весь экран
+    self.is_app_container = false
     self.draw_cb = draw_cb
     return self
 end
@@ -33,47 +37,64 @@ end
 function Window:draw(mx, my, mdown, dt)
     if not self.active then return end
 
-    local active = (focused_window == self)
-    local ty = self.y - 25
-
-    -- 1. Рамка и тень (обводка)
-    drawRect(self.x - 1, ty - 1, self.w + 2, self.h + 27, 0x111216)
-
-    -- 2. Градиентный заголовок
-    if active then
-        drawGradient(self.x, ty, self.w, 25, 0x0078D7, 0x005A9E, true)
-    else
-        drawGradient(self.x, ty, self.w, 25, 0x44464F, 0x2E3037, true)
-    end
-
-    -- 3. Текст заголовка
-    drawText(self.title, self.x + 8, ty + 5, 0xFFFFFF)
-
-    -- 4. Кнопка закрытия [X] (Стиль Windows 10)
-    local bx = self.x + self.w - 24
-    local by = ty + 4
-    local bw, bh = 18, 16
-    local over_close = (mx >= bx and mx < bx + bw and my >= by and my < by + bh)
+    local sw, sh = getScreenSize()
     
-    if over_close then
-        drawRect(bx, by, bw, bh, 0xE81123)
+    -- Обработка Fullscreen состояния
+    if self.fullscreen then
+        self.x, self.y = 0, 0
+        self.w, self.h = sw, sh
+    end
+
+    local active = (focused_window == self)
+    
+    -- РИСУЕМ РАМКИ только если окно НЕ borderless и НЕ fullscreen
+    if not self.borderless and not self.fullscreen then
+        local ty = self.y - 28
+        -- Тень
+        drawRect(self.x + 2, ty + 2, self.w + 4, self.h + 30, 0x000000AA) 
+        -- Обводка
+        drawRect(self.x - 1, ty - 1, self.w + 2, self.h + 30, active and 0x555555 or 0x333333)
+        -- Заголовок
+        if active then
+            drawGradient(self.x, ty, self.w, 28, 0x1A72BB, 0x0E4581, true)
+        else
+            drawGradient(self.x, ty, self.w, 28, 0x2D2D30, 0x1E1E1E, true)
+        end
+        -- Текст и кнопка закрытия
+        drawText(self.title, self.x + 10, ty + 8, 0xFFFFFF)
+        local bx = self.x + self.w - 26
+        if button("X", bx, ty + 4, 22, 20) then
+            self.active = false
+            return
+        end
+        -- Разделитель
+        drawRect(self.x, self.y - 1, self.w, 1, active and 0x55AFFF or 0x444444)
+    end
+
+    -- РЕНДЕРИНГ КОНТЕНТА
+    if not self.is_app_container then
+        -- Обычное окно (если borderless, можем сделать его прозрачным, не рисуя фон)
+        if not self.borderless then
+            drawRect(self.x, self.y, self.w, self.h, 0x1E1E1E)
+        end
+        
+        if self.draw_cb then 
+            self.draw_cb(self, mx, my, mdown, dt) 
+        end
     else
-        drawRect(bx, by, bw, bh, 0xCC2A2A)
-    end
-    drawText("X", bx + 5, by + 1, 0xFFFFFF)
-
-    if over_close and mdown and not last_mdown then
-        self.active = false
-        if focused_window == self then focused_window = nil end
-        return
+        -- Контейнер для эльфа (Doom/Snake)
+        if type(setAppWindowPos) == "function" then
+            setAppWindowPos(self.x, self.y, self.w, self.h)
+        end
     end
 
-    -- 5. Фон рабочей области окна
-    drawRect(self.x, self.y, self.w, self.h, 0x1E1F29)
-
-    -- 6. Отрисовка внутреннего содержимого (Callback)
-    if self.draw_cb then
-        self.draw_cb(self, mx, my, mdown, dt)
+    -- Resize Handle (только для обычных окон)
+    if not self.borderless and not self.fullscreen then
+        local rx, ry = self.x + self.w - 10, self.y + self.h - 10
+        drawRect(rx, ry, 10, 10, active and 0x0078D7 or 0x444444)
+        if mdown and not last_mdown and mx >= rx and mx < rx+10 and my >= ry and my < ry+10 then
+            resizing_win = self
+        end
     end
 end
 
@@ -511,41 +532,58 @@ refresh_explorer()
 local dragging_win = nil
 local drag_ox, drag_oy = 0, 0
 
+local function bring_to_front(win)
+    for i, w in ipairs(windows) do
+        if w == win then
+            table.remove(windows, i)
+            table.insert(windows, win)
+            break
+        end
+    end
+end
+
 function on_tick(dt)
     local sw, sh = getScreenSize() 
     local mx, my, mdown = getMouse()
-    _G.needs_redraw = false  -- сбрасываем в начале каждого тика
 
-    -- 1. Рендеринг обоев (Красивый плавный космический фон)
+    -- 1. Рендеринг обоев
     local task_y = sh - 32
     drawGradient(0, 0, sw, task_y, 0x101216, 0x1E222D, true)
 
-    -- 2. Обработка ввода (Считывание сканкодов клавиш)
+    -- 2. Обработка Resize
+    if resizing_win then
+        if mdown then
+            resizing_win.w = mx - resizing_win.x
+            resizing_win.h = my - resizing_win.y
+            if resizing_win.w < 100 then resizing_win.w = 100 end
+            if resizing_win.h < 60 then resizing_win.h = 60 end
+            _G.needs_redraw = true
+        else
+            resizing_win = nil
+        end
+    end
+
+    -- 3. Обработка ввода (Клавиатура)
     local key = getLastKey()
     if key > 0 then
-        -- Поддержка Shift
-        if key == 42 or key == 54 then
-            shift_pressed = true
-        end
-
+        if key == 42 or key == 54 then shift_pressed = true end
         local char = scancodeToAscii(key, shift_pressed)
 
-        -- Куда направлять ввод?
         if focused_window then
             if focused_window.title == "Equinox Terminal" then
-                if key == 28 then -- ENTER
+                if key == 28 then 
                     table.insert(term_lines, ">> " .. term_input)
                     process_command(term_input)
                     term_input = ""
-                elseif key == 14 then -- Backspace
+                elseif key == 14 then 
                     term_input = string.sub(term_input, 1, -2)
                 elseif string.len(char) > 0 and string.byte(char) >= 32 then
                     term_input = term_input .. char
                 end
             elseif focused_window.title == "Notepad Text Editor" then
-                if key == 28 then -- ENTER
+                if key == 28 then 
                     _G.notepad_text = _G.notepad_text .. "\n"
-                elseif key == 14 then -- Backspace
+                elseif key == 14 then 
                     _G.notepad_text = string.sub(_G.notepad_text, 1, -2)
                 elseif string.len(char) > 0 and string.byte(char) >= 32 then
                     _G.notepad_text = _G.notepad_text .. char
@@ -553,64 +591,53 @@ function on_tick(dt)
             end
         end
     else
-        -- Сброс шифта
         shift_pressed = false
     end
 
-    -- 3. Отрисовка рабочего стола (иконок)
+    -- 4. Отрисовка иконок рабочего стола
     for i, icon in ipairs(desktop_icons) do
-        local ix = 20
-        local iy = 30 + (i - 1) * 90
-
-        -- Рисуем обводку и тело иконки
+        local ix, iy = 20, 30 + (i - 1) * 90
         drawRect(ix, iy, 48, 48, 0x14151B)
+        
         if icon.pixels then
-            -- Иконка-картинка: 44 строки run-length encoded пикселей
-            -- (color, run_length) внутри inner-области 44x44.
             for row_idx = 1, 44 do
                 local row = icon.pixels[row_idx]
                 if row then
-                    local px = ix + 2
-                    local py = iy + 1 + row_idx
-                    local k = 1
+                    local px, py, k = ix + 2, iy + 1 + row_idx, 1
                     while row[k] do
-                        local c = row[k]
-                        local len = row[k + 1]
-                        drawRect(px, py, len, 1, c)
-                        px = px + len
+                        drawRect(px, py, row[k+1], 1, row[k])
+                        px = px + row[k+1]
                         k = k + 2
                     end
                 end
             end
         else
             drawRect(ix + 2, iy + 2, 44, 44, icon.icon_col)
-            if icon.text and icon.text ~= "" then
-                drawText(icon.text, ix + 18, iy + 16, 0xFFFFFF)
-            end
+            if icon.text then drawText(icon.text, ix + 18, iy + 16, 0xFFFFFF) end
         end
         drawText(icon.label, ix + 2, iy + 52, 0xD8DEE9)
 
-        -- Клик на иконку рабочего стола.
-        -- Если у иконки задан exec — запускаем внешний ELF (например, Doom);
-        -- иначе ищем по win_title встроенное Lua-окно и фокусируем его.
-        if mx >= ix and mx < ix + 48 and my >= iy and my < iy + 64 then
-            if mdown and not last_mdown then
+        -- Клик по иконке (запуск приложений)
+        if not dragging_win and not resizing_win and mdown and not last_mdown then
+            if mx >= ix and mx < ix + 48 and my >= iy and my < iy + 48 then
                 if icon.exec then
                     exec(icon.exec)
-                elseif icon.win_title then
-                    for _, win in ipairs(windows) do
-                        if win.title == icon.win_title then
-                            win.active = true
-                            focused_window = win
-                            -- Выводим окно наверх стопки отрисовки
-                            for k, w in ipairs(windows) do
-                                if w == win then
-                                    table.remove(windows, k)
-                                    break
-                                end
+                    -- Если это Doom, активируем контейнер
+                    if icon.label == "Doom" then
+                        for _, w in ipairs(windows) do
+                            if w.is_app_container then
+                                w.active = true
+                                focused_window = w
+                                bring_to_front(w)
                             end
-                            table.insert(windows, win)
-                            break
+                        end
+                    end
+                elseif icon.win_title then
+                    for _, w in ipairs(windows) do
+                        if w.title == icon.win_title then
+                            w.active = true
+                            focused_window = w
+                            bring_to_front(w)
                         end
                     end
                 end
@@ -618,103 +645,78 @@ function on_tick(dt)
         end
     end
 
-    -- 4. Перемещение окон (Drag & Drop) и смена фокуса
-    if mdown and not last_mdown then
-        local clicked_win = nil
-        -- Ищем окно от верхнего слоя к нижнему
+    -- 5. Перемещение окон и Фокус (только если не ресайзим и не кликаем иконки)
+    if mdown and not last_mdown and not resizing_win then
+        local found = false
         for i = #windows, 1, -1 do
             local win = windows[i]
             if win.active then
-                -- Проверка попадания в заголовок (для перемещения)
-                if mx >= win.x and mx < win.x + win.w and my >= win.y - 25 and my < win.y then
-                    clicked_win = win
-                    break
-                -- Проверка попадания в тело (для смены фокуса)
-                elseif mx >= win.x and mx < win.x + win.w and my >= win.y and my < win.y + win.h then
+                -- Попали в заголовок или тело?
+                if mx >= win.x and mx < win.x + win.w and my >= win.y - 28 and my < win.y + win.h then
                     focused_window = win
-                    -- Перемещаем окно в самый конец списка отрисовки
-                    table.remove(windows, i)
-                    table.insert(windows, win)
+                    bring_to_front(win)
+                    
+                    if my < win.y then -- Клик по заголовку
+                        dragging_win = win
+                        drag_ox, drag_oy = mx - win.x, my - win.y
+                    end
+                    found = true
                     break
                 end
             end
         end
-
-        if clicked_win then
-            focused_window = clicked_win
-            dragging_win = clicked_win
-            drag_ox = mx - clicked_win.x
-            drag_oy = my - clicked_win.y
-
-            -- Перемещаем наверх стопки
-            for k, w in ipairs(windows) do
-                if w == clicked_win then
-                    table.remove(windows, k)
-                    break
-                end
-            end
-            table.insert(windows, clicked_win)
-        end
+        if not found and mx > 80 then focused_window = nil end -- Сброс фокуса если кликнули мимо (но не по иконкам)
     end
 
-    if not mdown then
-        dragging_win = nil
-    end
+    if not mdown then dragging_win = nil end
 
     if dragging_win then
         dragging_win.x = mx - drag_ox
         dragging_win.y = my - drag_oy
-        -- Ограничение: заголовок не может уползти за верхнюю границу экрана
-        if dragging_win.y < 25 then dragging_win.y = 25 end
+        if dragging_win.y < 28 then dragging_win.y = 28 end
+        _G.needs_redraw = true
     end
 
-    -- 5. Рендеринг всех активных окон (в порядке слоев)
+    -- 6. Отрисовка Окон
     for _, win in ipairs(windows) do
         win:draw(mx, my, mdown, dt)
     end
 
-    -- 6. Нижняя системная панель задач (Taskbar)
+    -- 7. Нижняя панель (Taskbar)
     drawGradient(0, task_y, sw, 32, 0x1B1F2A, 0x12151D, true)
     drawRect(0, task_y, sw, 1, 0x2A2E3D)
 
-    -- Быстрый список открытых окон в левой части
-    local tx_start = 15
+    local tx = 15
     for _, win in ipairs(windows) do
-        if win.active then
+        if win.active and not win.borderless then
             local active = (focused_window == win)
-            local tag_col = active and 0x0078D7 or 0x2C313C
-            drawRect(tx_start, task_y + 4, 120, 24, tag_col)
-            drawText(string.sub(win.title, 1, 12), tx_start + 10, task_y + 8, 0xE5E9F0)
-
-            -- Клик по панели задач фокусирует окно
-            if mx >= tx_start and mx < tx_start + 120 and my >= task_y + 4 and my < task_y + 28 then
-                if mdown and not last_mdown then
-                    focused_window = win
-                    for k, w in ipairs(windows) do
-                        if w == win then
-                            table.remove(windows, k)
-                            break
-                        end
-                    end
-                    table.insert(windows, win)
-                end
+            drawRect(tx, task_y + 4, 120, 24, active and 0x0078D7 or 0x2C313C)
+            drawText(string.sub(win.title, 1, 12), tx + 10, task_y + 8, 0xE5E9F0)
+            
+            if mdown and not last_mdown and mx >= tx and mx < tx + 120 and my >= task_y + 4 then
+                focused_window = win
+                bring_to_front(win)
             end
-            tx_start = tx_start + 128
+            tx = tx + 125
         end
     end
 
-    -- Статус RAM и Uptime в правой части панели задач
+    -- Статистика в углу
     local used, total = getMemInfo()
     local used_mb = math.floor(used / (1024 * 1024))
-    local ram_str = string.format("RAM: %d MB", used_mb)
-    drawText(ram_str, sw - 200, task_y + 10, 0x888C94)
-
-    local uptime = getUptime()
-    local s = math.floor(uptime % 60)
-    local m = math.floor((uptime / 60) % 60)
-    local h = math.floor(uptime / 3600)
-    local clock_str = string.format("%02d:%02d:%02d", h, m, s)
-    drawText(clock_str, sw - 100, task_y + 10, 0xD8DEE9)
+    drawText(string.format("RAM: %d MB", used_mb), sw - 200, task_y + 10, 0x888C94)
+    
+    local up = getUptime()
+    local h = math.floor(up / 3600)
+    local m = math.floor((up / 60) % 60)
+    local s = math.floor(up % 60)
+    drawText(string.format("%02d:%02d:%02d", h, m, s), sw - 100, task_y + 10, 0xD8DEE9)
 
     last_mdown = mdown
 end
+
+-- Создаем спец-окно для Doom/Snake
+local app_container = Window.new("External Application", 250, 150, 640, 400, nil)
+app_container.is_app_container = true
+app_container.active = false
+table.insert(windows, app_container)

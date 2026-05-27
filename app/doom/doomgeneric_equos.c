@@ -52,10 +52,20 @@ void DG_Init() {
 }
 
 void DG_DrawFrame() {
-    // Рисуем буфер Дума на экран по центру
-    if (!dg_center_ready) dg_compute_center();
-    _syscall(SYS_DRAW_BUFFER, dg_center_x, dg_center_y,
-             DOOMGENERIC_RESX, DOOMGENERIC_RESY, (uintptr_t)DG_ScreenBuffer);
+  uint64_t win_x = 0, win_y = 0;
+
+  // Вызываем SYS_GET_WINDOW_POS (33), чтобы узнать, где Lua нарисовала окно
+  __asm__ volatile("movq $33, %%rax\n\t"
+                   "int $0x80\n\t"
+                   "movq %%rax, %0\n\t"
+                   "movq %%rbx, %1\n\t"
+                   : "=r"(win_x), "=r"(win_y)
+                   :
+                   : "rax", "rbx");
+
+  // Рисуем ПРЯМО ВНУТРЬ окна (с учетом заголовка, если нужно, прибавляем +0)
+  _syscall(SYS_DRAW_BUFFER, (int)win_x, (int)win_y, DOOMGENERIC_RESX,
+           DOOMGENERIC_RESY, (uintptr_t)DG_ScreenBuffer);
 }
 
 void DG_SleepMs(uint32_t ms) {

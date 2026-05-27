@@ -4,8 +4,6 @@
 #include "../drivers/vesa/bmp.h"
 #include "../drivers/vesa/vesa.h"
 #include "../fs/vfs.h"
-#include "../../gui/gui.h"
-#include "../../gui/terminal.h"
 #include "../../syslibc/stdio.h"
 #include "../../syslibc/string.h"
 #include "../mem/memory.h"
@@ -122,7 +120,6 @@ static void shell_prompt(void) {
 }
 
 void shell_init(void) {
-    terminal_clear();
     print_logo();
     shell_prompt();
 }
@@ -223,7 +220,7 @@ static void cmd_gui_fn(const char *args) {
 static void cmd_clear_fn(const char *args) {
     (void)args;
     if (s_out == default_output) {
-        terminal_clear();
+        // Nothing, src/gui is deleted.
     } else {
         sh_print("\n\n");
     }

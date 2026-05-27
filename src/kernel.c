@@ -6,7 +6,6 @@
 #include "api.h"
 #include "boot/limine/limine.h"
 #include "system/fs/elf.h"
-#include "gui/gui.h"
 #include "syslibc/string.h"
 
 // --- СИСТЕМНЫЕ ПОДСИСТЕМЫ ---
@@ -35,9 +34,7 @@
 #include "system/fs/fat32.h"
 #include "system/fs/ext2.h"
 #include "system/fs/vfs.h"
-#include "gui/terminal.h"
 #include "system/shell/shell.h"
-#include "gui/gui_apps.h"
 
 // --- EXTERNAL VARIABLES ---
 void term_print(const char *str);
@@ -80,7 +77,6 @@ LIMINE_REQ static volatile struct limine_hhdm_request hhdm_request = {
 
 void term_print(const char *str) {
   serial_puts(COM1, str); // Оставляем для логов в QEMU
-  terminal_print(str);    // Вызываем новый крутой терминал
 }
 
 void *sys_get_file(const char *name, uint64_t *size) {
@@ -466,8 +462,6 @@ void kmain(void) {
   serial_puts(COM1, "PC Speaker initialized\n");
   init_mouse();
   serial_puts(COM1, "Mouse initialized\n");
-  // gui_init();
-  // serial_puts(COM1, "GUI initialized\n");
   shm_init();
   serial_puts(COM1, "Shared memory initialized\n");
   ipc_init();
