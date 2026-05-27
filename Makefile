@@ -321,6 +321,11 @@ QEMU_ACCEL := -accel whpx,kernel-irqchip=off -accel kvm -accel hvf -accel tcg
 run:
 	$(QEMU) $(QEMU_BASE) $(QEMU_ACCEL)
 
+# Run with pure software emulation (no hypervisor). Slower but more
+# deterministic — useful when WHPX/KVM behave oddly with network I/O.
+run-tcg:
+	$(QEMU) $(QEMU_BASE) -accel tcg
+
 run-debug:
 	$(QEMU) $(QEMU_BASE) -d int,guest_errors,mmu -D qemu.log
 
