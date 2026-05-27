@@ -200,7 +200,7 @@ APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_RO
 # Apps that link against libbearssl.a (phase 3b+). These get their own
 # explicit rules below because they need (a) BearSSL public headers in the
 # include path and (b) libbearssl.a appended at link time.
-APP_ELFS_TLS    = $(ISO_ROOT)/bin/tlsboot.elf $(ISO_ROOT)/bin/tlstest.elf $(ISO_ROOT)/bin/catest.elf $(ISO_ROOT)/bin/httpsget.elf $(ISO_ROOT)/bin/urlget.elf
+APP_ELFS_TLS    = $(ISO_ROOT)/bin/tlsboot.elf $(ISO_ROOT)/bin/tlstest.elf $(ISO_ROOT)/bin/catest.elf $(ISO_ROOT)/bin/httpsget.elf $(ISO_ROOT)/bin/urlget.elf $(ISO_ROOT)/bin/browser.elf
 
 # Phase 5: HTTP/HTTPS client library. Lives in its own directory so it
 # isn't auto-folded into $(SDK_OBJS) — apps that need it append
@@ -257,6 +257,17 @@ app/urlget.o: app/urlget.c sdk/include/http_client.h sdk/include/url.h third_par
 	$(CC) $(USER_CFLAGS) -I./third_party/bearssl/inc -c $< -o $@
 
 $(ISO_ROOT)/bin/urlget.elf: app/urlget.o $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(HTTP_CLIENT_OBJ) $(BEARSSL_LIB) -o $@
+
+# browser.elf — phase 6 GUI browser. Compiles app/htmlview.c a SECOND time
+# with -DBROWSER_BUILD, which swaps its load_page() for the eq_http_get()
+# variant (full HTTP/HTTPS via the phase-5 client). htmlview.elf is built
+# from the same source without the define and keeps its original local-file
+# loading path, so both binaries coexist.
+app/htmlview_browser.o: app/htmlview.c sdk/include/http_client.h sdk/include/url.h third_party/ca_bundle/ca_bundle.h
+	$(CC) $(USER_CFLAGS) -DBROWSER_BUILD -I./third_party/bearssl/inc -c $< -o $@
+
+$(ISO_ROOT)/bin/browser.elf: app/htmlview_browser.o $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(BEARSSL_LIB)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(HTTP_CLIENT_OBJ) $(BEARSSL_LIB) -o $@
 
 sysgui_app:
