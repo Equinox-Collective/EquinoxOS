@@ -197,17 +197,29 @@ APP_SRCS = $(wildcard app/*.c)
 APP_OBJS = $(patsubst app/%.c,app/%.o,$(APP_SRCS))
 APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_ROOT)/bin/htmlview.elf $(ISO_ROOT)/bin/niplay.elf $(ISO_ROOT)/bin/widget_demo.elf $(ISO_ROOT)/bin/ipc_test.elf $(ISO_ROOT)/bin/randtest.elf $(ISO_ROOT)/bin/socktest.elf
 
+# Apps that link against libbearssl.a (phase 3b+). These get their own
+# explicit rules below because they need (a) BearSSL public headers in the
+# include path and (b) libbearssl.a appended at link time.
+APP_ELFS_TLS    = $(ISO_ROOT)/bin/tlsboot.elf
+
 # Object builds need the Windows directory tree from setup before they start;
 # this matters when users run `make -j`.
 $(KERNEL_OBJS) $(SDK_OBJS) $(APP_OBJS) $(DOOM_OBJS): | setup
 
-apps: setup $(SDK_OBJS) $(BEARSSL_LIB) $(APP_ELFS_SIMPLE) sysgui_app
+apps: setup $(SDK_OBJS) $(BEARSSL_LIB) $(APP_ELFS_SIMPLE) $(APP_ELFS_TLS) sysgui_app
 
 $(ISO_ROOT)/bin/%.elf: app/%.o $(SDK_OBJS)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< -o $@
 
 app/%.o: app/%.c
 	$(CC) $(USER_CFLAGS) -c $< -o $@
+
+# TLS apps: bearssl headers visible at compile, libbearssl.a appended at link.
+app/tlsboot.o: app/tlsboot.c
+	$(CC) $(USER_CFLAGS) -I./third_party/bearssl/inc -c $< -o $@
+
+$(ISO_ROOT)/bin/tlsboot.elf: app/tlsboot.o $(SDK_OBJS) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(BEARSSL_LIB) -o $@
 
 sysgui_app:
 	@echo "=== Building sysgui (enGUI) ==="
