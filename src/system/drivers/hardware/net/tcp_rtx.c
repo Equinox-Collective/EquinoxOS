@@ -186,7 +186,7 @@ uint32_t tcp_reorder_drain(tcp_socket_t *sock) {
       if (!e->in_use) continue;
 
       if (e->seq == sock->rcv_nxt) {
-        if (sock->on_data) sock->on_data(e->data, e->len);
+        if (sock->on_data) sock->on_data(sock, e->data, e->len);
         sock->rcv_nxt += e->len;
         delivered     += e->len;
         kfree(e->data);

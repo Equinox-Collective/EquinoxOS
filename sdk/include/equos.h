@@ -57,6 +57,14 @@
 #define SYS_SHELL_EXEC  73
 #define SYS_GET_FG_APP  74   /* () -> PID активного foreground-app, 0 если нет */
 
+/* --- Socket API (phase 1 — see sdk/include/sys/socket.h for wrappers) --- */
+#define SYS_SOCKET       80  /* ()                       -> int fd            */
+#define SYS_CONNECT      81  /* (fd, ip_be, port)        -> int rc            */
+#define SYS_SEND         82  /* (fd, buf, len)           -> int sent          */
+#define SYS_RECV         83  /* (fd, buf, len)           -> int recvd         */
+#define SYS_CLOSE_SOCK   84  /* (fd)                     -> int rc            */
+#define SYS_SETSOCKOPT   85  /* (fd, lvl, opt, val, len) -> int rc            */
+
 /* --- Entropy --------------------------------------------------------------
  * Fill a userspace buffer with cryptographically usable random bytes
  * (RDRAND-backed; soft fallback on ancient CPUs). See sdk/include/sys/random.h.
