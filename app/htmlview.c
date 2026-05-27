@@ -2111,6 +2111,53 @@ static void load_page(const char *url) {
 
   parse_html(resp.body, (uint32_t)resp.body_len);
   eq_http_response_free(&resp);
+
+  /* DEBUG R2: dump line count by grid_col so we can see if right
+   * column lines are even being emitted by the parser. */
+  {
+    char buf[80];
+    int col_count[7] = {0};
+    int gcols_max = 0;
+    for (int i = 0; i < line_count; i++) {
+      int gc = lines[i].grid_col;
+      if (gc < 0 || gc > 5) gc = 6;
+      col_count[gc]++;
+      if (lines[i].grid_cols > gcols_max) gcols_max = lines[i].grid_cols;
+    }
+    print("[DBG] line_count=");
+    /* tiny itoa */
+    int n = line_count, w = 0; char num[12];
+    if (n == 0) { num[w++] = '0'; }
+    else { char tmp[12]; int t = 0; while (n) { tmp[t++] = '0' + (n%10); n/=10; }
+           while (t) num[w++] = tmp[--t]; }
+    num[w] = 0; print(num);
+    print(" gcols_max=");
+    n = gcols_max; w = 0;
+    if (n == 0) { num[w++] = '0'; }
+    else { char tmp[12]; int t = 0; while (n) { tmp[t++] = '0' + (n%10); n/=10; }
+           while (t) num[w++] = tmp[--t]; }
+    num[w] = 0; print(num);
+    print(" col0=");
+    n = col_count[0]; w = 0;
+    if (n == 0) { num[w++] = '0'; }
+    else { char tmp[12]; int t = 0; while (n) { tmp[t++] = '0' + (n%10); n/=10; }
+           while (t) num[w++] = tmp[--t]; }
+    num[w] = 0; print(num);
+    print(" col1=");
+    n = col_count[1]; w = 0;
+    if (n == 0) { num[w++] = '0'; }
+    else { char tmp[12]; int t = 0; while (n) { tmp[t++] = '0' + (n%10); n/=10; }
+           while (t) num[w++] = tmp[--t]; }
+    num[w] = 0; print(num);
+    print(" col2=");
+    n = col_count[2]; w = 0;
+    if (n == 0) { num[w++] = '0'; }
+    else { char tmp[12]; int t = 0; while (n) { tmp[t++] = '0' + (n%10); n/=10; }
+           while (t) num[w++] = tmp[--t]; }
+    num[w] = 0; print(num);
+    print("\n");
+    (void)buf;
+  }
 }
 
 #else  /* !BROWSER_BUILD — original htmlview load_page() */
