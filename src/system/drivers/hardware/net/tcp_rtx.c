@@ -106,11 +106,22 @@ bool tcp_rtx_tick(net_interface_t *iface, tcp_socket_t *sock,
     uint32_t elapsed = now_ms - e->send_time_ms;
     if (elapsed < e->rto_ms) continue;
 
-    if (e->retries >= TCP_MAX_RETRIES) {
-      char buf[96];
-      sprintf(buf, "[TCP] RTX: giving up after %u retries (seq=%u)\n",
-              (unsigned)e->retries, (unsigned)e->seq);
-      term_print(buf);
+    /* Pure-FIN segments (no payload, TCP_FIN flag) use a shorter retry
+     * budget — see TCP_FIN_MAX_RETRIES in tcp.h. We also suppress their
+     * per-retry log lines: in practice the only reason a FIN goes unacked
+     * is that the host-side socket has already vanished (QEMU SLIRP after
+     * userspace close), and the noise serves no debugging purpose. */
+    bool is_fin_only = (e->payload_len == 0) && (e->flags & TCP_FIN);
+    uint32_t retry_budget = is_fin_only ? TCP_FIN_MAX_RETRIES
+                                        : TCP_MAX_RETRIES;
+
+    if (e->retries >= retry_budget) {
+      if (!is_fin_only) {
+        char buf[96];
+        sprintf(buf, "[TCP] RTX: giving up after %u retries (seq=%u)\n",
+                (unsigned)e->retries, (unsigned)e->seq);
+        term_print(buf);
+      }
       kill = true;
       continue;
     }
@@ -118,7 +129,7 @@ bool tcp_rtx_tick(net_interface_t *iface, tcp_socket_t *sock,
     /* Resend. We re-emit the same segment with the same seq and flags. The
      * ACK we piggy-back is the latest rcv_nxt, which is what RFC 793 asks
      * for. */
-    {
+    if (!is_fin_only) {
       char buf[128];
       sprintf(buf, "[TCP] RTX: retransmit seq=%u len=%u rto=%u retry=%u\n",
               (unsigned)e->seq, (unsigned)e->payload_len,
