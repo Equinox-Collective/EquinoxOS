@@ -16,6 +16,7 @@
 #include "../shell/shellsyntx.h"
 #include "../core/cpu.h"
 #include "../misc/random.h"
+#include "../misc/rtc.h"
 #include "ipc.h"
 #include <stdint.h>
 
@@ -844,6 +845,24 @@ void syscall_handler(syscall_regs_t *regs) {
     int rc = rdrand_bytes(buf, len);
     clac();
     regs->rax = (uint64_t)(int64_t)rc;
+    break;
+  }
+  case 87: { /* SYS_GET_WALL_TIME (uint64_t *out_unix_secs) -> int rc
+              *   rdi = uint64_t *out — must be non-NULL, user-mapped.
+              * Writes the current UTC time (whole seconds since the
+              * Unix epoch) read from the CMOS RTC. The kernel-side
+              * helper rtc_unix_time() does its own UIP/recheck loop,
+              * so the result is consistent across the seconds tick. */
+    uint64_t *out = (uint64_t *)regs->rdi;
+    if (!out) {
+      regs->rax = (uint64_t)(int64_t)-1;
+      break;
+    }
+    uint64_t now = rtc_unix_time();
+    stac();
+    *out = now;
+    clac();
+    regs->rax = 0;
     break;
   }
 
