@@ -174,6 +174,12 @@ sysgui_app:
 	@$(call CP_F,app/sysgui/sysgui.elf,iso_root/bin/sysgui.elf)
 	@$(call MKDIR_P,iso_root/res/sysgui)
 	@$(call CP_F,app/sysgui/scripts/init.lua,iso_root/res/sysgui/init.lua)
+	@$(call CP_F,app/sysgui/scripts/window.lua,iso_root/res/sysgui/window.lua)
+	@$(call CP_F,app/sysgui/scripts/monitor.lua,iso_root/res/sysgui/monitor.lua)
+	@$(call CP_F,app/sysgui/scripts/terminal.lua,iso_root/res/sysgui/terminal.lua)
+	@$(call CP_F,app/sysgui/scripts/paint.lua,iso_root/res/sysgui/paint.lua)
+	@$(call CP_F,app/sysgui/scripts/explorer.lua,iso_root/res/sysgui/explorer.lua)
+	@$(call CP_F,app/sysgui/scripts/notepad.lua,iso_root/res/sysgui/notepad.lua)
 
 # --- SYSTEM RULES ------------------------------------------------------------
 ifeq ($(OS),Windows_NT)
