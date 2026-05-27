@@ -80,12 +80,18 @@ static void print_ipv4_be(uint32_t ip_be) {
 }
 
 int main(int argc, char **argv) {
-    const char *host = (argc >= 2) ? argv[1] : "example.com";
+    const char *host    = (argc >= 2) ? argv[1] : "example.com";
+    /* Optional 2nd arg: dotted-quad IP that overrides DNS. The hostname
+     * is still passed to BearSSL as the SNI / SAN-check target, so this
+     * is the way to isolate "DNS returned a bad IP" from "kernel can't
+     * talk to a specific IP". Goes through SYS_NET_DNS_RESOLVE which
+     * has an IPv4-literal short-circuit, so this stays one code path. */
+    const char *ip_arg  = (argc >= 3) ? argv[2] : host;
 
-    printf("[httpsget] host = %s\n", host);
+    printf("[httpsget] host = %s (resolve %s)\n", host, ip_arg);
 
-    /* --- DNS ------------------------------------------------------------ */
-    uint32_t ip_be = net_dns_resolve(host);
+    /* --- DNS / IP literal ---------------------------------------------- */
+    uint32_t ip_be = net_dns_resolve(ip_arg);
     if (ip_be == 0) {
         printf("[httpsget] DNS                            ... FAIL\n");
         return 1;
