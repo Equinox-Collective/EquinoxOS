@@ -8,6 +8,7 @@
 #include "../../syslibc/string.h"
 #include "../../syslibc/stdio.h"
 #include "../drivers/hardware/net/tcp.h"
+#include "../drivers/hardware/net/socket.h"
 #include "../mem/memory.h"
 #include "../mem/pmm.h"
 #include "../mem/shm.h"
@@ -746,6 +747,71 @@ void syscall_handler(syscall_regs_t *regs) {
     regs->rax = fg_app_pid;
     break;
   }
+
+  /* ====================================================================
+   * Socket API (80–85) — phase 1 of the HTTPS browser stack.
+   *
+   * All syscalls return a signed int packed into rax (negative = error,
+   * see SOCK_ERR_* in net/socket.h). The kernel has full access to user
+   * memory while CR0.WP is on, but the SMAP fence still needs explicit
+   * stac()/clac() bracketing for the buffer transfers — same convention
+   * as the read/write/dns paths above.
+   * ================================================================== */
+  case 80: { /* SYS_SOCKET () -> int fd */
+    regs->rax = (uint64_t)(int64_t)sock_create();
+    break;
+  }
+  case 81: { /* SYS_CONNECT (fd, ip_be, port) -> int rc */
+    int      fd     = (int)regs->rdi;
+    uint32_t ip_be  = (uint32_t)regs->rsi;
+    uint16_t port   = (uint16_t)regs->rdx;
+    /* sock_connect spins with sti/hlt internally; mirror DNS handler. */
+    __asm__ volatile("sti");
+    int rc = sock_connect(fd, ip_be, port);
+    __asm__ volatile("cli");
+    regs->rax = (uint64_t)(int64_t)rc;
+    break;
+  }
+  case 82: { /* SYS_SEND (fd, buf, len) -> int sent */
+    int            fd  = (int)regs->rdi;
+    const uint8_t *buf = (const uint8_t *)regs->rsi;
+    uint32_t       len = (uint32_t)regs->rdx;
+    stac();
+    int rc = sock_send(fd, buf, len);
+    clac();
+    regs->rax = (uint64_t)(int64_t)rc;
+    break;
+  }
+  case 83: { /* SYS_RECV (fd, buf, len) -> int recvd */
+    int       fd  = (int)regs->rdi;
+    uint8_t  *buf = (uint8_t *)regs->rsi;
+    uint32_t  len = (uint32_t)regs->rdx;
+    /* recv may block — must keep interrupts on while we hlt-wait. */
+    __asm__ volatile("sti");
+    stac();
+    int rc = sock_recv(fd, buf, len);
+    clac();
+    __asm__ volatile("cli");
+    regs->rax = (uint64_t)(int64_t)rc;
+    break;
+  }
+  case 84: { /* SYS_CLOSE_SOCK (fd) -> int rc */
+    int fd = (int)regs->rdi;
+    regs->rax = (uint64_t)(int64_t)sock_close(fd);
+    break;
+  }
+  case 85: { /* SYS_SETSOCKOPT (fd, level, optname, val_ptr, vallen) -> int rc */
+    int         fd      = (int)regs->rdi;
+    int         level   = (int)regs->rsi;
+    int         optname = (int)regs->rdx;
+    const void *val     = (const void *)regs->rcx;
+    uint32_t    vallen  = (uint32_t)regs->r8;
+    stac();
+    int rc = sock_setsockopt(fd, level, optname, val, vallen);
+    clac();
+    regs->rax = (uint64_t)(int64_t)rc;
+    break;
+  }
   case 86: { /* SYS_GETRANDOM (buf, len, flags) -> int rc
               *   rdi = void   *buf    — userspace destination
               *   rsi = uint32  len    — bytes to fill
@@ -769,6 +835,7 @@ void syscall_handler(syscall_regs_t *regs) {
     regs->rax = (uint64_t)(int64_t)rc;
     break;
   }
+
   default:
     break;
   }
