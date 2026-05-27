@@ -398,8 +398,15 @@ void shell_handle_char(char c) {
     } else if (c == '\t') {
         if (shell_idx > 0) {
             if (strstr(shell_buffer, "run ") == shell_buffer) {
-                strcat(shell_buffer, ".elf");
-                shell_idx = strlen(shell_buffer);
+                /* Append .elf only if the typed name doesn't already end
+                 * in .elf — otherwise `urlget.elf<Tab>` ends up as
+                 * `urlget.elff` and exec_from_disk fails on a file that
+                 * doesn't exist. */
+                int blen = (int)strlen(shell_buffer);
+                if (blen < 4 || strcmp(shell_buffer + blen - 4, ".elf") != 0) {
+                    strcat(shell_buffer, ".elf");
+                    shell_idx = strlen(shell_buffer);
+                }
             }
         }
     } else if (c == '\x11') { // UP — история
