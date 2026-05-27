@@ -1,6 +1,13 @@
 CC = x86_64-elf-gcc
 LD = x86_64-elf-ld
+AR = x86_64-elf-ar
 ASM = nasm
+
+# Pin the default goal to 'all' so a bare `make` always does a full build.
+# Otherwise GNU Make picks the first concrete file target it sees, which after
+# the BearSSL block below is libbearssl.a — making `make clean && make` quietly
+# leave the build with no kernel.elf / no equos.iso.
+.DEFAULT_GOAL := all
 
 ifeq ($(OS),Windows_NT)
   # GitHub's Windows image adds MSYS2 to PATH for xorriso, which also exposes
@@ -89,6 +96,46 @@ SDK_ASM_SRCS = $(wildcard $(SDK_LIB_DIR)/*.asm)
 SDK_OBJS = $(patsubst $(SDK_LIB_DIR)/%.c,$(SDK_LIB_DIR)/%.o,$(SDK_C_SRCS)) \
            $(patsubst $(SDK_LIB_DIR)/%.asm,$(SDK_LIB_DIR)/%.o,$(SDK_ASM_SRCS))
 
+# --- BEARSSL (vendored under third_party/bearssl) -----------------------------
+# Built once as a static library; userspace apps link against it for TLS.
+# Sources are NEVER patched — all platform tweaks happen via -D flags below
+# and via sdk/include/limits.h. See third_party/bearssl/README.equos.md.
+BEARSSL_DIR     := third_party/bearssl
+BEARSSL_INC     := -I./$(BEARSSL_DIR)/inc -I./$(BEARSSL_DIR)/src
+BEARSSL_SRC_DIRS := \
+    $(BEARSSL_DIR)/src \
+    $(BEARSSL_DIR)/src/aead \
+    $(BEARSSL_DIR)/src/codec \
+    $(BEARSSL_DIR)/src/ec \
+    $(BEARSSL_DIR)/src/hash \
+    $(BEARSSL_DIR)/src/int \
+    $(BEARSSL_DIR)/src/kdf \
+    $(BEARSSL_DIR)/src/mac \
+    $(BEARSSL_DIR)/src/rand \
+    $(BEARSSL_DIR)/src/rsa \
+    $(BEARSSL_DIR)/src/ssl \
+    $(BEARSSL_DIR)/src/symcipher \
+    $(BEARSSL_DIR)/src/x509
+BEARSSL_C_SRCS  := $(foreach d,$(BEARSSL_SRC_DIRS),$(wildcard $(d)/*.c))
+BEARSSL_OBJS    := $(BEARSSL_C_SRCS:.c=.o)
+BEARSSL_LIB     := $(BEARSSL_DIR)/libbearssl.a
+
+# BR_USE_URANDOM / BR_USE_WIN32_RAND : disable platform-specific seeders;
+#   we seed BearSSL ourselves from sys_getrandom() (phase 3b shim).
+# BR_64                              : force the 64-bit codepath (we're x86_64).
+BEARSSL_CFLAGS  := $(USER_CFLAGS) $(BEARSSL_INC) \
+                   -DBR_USE_URANDOM=0 -DBR_USE_WIN32_RAND=0 -DBR_64=1 \
+                   -W -Wall -Os
+
+$(BEARSSL_DIR)/src/%.o: $(BEARSSL_DIR)/src/%.c
+	$(CC) $(BEARSSL_CFLAGS) -c $< -o $@
+
+$(BEARSSL_LIB): $(BEARSSL_OBJS)
+	@echo === Building libbearssl.a ===
+	$(AR) -rcs $@ $(BEARSSL_OBJS)
+
+libbearssl: $(BEARSSL_LIB)
+
 # --- DOOM ---
 DOOM_DIR = app/doom
 DOOM_SRCS = $(wildcard $(DOOM_DIR)/*.c)
@@ -156,17 +203,78 @@ APP_SRCS = $(wildcard app/*.c)
 APP_OBJS = $(patsubst app/%.c,app/%.o,$(APP_SRCS))
 APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_ROOT)/bin/htmlview.elf $(ISO_ROOT)/bin/niplay.elf $(ISO_ROOT)/bin/widget_demo.elf $(ISO_ROOT)/bin/ipc_test.elf $(ISO_ROOT)/bin/randtest.elf $(ISO_ROOT)/bin/socktest.elf
 
+# Apps that link against libbearssl.a (phase 3b+). These get their own
+# explicit rules below because they need (a) BearSSL public headers in the
+# include path and (b) libbearssl.a appended at link time.
+APP_ELFS_TLS    = $(ISO_ROOT)/bin/tlsboot.elf $(ISO_ROOT)/bin/tlstest.elf $(ISO_ROOT)/bin/catest.elf $(ISO_ROOT)/bin/httpsget.elf $(ISO_ROOT)/bin/urlget.elf $(ISO_ROOT)/bin/browser.elf
+
+# Phase 5: HTTP/HTTPS client library. Lives in its own directory so it
+# isn't auto-folded into $(SDK_OBJS) — apps that need it append
+# $(HTTP_CLIENT_OBJ) explicitly. Built with bearssl includes because
+# the .c #includes <bearssl.h> / <bearssl_io.h>.
+HTTP_CLIENT_OBJ := sdk/lib_http/http_client.o
+
 # Object builds need the Windows directory tree from setup before they start;
 # this matters when users run `make -j`.
 $(KERNEL_OBJS) $(SDK_OBJS) $(APP_OBJS) $(DOOM_OBJS): | setup
 
-apps: setup $(SDK_OBJS) $(APP_ELFS_SIMPLE) sysgui_app
+apps: setup $(SDK_OBJS) $(BEARSSL_LIB) $(APP_ELFS_SIMPLE) $(APP_ELFS_TLS) sysgui_app
 
 $(ISO_ROOT)/bin/%.elf: app/%.o $(SDK_OBJS)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< -o $@
 
 app/%.o: app/%.c
 	$(CC) $(USER_CFLAGS) -c $< -o $@
+
+# TLS apps: bearssl headers visible at compile, libbearssl.a appended at link.
+app/tlsboot.o: app/tlsboot.c
+	$(CC) $(USER_CFLAGS) -I./third_party/bearssl/inc -c $< -o $@
+
+$(ISO_ROOT)/bin/tlsboot.elf: app/tlsboot.o $(SDK_OBJS) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(BEARSSL_LIB) -o $@
+
+app/tlstest.o: app/tlstest.c app/ca_anchors.h
+	$(CC) $(USER_CFLAGS) -I./third_party/bearssl/inc -c $< -o $@
+
+$(ISO_ROOT)/bin/tlstest.elf: app/tlstest.o $(SDK_OBJS) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(BEARSSL_LIB) -o $@
+
+app/catest.o: app/catest.c third_party/ca_bundle/ca_bundle.h
+	$(CC) $(USER_CFLAGS) -I./third_party/bearssl/inc -c $< -o $@
+
+$(ISO_ROOT)/bin/catest.elf: app/catest.o $(SDK_OBJS) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(BEARSSL_LIB) -o $@
+
+# httpsget — real-internet HTTPS smoke test (phase 4c). Same toolchain as
+# catest (needs the Mozilla TA bundle header) plus the bearssl public
+# headers; otherwise just a normal TLS-linked app.
+app/httpsget.o: app/httpsget.c third_party/ca_bundle/ca_bundle.h
+	$(CC) $(USER_CFLAGS) -I./third_party/bearssl/inc -c $< -o $@
+
+$(ISO_ROOT)/bin/httpsget.elf: app/httpsget.o $(SDK_OBJS) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(BEARSSL_LIB) -o $@
+
+# urlget — phase 5 wrapper around the new http_client library. Same link
+# soup as the other TLS apps + the dedicated http_client object.
+sdk/lib_http/http_client.o: sdk/lib_http/http_client.c sdk/include/http_client.h sdk/include/url.h
+	$(CC) $(USER_CFLAGS) -I./third_party/bearssl/inc -c $< -o $@
+
+app/urlget.o: app/urlget.c sdk/include/http_client.h sdk/include/url.h third_party/ca_bundle/ca_bundle.h
+	$(CC) $(USER_CFLAGS) -I./third_party/bearssl/inc -c $< -o $@
+
+$(ISO_ROOT)/bin/urlget.elf: app/urlget.o $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(HTTP_CLIENT_OBJ) $(BEARSSL_LIB) -o $@
+
+# browser.elf — phase 6 GUI browser. Compiles app/htmlview.c a SECOND time
+# with -DBROWSER_BUILD, which swaps its load_page() for the eq_http_get()
+# variant (full HTTP/HTTPS via the phase-5 client). htmlview.elf is built
+# from the same source without the define and keeps its original local-file
+# loading path, so both binaries coexist.
+app/htmlview_browser.o: app/htmlview.c sdk/include/http_client.h sdk/include/url.h third_party/ca_bundle/ca_bundle.h
+	$(CC) $(USER_CFLAGS) -DBROWSER_BUILD -I./third_party/bearssl/inc -c $< -o $@
+
+$(ISO_ROOT)/bin/browser.elf: app/htmlview_browser.o $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(HTTP_CLIENT_OBJ) $(BEARSSL_LIB) -o $@
 
 sysgui_app:
 	@echo "=== Building sysgui (enGUI) ==="
@@ -192,6 +300,8 @@ clean:
 	@if exist kernel.elf del /q kernel.elf
 	@if exist equos.iso del /q equos.iso
 	@if exist app\sysgui\sysgui.elf del /q app\sysgui\sysgui.elf
+	@for /R third_party\bearssl %%f in (*.o *.d) do @if exist "%%f" del /q "%%f"
+	@if exist third_party\bearssl\libbearssl.a del /q third_party\bearssl\libbearssl.a
 else
 clean:
 	@rm -rf $(OBJ_DIR)
@@ -199,6 +309,8 @@ clean:
 	@rm -f app/*.o app/*.d
 	@rm -f kernel.elf equos.iso
 	@rm -f app/sysgui/sysgui.elf
+	@find third_party/bearssl -name '*.o' -delete -o -name '*.d' -delete
+	@rm -f third_party/bearssl/libbearssl.a
 endif
 
 create_hdd: kernel.elf apps doom.elf
@@ -224,7 +336,13 @@ iso: kernel.elf apps doom.elf
 #                     в qemu.log. Использовать только при отладке падений.
 
 QEMU       := qemu-system-x86_64
+# Базовый CPU = qemu64 (стабильно работает на WHPX), плюс явно
+# включаем RDRAND/RDSEED/AES-NI поверх. Чистый `-cpu max` с WHPX
+# валится с "Unexpected VP exit code 4" — гипервизор не умеет
+# часть фичей, которые max объявляет. qemu64+флаги — самый
+# совместимый способ дать ядру RDRAND под WHPX/KVM/HVF/TCG.
 QEMU_BASE  := -m 512M -boot d \
+              -cpu qemu64,+rdrand,+rdseed,+aes \
               -drive file=hdd.img,format=raw,index=0,media=disk \
               -cdrom equos.iso \
               -serial stdio \
@@ -236,6 +354,11 @@ QEMU_ACCEL := -accel whpx,kernel-irqchip=off -accel kvm -accel hvf -accel tcg
 
 run:
 	$(QEMU) $(QEMU_BASE) $(QEMU_ACCEL)
+
+# Run with pure software emulation (no hypervisor). Slower but more
+# deterministic — useful when WHPX/KVM behave oddly with network I/O.
+run-tcg:
+	$(QEMU) $(QEMU_BASE) -accel tcg
 
 run-debug:
 	$(QEMU) $(QEMU_BASE) -d int,guest_errors,mmu -D qemu.log
