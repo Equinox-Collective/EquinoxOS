@@ -11,7 +11,7 @@
 #define CONTENT_Y 56
 #define CONTENT_W (WIN_W - 36)
 #define LINE_H 18
-#define MAX_LINES 512
+#define MAX_LINES 4096
 #define LINE_CHARS 74
 
 #define CLR_BG 0xFDFCFC
@@ -35,8 +35,8 @@ static void parse_css_declarations_to_state(const char *decl);
 
 /* ── CSS Engine ────────────────────────────────────────────────── */
 
-#define MAX_CSS_RULES 128
-#define MAX_SELECTOR 64
+#define MAX_CSS_RULES 512
+#define MAX_SELECTOR 256
 #define MAX_CSS_CLASS 128
 
 typedef enum { ALIGN_LEFT, ALIGN_CENTER, ALIGN_RIGHT } text_align_t;
@@ -65,6 +65,98 @@ typedef struct {
 static css_rule_t css_rules[MAX_CSS_RULES];
 static int css_rule_count = 0;
 static uint32_t body_bg = CLR_BG;
+
+/* ── CSS custom properties (variables) ──────────────────────────
+ * Captured from any rule whose declaration block contains
+ * `--name: value;`. Most sites put them in `:root { --bg:#... }`,
+ * but we record them from any selector — at this level we don't
+ * scope by selector, we just need to know what `var(--foo)`
+ * resolves to so that the rest of the parser sees a real value.
+ *
+ * Names are stored without the leading "--".
+ */
+#define MAX_CSS_VARS 128
+#define CSS_VAR_NAME_LEN 48
+#define CSS_VAR_VALUE_LEN 96
+typedef struct {
+  char name[CSS_VAR_NAME_LEN];
+  char value[CSS_VAR_VALUE_LEN];
+} css_var_t;
+static css_var_t css_vars[MAX_CSS_VARS];
+static int css_var_count = 0;
+
+static const char *css_var_lookup(const char *name, int name_len) {
+  for (int i = 0; i < css_var_count; i++) {
+    if ((int)strlen(css_vars[i].name) == name_len &&
+        strncmp(css_vars[i].name, name, name_len) == 0)
+      return css_vars[i].value;
+  }
+  return NULL;
+}
+
+static void css_var_define(const char *name, int name_len, const char *value) {
+  if (name_len <= 0 || name_len >= CSS_VAR_NAME_LEN)
+    return;
+  /* Replace if already defined */
+  for (int i = 0; i < css_var_count; i++) {
+    if ((int)strlen(css_vars[i].name) == name_len &&
+        strncmp(css_vars[i].name, name, name_len) == 0) {
+      strncpy(css_vars[i].value, value, CSS_VAR_VALUE_LEN - 1);
+      css_vars[i].value[CSS_VAR_VALUE_LEN - 1] = '\0';
+      return;
+    }
+  }
+  if (css_var_count >= MAX_CSS_VARS)
+    return;
+  strncpy(css_vars[css_var_count].name, name, name_len);
+  css_vars[css_var_count].name[name_len] = '\0';
+  strncpy(css_vars[css_var_count].value, value, CSS_VAR_VALUE_LEN - 1);
+  css_vars[css_var_count].value[CSS_VAR_VALUE_LEN - 1] = '\0';
+  css_var_count++;
+}
+
+/* Substitute every occurrence of `var(--name)` in `val` with the
+ * value previously stored via css_var_define(). Unknown vars are
+ * left as-is so downstream parsers can still spot them. Output is
+ * written to `out` (size `out_size`) and may be the same memory as
+ * `val`, since we copy through a small bounce buffer.
+ *
+ * Only handles one level of indirection — chained vars
+ * (var(--a)  where --a: var(--b)) need a second pass; we don't
+ * bother today, the site doesn't use it. */
+static void css_resolve_vars(const char *val, char *out, int out_size) {
+  int oi = 0;
+  for (int i = 0; val[i] && oi < out_size - 1;) {
+    if (val[i] == 'v' && val[i + 1] == 'a' && val[i + 2] == 'r' &&
+        val[i + 3] == '(') {
+      const char *p = val + i + 4;
+      while (*p == ' ')
+        p++;
+      if (p[0] == '-' && p[1] == '-') {
+        p += 2;
+        const char *name_start = p;
+        while (*p && *p != ')' && *p != ',' && *p != ' ')
+          p++;
+        int name_len = (int)(p - name_start);
+        /* Skip optional fallback ", value" */
+        const char *q = p;
+        while (*q && *q != ')')
+          q++;
+        if (*q == ')') {
+          const char *resolved = css_var_lookup(name_start, name_len);
+          if (resolved) {
+            for (int k = 0; resolved[k] && oi < out_size - 1; k++)
+              out[oi++] = resolved[k];
+            i = (int)(q - val) + 1;
+            continue;
+          }
+        }
+      }
+    }
+    out[oi++] = val[i++];
+  }
+  out[oi] = '\0';
+}
 
 /* ── Line model (extended) ─────────────────────────────────────── */
 
@@ -447,6 +539,20 @@ static void parse_css_declarations(css_rule_t *rule, const char *decl,
 
   for (int i = 0; i < dlen; i++) {
     char c = decl[i];
+    /* Skip a CSS slash-star comment that may sit between properties:
+     * declaration blocks often have inline comments after a value,
+     * e.g. "--accent:#7dd3fc;  (* sky-300 *)" (using parens here so
+     * this C comment doesn't terminate early). Without skipping them
+     * the comment bleeds into the next property name and we lose all
+     * subsequent --variable captures. */
+    if (c == '/' && i + 1 < dlen && decl[i + 1] == '*') {
+      i += 2;
+      while (i + 1 < dlen && !(decl[i] == '*' && decl[i + 1] == '/'))
+        i++;
+      if (i + 1 < dlen)
+        i++;
+      continue;
+    }
     if (c == ':') {
       in_val = true;
       vi = 0;
@@ -462,16 +568,41 @@ static void parse_css_declarations(css_rule_t *rule, const char *decl,
       prop[pi] = '\0';
       val[vi] = '\0';
 
-      /* Trim leading spaces */
+      /* Trim leading whitespace (spaces, tabs, newlines — rules
+       * inside `:root { ... }` etc. are typically multi-line) */
       const char *pp = prop;
-      while (*pp == ' ')
+      while (*pp && ascii_isspace(*pp))
         pp++;
       const char *vv = val;
-      while (*vv == ' ')
+      while (*vv && ascii_isspace(*vv))
         vv++;
 
-      if (pp[0] && vv[0])
-        apply_css_property(rule, pp, vv);
+      if (pp[0] && vv[0]) {
+        /* CSS custom property declaration: --name: value; */
+        if (pp[0] == '-' && pp[1] == '-') {
+          const char *name = pp + 2;
+          int name_len = (int)strlen(name);
+          /* Strip !important / trailing whitespace from value */
+          char clean_val[CSS_VAR_VALUE_LEN];
+          int cv = 0;
+          for (int k = 0; vv[k] && cv < CSS_VAR_VALUE_LEN - 1; k++) {
+            if (vv[k] == '!')
+              break;
+            clean_val[cv++] = vv[k];
+          }
+          while (cv > 0 && clean_val[cv - 1] == ' ')
+            cv--;
+          clean_val[cv] = '\0';
+          css_var_define(name, name_len, clean_val);
+        } else if (strstr(vv, "var(")) {
+          /* Resolve var(--foo) in value before applying */
+          char resolved[CSS_VAR_VALUE_LEN * 2];
+          css_resolve_vars(vv, resolved, sizeof(resolved));
+          apply_css_property(rule, pp, resolved);
+        } else {
+          apply_css_property(rule, pp, vv);
+        }
+      }
 
       pi = 0;
       vi = 0;
@@ -531,19 +662,28 @@ static void parse_css_block(const char *css, int css_len) {
       continue;
     }
 
-    /* Read selector (preserve spaces for compound selector splitting) */
+    /* Read selector (preserve spaces for compound selector splitting).
+     * If the selector is too long for our buffer, keep advancing p so
+     * we still find the next `{` — that way one giant comma-list like
+     * `body.lang-out [data-i18n], body.lang-out #lang-top, ...` no
+     * longer aborts the whole stylesheet. */
     char sel[MAX_SELECTOR];
     int si = 0;
     bool prev_space = false;
-    while (p < end && *p != '{' && si < MAX_SELECTOR - 1) {
+    bool sel_truncated = false;
+    while (p < end && *p != '{') {
       if (ascii_isspace(*p)) {
-        if (si > 0)
+        if (si > 0 && si < MAX_SELECTOR - 1)
           prev_space = true;
       } else {
-        if (prev_space && si > 0 && si < MAX_SELECTOR - 1)
-          sel[si++] = ' ';
-        prev_space = false;
-        sel[si++] = ascii_lower(*p);
+        if (si >= MAX_SELECTOR - 1) {
+          sel_truncated = true;
+        } else {
+          if (prev_space && si > 0 && si < MAX_SELECTOR - 1)
+            sel[si++] = ' ';
+          prev_space = false;
+          sel[si++] = ascii_lower(*p);
+        }
       }
       p++;
     }
@@ -551,6 +691,11 @@ static void parse_css_block(const char *css, int css_len) {
     if (p >= end || *p != '{')
       break;
     p++; /* skip { */
+    /* Keep parsing the declaration block even when the selector was
+     * truncated — we still want to capture any `--var: value` lines
+     * inside it. The (oversized) recorded selector probably won't
+     * match anything, but that's fine. */
+    (void)sel_truncated;
 
     /* Find closing } (handle nested braces) */
     const char *brace = p;
@@ -610,6 +755,7 @@ static void parse_css_block(const char *css, int css_len) {
 /* ── CSS: extract all <style> blocks from HTML ───────────────── */
 static void extract_css(const char *html, uint32_t size) {
   css_rule_count = 0;
+  css_var_count = 0;
 
   for (uint32_t i = 0; i + 6 < size; i++) {
     if (html[i] != '<')
@@ -1331,6 +1477,73 @@ static void parse_html(const char *html, uint32_t size) {
         i += consumed;
         continue;
       }
+    }
+
+    /* UTF-8 → ASCII fallback for the punctuation that actually shows
+     * up on the EquinoxOS landing page. The terminal font is single-
+     * byte, so without this every literal "—", "…", "→", curly quote
+     * gets rendered as 2-3 garbage glyphs. We don't ship a real
+     * Unicode font, so substitute a sensible ASCII equivalent. */
+    if ((unsigned char)c >= 0x80) {
+      unsigned char b0 = (unsigned char)c;
+      unsigned char b1 = (i + 1 < size) ? (unsigned char)html[i + 1] : 0;
+      unsigned char b2 = (i + 2 < size) ? (unsigned char)html[i + 2] : 0;
+      int eaten = 1;
+      const char *replacement = "?";
+      char tmp[2] = {0, 0};
+      if (b0 == 0xC2 && b1 == 0xA0) { /* nbsp */
+        replacement = " ";
+        eaten = 2;
+      } else if (b0 == 0xC2 && b1 == 0xB7) { /* middle dot */
+        replacement = "*";
+        eaten = 2;
+      } else if (b0 == 0xE2 && b1 == 0x80) {
+        eaten = 3;
+        switch (b2) {
+        case 0x90: case 0x91: case 0x92: case 0x93:
+        case 0x94: case 0x95: /* hyphens / dashes */
+          replacement = "-";
+          break;
+        case 0x98: case 0x99: case 0x9A: case 0x9B: /* single quotes */
+          tmp[0] = '\'';
+          replacement = tmp;
+          break;
+        case 0x9C: case 0x9D: case 0x9E: case 0x9F: /* double quotes */
+          replacement = "\"";
+          break;
+        case 0xA2: /* bullet */
+          replacement = "*";
+          break;
+        case 0xA6: /* ellipsis */
+          replacement = "...";
+          break;
+        default:
+          replacement = "?";
+          break;
+        }
+      } else if (b0 == 0xE2 && b1 == 0x86) {
+        /* arrows */
+        eaten = 3;
+        switch (b2) {
+        case 0x90: replacement = "<-"; break;
+        case 0x91: replacement = "^";  break;
+        case 0x92: replacement = "->"; break;
+        case 0x93: replacement = "v";  break;
+        case 0xB5: replacement = "^";  break;
+        case 0xB7: replacement = "v";  break;
+        default:   replacement = "->"; break;
+        }
+      } else if (b0 >= 0xF0) {
+        eaten = 4; /* 4-byte UTF-8 (most emoji) */
+      } else if (b0 >= 0xE0) {
+        eaten = 3;
+      } else if (b0 >= 0xC0) {
+        eaten = 2;
+      }
+      for (int k = 0; replacement[k] && word_len < LINE_CHARS; k++)
+        word[word_len++] = replacement[k];
+      i += eaten;
+      continue;
     }
 
     if (ascii_isspace(c)) {
