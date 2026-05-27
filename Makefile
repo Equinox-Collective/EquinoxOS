@@ -1,5 +1,6 @@
 CC = x86_64-elf-gcc
 LD = x86_64-elf-ld
+AR = x86_64-elf-ar
 ASM = nasm
 
 ifeq ($(OS),Windows_NT)
@@ -89,6 +90,46 @@ SDK_ASM_SRCS = $(wildcard $(SDK_LIB_DIR)/*.asm)
 SDK_OBJS = $(patsubst $(SDK_LIB_DIR)/%.c,$(SDK_LIB_DIR)/%.o,$(SDK_C_SRCS)) \
            $(patsubst $(SDK_LIB_DIR)/%.asm,$(SDK_LIB_DIR)/%.o,$(SDK_ASM_SRCS))
 
+# --- BEARSSL (vendored under third_party/bearssl) -----------------------------
+# Built once as a static library; userspace apps link against it for TLS.
+# Sources are NEVER patched — all platform tweaks happen via -D flags below
+# and via sdk/include/limits.h. See third_party/bearssl/README.equos.md.
+BEARSSL_DIR     := third_party/bearssl
+BEARSSL_INC     := -I./$(BEARSSL_DIR)/inc -I./$(BEARSSL_DIR)/src
+BEARSSL_SRC_DIRS := \
+    $(BEARSSL_DIR)/src \
+    $(BEARSSL_DIR)/src/aead \
+    $(BEARSSL_DIR)/src/codec \
+    $(BEARSSL_DIR)/src/ec \
+    $(BEARSSL_DIR)/src/hash \
+    $(BEARSSL_DIR)/src/int \
+    $(BEARSSL_DIR)/src/kdf \
+    $(BEARSSL_DIR)/src/mac \
+    $(BEARSSL_DIR)/src/rand \
+    $(BEARSSL_DIR)/src/rsa \
+    $(BEARSSL_DIR)/src/ssl \
+    $(BEARSSL_DIR)/src/symcipher \
+    $(BEARSSL_DIR)/src/x509
+BEARSSL_C_SRCS  := $(foreach d,$(BEARSSL_SRC_DIRS),$(wildcard $(d)/*.c))
+BEARSSL_OBJS    := $(BEARSSL_C_SRCS:.c=.o)
+BEARSSL_LIB     := $(BEARSSL_DIR)/libbearssl.a
+
+# BR_USE_URANDOM / BR_USE_WIN32_RAND : disable platform-specific seeders;
+#   we seed BearSSL ourselves from sys_getrandom() (phase 3b shim).
+# BR_64                              : force the 64-bit codepath (we're x86_64).
+BEARSSL_CFLAGS  := $(USER_CFLAGS) $(BEARSSL_INC) \
+                   -DBR_USE_URANDOM=0 -DBR_USE_WIN32_RAND=0 -DBR_64=1 \
+                   -W -Wall -Os
+
+$(BEARSSL_DIR)/src/%.o: $(BEARSSL_DIR)/src/%.c
+	$(CC) $(BEARSSL_CFLAGS) -c $< -o $@
+
+$(BEARSSL_LIB): $(BEARSSL_OBJS)
+	@echo === Building libbearssl.a ===
+	$(AR) -rcs $@ $(BEARSSL_OBJS)
+
+libbearssl: $(BEARSSL_LIB)
+
 # --- DOOM ---
 DOOM_DIR = app/doom
 DOOM_SRCS = $(wildcard $(DOOM_DIR)/*.c)
@@ -160,7 +201,7 @@ APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_RO
 # this matters when users run `make -j`.
 $(KERNEL_OBJS) $(SDK_OBJS) $(APP_OBJS) $(DOOM_OBJS): | setup
 
-apps: setup $(SDK_OBJS) $(APP_ELFS_SIMPLE) sysgui_app
+apps: setup $(SDK_OBJS) $(BEARSSL_LIB) $(APP_ELFS_SIMPLE) sysgui_app
 
 $(ISO_ROOT)/bin/%.elf: app/%.o $(SDK_OBJS)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< -o $@
@@ -192,6 +233,8 @@ clean:
 	@if exist kernel.elf del /q kernel.elf
 	@if exist equos.iso del /q equos.iso
 	@if exist app\sysgui\sysgui.elf del /q app\sysgui\sysgui.elf
+	@for /R third_party\bearssl %%f in (*.o *.d) do @if exist "%%f" del /q "%%f"
+	@if exist third_party\bearssl\libbearssl.a del /q third_party\bearssl\libbearssl.a
 else
 clean:
 	@rm -rf $(OBJ_DIR)
@@ -199,6 +242,8 @@ clean:
 	@rm -f app/*.o app/*.d
 	@rm -f kernel.elf equos.iso
 	@rm -f app/sysgui/sysgui.elf
+	@find third_party/bearssl -name '*.o' -delete -o -name '*.d' -delete
+	@rm -f third_party/bearssl/libbearssl.a
 endif
 
 create_hdd: kernel.elf apps doom.elf
@@ -224,7 +269,13 @@ iso: kernel.elf apps doom.elf
 #                     в qemu.log. Использовать только при отладке падений.
 
 QEMU       := qemu-system-x86_64
+# `-cpu max` экспонирует максимальный доступный набор CPUID-фичей хоста:
+# в т.ч. RDRAND, RDSEED, AES-NI. Без него WHPX по умолчанию режет CPUID до
+# базового набора и ядро видит "RDRAND unavailable" → soft fallback. Нужен
+# для TLS-фазы (BearSSL предпочитает аппаратный AES-NI там где есть, и
+# мы хотим честный энтропийный источник для handshake'а).
 QEMU_BASE  := -m 512M -boot d \
+              -cpu max \
               -drive file=hdd.img,format=raw,index=0,media=disk \
               -cdrom equos.iso \
               -serial stdio \
