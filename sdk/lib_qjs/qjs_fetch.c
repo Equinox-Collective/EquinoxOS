@@ -230,8 +230,14 @@ void qjs_install_fetch(JSContext *ctx,
   g_tas     = tas;
   g_tas_num = tas_num;
 
+  /* See dom_js.c for the why: JS_NewClass lives in the runtime's
+   * class table, which is wiped by JS_FreeRuntime — so re-install it
+   * on every fresh runtime even though the class_id itself is
+   * process-static. */
   if (fetch_response_class_id == 0) {
     JS_NewClassID(rt, &fetch_response_class_id);
+  }
+  if (!JS_IsRegisteredClass(rt, fetch_response_class_id)) {
     JS_NewClass(rt, fetch_response_class_id, &fetch_response_class);
   }
   JSValue proto = JS_NewObject(ctx);
