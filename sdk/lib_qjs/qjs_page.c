@@ -176,6 +176,10 @@ void qjs_run_page_scripts(dom_node_t *doc,
 struct qjs_page {
   JSRuntime *rt;
   JSContext *ctx;
+  /* R5/N0: last-known URL (== current_url at create-time). Compared
+   * against globalThis.location.href after each event dispatch to
+   * detect `location.href = "..."` JS-driven navigation. */
+  char       url[512];
 };
 
 qjs_page_t *qjs_page_create(dom_node_t *doc,
@@ -195,6 +199,10 @@ qjs_page_t *qjs_page_create(dom_node_t *doc,
   qjs_install_console(p->ctx);
   qjs_install_dom    (p->ctx, doc);
   qjs_install_window (p->ctx, page_url);
+  if (page_url) {
+    strncpy(p->url, page_url, sizeof(p->url) - 1);
+    p->url[sizeof(p->url) - 1] = 0;
+  }
   qjs_install_fetch  (p->ctx, tas, tas_num);
   qjs_install_storage(p->ctx);
   qjs_install_timers (p->ctx);
@@ -220,6 +228,31 @@ int qjs_page_dispatch_event(qjs_page_t *p, dom_node_t *target,
    * so the user sees the result by the next paint. */
   qjs_run_microtasks(p->ctx);
   return n;
+}
+
+int qjs_page_pending_nav(qjs_page_t *p, char *out, size_t out_len) {
+  if (!p || !p->ctx) return 0;
+  JSValue global = JS_GetGlobalObject(p->ctx);
+  JSValue loc    = JS_GetPropertyStr(p->ctx, global, "location");
+  int navigated = 0;
+  if (JS_IsObject(loc)) {
+    JSValue href = JS_GetPropertyStr(p->ctx, loc, "href");
+    const char *s = JS_ToCString(p->ctx, href);
+    if (s && strcmp(s, p->url) != 0) {
+      if (out && out_len > 0) {
+        strncpy(out, s, out_len - 1);
+        out[out_len - 1] = 0;
+      }
+      strncpy(p->url, s, sizeof(p->url) - 1);
+      p->url[sizeof(p->url) - 1] = 0;
+      navigated = 1;
+    }
+    if (s) JS_FreeCString(p->ctx, s);
+    JS_FreeValue(p->ctx, href);
+  }
+  JS_FreeValue(p->ctx, loc);
+  JS_FreeValue(p->ctx, global);
+  return navigated;
 }
 
 int qjs_page_consume_dirty(qjs_page_t *p) {

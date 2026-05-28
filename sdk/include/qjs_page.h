@@ -76,6 +76,13 @@ int qjs_page_dispatch_event(qjs_page_t *p,
  * Returns 1 and clears the flag, or 0. */
 int qjs_page_consume_dirty(qjs_page_t *p);
 
+/* R5/N0: did JS write to `location.href` (or any of the aliased
+ * setters) since the last check? On a hit, copy the requested URL
+ * into `out` (truncated to `out_len-1`) and update the page's
+ * remembered URL so the next call doesn't re-fire. Returns 1 if a
+ * navigation was requested, else 0. */
+int qjs_page_pending_nav(qjs_page_t *p, char *out, size_t out_len);
+
 void qjs_page_free(qjs_page_t *p);
 
 #endif

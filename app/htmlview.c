@@ -1488,6 +1488,18 @@ static void parse_html(const char *html, uint32_t size) {
    * registered there survive until the next navigation, so widget
    * events (post-paint) can dispatch into them. */
   g_page = qjs_page_create(g_doc, current_url, TAs_MOZ, TAs_MOZ_NUM);
+  /* R5/N0: an inline <script> can do `location.href = "..."` during
+   * page_create; if so, redirect immediately instead of rendering
+   * the now-stale tree. */
+  {
+    char nav[512];
+    if (g_page && qjs_page_pending_nav(g_page, nav, sizeof nav)) {
+      strncpy(current_url, nav, sizeof(current_url) - 1);
+      current_url[sizeof(current_url) - 1] = 0;
+      load_page(current_url);
+      return;
+    }
+  }
 #endif
 
   rebuild_lines_from_dom();
@@ -2109,6 +2121,15 @@ static void render(const char *filename) {
         int click_prevented = 0;
         if (g_page) {
           click_prevented = qjs_page_dispatch_event(g_page, wn, "click");
+          /* R5/N0: handler may have done `location.href = "..."`. If
+           * so, navigate now instead of repainting the dead page. */
+          char nav[512];
+          if (qjs_page_pending_nav(g_page, nav, sizeof nav)) {
+            strncpy(current_url, nav, sizeof(current_url) - 1);
+            current_url[sizeof(current_url) - 1] = 0;
+            load_page(current_url);
+            return;
+          }
           if (qjs_page_consume_dirty(g_page)) {
             rebuild_lines_from_dom();
             /* Don't continue painting against the now-stale loop —
@@ -2170,6 +2191,13 @@ static void render(const char *filename) {
         dom_set_attr(n, "value", buf);
         if (g_page) {
           qjs_page_dispatch_event(g_page, n, "input");
+          char nav[512];
+          if (qjs_page_pending_nav(g_page, nav, sizeof nav)) {
+            strncpy(current_url, nav, sizeof(current_url) - 1);
+            current_url[sizeof(current_url) - 1] = 0;
+            load_page(current_url);
+            return;
+          }
           if (qjs_page_consume_dirty(g_page)) {
             rebuild_lines_from_dom();
             return;
