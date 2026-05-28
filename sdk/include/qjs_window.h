@@ -57,4 +57,16 @@ void qjs_fire_loaded_events(JSContext *ctx);  /* DOMContentLoaded then load, no 
  * asserts on a non-empty GC list at runtime teardown. */
 void qjs_window_teardown(JSContext *ctx);
 
+/* R5/N1: pending navigation requested via JS. Kinds:
+ *   1 = ASSIGN   navigate to `url_out` and push history
+ *   2 = REPLACE  navigate to `url_out` without pushing history
+ *   3 = RELOAD   reload the current page (url_out is empty)
+ *   4 = HISTORY  history.go(delta_out)
+ * Returns 1 on a hit (and clears state), 0 if nothing pending. */
+int qjs_window_take_nav(int *kind, char *url_out, size_t url_len, int *delta_out);
+
+/* The host pokes this after every navigation so `history.length`
+ * matches the back-stack depth. */
+void qjs_window_set_history_length(int n);
+
 #endif

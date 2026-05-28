@@ -67,9 +67,114 @@ static JSValue loc_toString(JSContext *ctx, JSValueConst this_val,
   return href; /* already a string */
 }
 
+/* ----- R5/N1: explicit nav requests (separate from href-polling) ----- */
+typedef enum {
+  NAV_NONE = 0,
+  NAV_ASSIGN,   /* navigate, push history */
+  NAV_REPLACE,  /* navigate, don't push */
+  NAV_RELOAD,   /* reload current URL */
+  NAV_HISTORY,  /* history.go(delta) */
+} nav_kind_t;
+
+static struct {
+  nav_kind_t kind;
+  char       url[512];
+  int        delta;
+} g_nav;
+
+static void nav_clear(void) {
+  g_nav.kind  = NAV_NONE;
+  g_nav.url[0] = 0;
+  g_nav.delta  = 0;
+}
+
+static void nav_set_url(nav_kind_t k, const char *url) {
+  g_nav.kind = k;
+  g_nav.delta = 0;
+  if (url) {
+    strncpy(g_nav.url, url, sizeof(g_nav.url) - 1);
+    g_nav.url[sizeof(g_nav.url) - 1] = 0;
+  } else {
+    g_nav.url[0] = 0;
+  }
+}
+
+int qjs_window_take_nav(int *kind, char *url_out, size_t url_len, int *delta_out) {
+  if (g_nav.kind == NAV_NONE) return 0;
+  if (kind) *kind = (int)g_nav.kind;
+  if (url_out && url_len > 0) {
+    strncpy(url_out, g_nav.url, url_len - 1);
+    url_out[url_len - 1] = 0;
+  }
+  if (delta_out) *delta_out = g_nav.delta;
+  nav_clear();
+  return 1;
+}
+
+static JSValue js_loc_assign(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv) {
+  (void)this_val;
+  if (argc < 1) return JS_UNDEFINED;
+  const char *s = JS_ToCString(ctx, argv[0]);
+  if (s) { nav_set_url(NAV_ASSIGN, s); JS_FreeCString(ctx, s); }
+  return JS_UNDEFINED;
+}
+static JSValue js_loc_replace(JSContext *ctx, JSValueConst this_val,
+                              int argc, JSValueConst *argv) {
+  (void)this_val;
+  if (argc < 1) return JS_UNDEFINED;
+  const char *s = JS_ToCString(ctx, argv[0]);
+  if (s) { nav_set_url(NAV_REPLACE, s); JS_FreeCString(ctx, s); }
+  return JS_UNDEFINED;
+}
+static JSValue js_loc_reload(JSContext *ctx, JSValueConst this_val,
+                             int argc, JSValueConst *argv) {
+  (void)ctx; (void)this_val; (void)argc; (void)argv;
+  nav_set_url(NAV_RELOAD, NULL);
+  return JS_UNDEFINED;
+}
+
+static JSValue js_hist_go(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv) {
+  (void)this_val;
+  int32_t delta = 0;
+  if (argc >= 1) JS_ToInt32(ctx, &delta, argv[0]);
+  g_nav.kind  = NAV_HISTORY;
+  g_nav.delta = (int)delta;
+  g_nav.url[0] = 0;
+  return JS_UNDEFINED;
+}
+static JSValue js_hist_back(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv) {
+  (void)ctx; (void)this_val; (void)argc; (void)argv;
+  g_nav.kind  = NAV_HISTORY;
+  g_nav.delta = -1;
+  g_nav.url[0] = 0;
+  return JS_UNDEFINED;
+}
+static JSValue js_hist_forward(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv) {
+  (void)ctx; (void)this_val; (void)argc; (void)argv;
+  g_nav.kind  = NAV_HISTORY;
+  g_nav.delta = 1;
+  g_nav.url[0] = 0;
+  return JS_UNDEFINED;
+}
+
+/* history.length is filled in by the C side at install/refresh time —
+ * we just expose a getter that reads a module-static int. The host
+ * pokes it via qjs_window_set_history_length() after every nav. */
+static int g_hist_len;
+void qjs_window_set_history_length(int n) { g_hist_len = n; }
+static JSValue js_hist_get_length(JSContext *ctx, JSValueConst this_val) {
+  (void)this_val;
+  return JS_NewInt32(ctx, g_hist_len);
+}
+
 void qjs_install_window(JSContext *ctx, const char *url) {
   parsed_url_t pu;
   parse_url(url, &pu);
+  nav_clear();
 
   /* window === globalThis is the easiest thing humans expect; bind
    * the global object onto itself under both names. */
@@ -86,8 +191,34 @@ void qjs_install_window(JSContext *ctx, const char *url) {
   JS_SetPropertyStr(ctx, loc, "pathname", JS_NewString(ctx, pu.pathname));
   JS_SetPropertyStr(ctx, loc, "toString",
       JS_NewCFunction(ctx, loc_toString, "toString", 0));
+  /* R5/N1 explicit nav verbs. */
+  JS_SetPropertyStr(ctx, loc, "assign",
+      JS_NewCFunction(ctx, js_loc_assign,  "assign",  1));
+  JS_SetPropertyStr(ctx, loc, "replace",
+      JS_NewCFunction(ctx, js_loc_replace, "replace", 1));
+  JS_SetPropertyStr(ctx, loc, "reload",
+      JS_NewCFunction(ctx, js_loc_reload,  "reload",  0));
 
   JS_SetPropertyStr(ctx, global, "location", JS_DupValue(ctx, loc));
+
+  /* R5/N1: window.history. We only model a back-stack, so .forward
+   * is best-effort (works if the host tracked a high-water mark);
+   * .length reads the host's current stack depth. */
+  JSValue hist = JS_NewObject(ctx);
+  JS_SetPropertyStr(ctx, hist, "back",
+      JS_NewCFunction(ctx, js_hist_back,    "back",    0));
+  JS_SetPropertyStr(ctx, hist, "forward",
+      JS_NewCFunction(ctx, js_hist_forward, "forward", 0));
+  JS_SetPropertyStr(ctx, hist, "go",
+      JS_NewCFunction(ctx, js_hist_go,      "go",      1));
+  /* length as a getter so JS sees the live count. */
+  JSAtom len_atom = JS_NewAtom(ctx, "length");
+  JSValue getter = JS_NewCFunction2(ctx, (JSCFunction *)js_hist_get_length,
+                                    "get length", 0, JS_CFUNC_getter, 0);
+  JS_DefinePropertyGetSet(ctx, hist, len_atom, getter, JS_UNDEFINED,
+                          JS_PROP_CONFIGURABLE);
+  JS_FreeAtom(ctx, len_atom);
+  JS_SetPropertyStr(ctx, global, "history", hist);
 
   /* document.location too. */
   JSValue doc = JS_GetPropertyStr(ctx, global, "document");

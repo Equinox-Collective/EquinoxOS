@@ -230,8 +230,33 @@ int qjs_page_dispatch_event(qjs_page_t *p, dom_node_t *target,
   return n;
 }
 
-int qjs_page_pending_nav(qjs_page_t *p, char *out, size_t out_len) {
+int qjs_page_take_nav(qjs_page_t *p, int *kind_out,
+                      char *url_out, size_t url_len, int *delta_out) {
   if (!p || !p->ctx) return 0;
+
+  /* 1. Explicit verbs (location.assign/replace/reload, history.*). */
+  int    kind  = 0;
+  int    delta = 0;
+  char   url[512] = {0};
+  if (qjs_window_take_nav(&kind, url, sizeof(url), &delta)) {
+    if (kind_out)  *kind_out  = kind;
+    if (delta_out) *delta_out = delta;
+    if (url_out && url_len > 0) {
+      strncpy(url_out, url, url_len - 1);
+      url_out[url_len - 1] = 0;
+    }
+    /* Keep p->url in sync for the href-polling fallback so the next
+     * call doesn't re-fire on the same change. We update it
+     * optimistically for ASSIGN/REPLACE; RELOAD/HISTORY leave it
+     * alone (the host resolves the target URL itself). */
+    if ((kind == 1 || kind == 2) && url[0]) {
+      strncpy(p->url, url, sizeof(p->url) - 1);
+      p->url[sizeof(p->url) - 1] = 0;
+    }
+    return 1;
+  }
+
+  /* 2. Fallback: did anyone overwrite `location.href` directly? */
   JSValue global = JS_GetGlobalObject(p->ctx);
   JSValue loc    = JS_GetPropertyStr(p->ctx, global, "location");
   int navigated = 0;
@@ -239,12 +264,14 @@ int qjs_page_pending_nav(qjs_page_t *p, char *out, size_t out_len) {
     JSValue href = JS_GetPropertyStr(p->ctx, loc, "href");
     const char *s = JS_ToCString(p->ctx, href);
     if (s && strcmp(s, p->url) != 0) {
-      if (out && out_len > 0) {
-        strncpy(out, s, out_len - 1);
-        out[out_len - 1] = 0;
+      if (url_out && url_len > 0) {
+        strncpy(url_out, s, url_len - 1);
+        url_out[url_len - 1] = 0;
       }
       strncpy(p->url, s, sizeof(p->url) - 1);
       p->url[sizeof(p->url) - 1] = 0;
+      if (kind_out)  *kind_out  = 1; /* ASSIGN */
+      if (delta_out) *delta_out = 0;
       navigated = 1;
     }
     if (s) JS_FreeCString(p->ctx, s);
@@ -253,6 +280,15 @@ int qjs_page_pending_nav(qjs_page_t *p, char *out, size_t out_len) {
   JS_FreeValue(p->ctx, loc);
   JS_FreeValue(p->ctx, global);
   return navigated;
+}
+
+/* Back-compat wrapper around qjs_page_take_nav for callers that only
+ * care about ASSIGN-style navigations. RELOAD and HISTORY are
+ * collapsed to a no-op (caller will see them on the next take_nav). */
+int qjs_page_pending_nav(qjs_page_t *p, char *out, size_t out_len) {
+  int kind = 0, delta = 0;
+  if (!qjs_page_take_nav(p, &kind, out, out_len, &delta)) return 0;
+  return (kind == 1 || kind == 2) ? 1 : 0;
 }
 
 int qjs_page_consume_dirty(qjs_page_t *p) {

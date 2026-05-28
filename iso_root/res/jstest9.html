@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+<head><title>N1 location + history</title></head>
+<body>
+<h2>R5/N1: location.assign / replace / reload + history.back</h2>
+
+<p>history.length: <span id="hl">?</span></p>
+
+<button id="assign">assign(jstest6_ok.html)</button>
+<button id="replace">replace(jstest7.html)</button>
+<button id="reload">reload()</button>
+<button id="back">history.back()</button>
+<button id="setref">href = jstest8.html</button>
+
+<p>Status: <span id="status">(idle)</span></p>
+
+<script>
+  var s  = document.getElementById('status');
+  var hl = document.getElementById('hl');
+  hl.textContent = String(history.length);
+
+  document.getElementById('assign').addEventListener('click', function(){
+    s.textContent = 'location.assign';
+    location.assign('jstest6_ok.html?via=assign');
+  });
+  document.getElementById('replace').addEventListener('click', function(){
+    s.textContent = 'location.replace';
+    location.replace('jstest7.html');
+  });
+  document.getElementById('reload').addEventListener('click', function(){
+    s.textContent = 'location.reload';
+    location.reload();
+  });
+  document.getElementById('back').addEventListener('click', function(){
+    s.textContent = 'history.back';
+    history.back();
+  });
+  document.getElementById('setref').addEventListener('click', function(){
+    s.textContent = 'href = ...';
+    location.href = 'jstest8.html';
+  });
+</script>
+</body>
+</html>

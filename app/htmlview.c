@@ -5,6 +5,9 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#ifdef BROWSER_BUILD
+#include "qjs_window.h"   /* qjs_window_set_history_length proto */
+#endif
 
 /* Defined in sdk/lib/string.c but not declared in sdk/include/string.h yet.
  * Pulled forward here to silence -Wimplicit-function-declaration in the
@@ -133,7 +136,12 @@ static void push_history(const char *url) {
     history_ptr++;
     strcpy(history[history_ptr], url);
   }
+#ifdef BROWSER_BUILD
+  qjs_window_set_history_length(history_ptr + 1);
+#endif
 }
+
+
 
 /* ── Style Stack ────────────────────────────────────────────────── */
 
@@ -1099,6 +1107,7 @@ static void copy_title_from_html(const char *html, uint32_t size) {
  * The original includes lower in the file (inside the load_page
  * branch) are kept for clarity. */
 #include "qjs_page.h"
+#include "qjs_window.h"
 #include "../third_party/ca_bundle/ca_bundle.h"
 #endif
 
@@ -1437,6 +1446,65 @@ static bool g_use_legacy_parser = false;
 static dom_node_t *g_doc;
 #ifdef BROWSER_BUILD
 static qjs_page_t *g_page;
+
+/* R5/N1: act on a navigation request the page's JS produced via
+ * location.assign/replace/reload or history.back/forward/go.
+ *   kind 1 ASSIGN   relative url → resolve, load, push.
+ *   kind 2 REPLACE  resolve, load, *do not* push.
+ *   kind 3 RELOAD   reload current url without pushing.
+ *   kind 4 HISTORY  jump history_ptr by delta (clamped to populated
+ *                   slots), reload that url without pushing. */
+static void apply_nav_request(int kind, const char *url, int delta) {
+  switch (kind) {
+    case 1:
+    case 2: {
+      if (!url || !*url) return;
+      char resolved[512];
+      resolve_url(current_url, url, resolved);
+      strncpy(current_url, resolved, sizeof(current_url) - 1);
+      current_url[sizeof(current_url) - 1] = 0;
+      if (kind == 2) is_navigating_history = true; /* suppress push */
+      load_page(current_url);
+      is_navigating_history = false;
+      return;
+    }
+    case 3:
+      is_navigating_history = true;
+      load_page(current_url);
+      is_navigating_history = false;
+      return;
+    case 4: {
+      int target = history_ptr + delta;
+      if (target < 0) target = 0;
+      if (target > 15) target = 15;
+      if (target == history_ptr) return;
+      /* Forward (target > current) is only valid if the slot was
+       * filled by an earlier push that we haven't overwritten. */
+      if (target > history_ptr && history[target][0] == 0) return;
+      history_ptr = target;
+      strcpy(current_url, history[history_ptr]);
+      is_navigating_history = true;
+      load_page(current_url);
+      is_navigating_history = false;
+      qjs_window_set_history_length(history_ptr + 1);
+      return;
+    }
+    default:
+      return;
+  }
+}
+
+/* Drain one nav request from the JS side (if any) and act on it.
+ * Returns 1 if a navigation was triggered (caller should bail out of
+ * its current paint/event loop), 0 if there was nothing to do. */
+static int drain_pending_nav(void) {
+  if (!g_page) return 0;
+  int kind = 0, delta = 0;
+  char url[512] = {0};
+  if (!qjs_page_take_nav(g_page, &kind, url, sizeof url, &delta)) return 0;
+  apply_nav_request(kind, url, delta);
+  return 1;
+}
 #endif
 
 static void rebuild_lines_from_dom(void) {
@@ -1488,20 +1556,10 @@ static void parse_html(const char *html, uint32_t size) {
    * registered there survive until the next navigation, so widget
    * events (post-paint) can dispatch into them. */
   g_page = qjs_page_create(g_doc, current_url, TAs_MOZ, TAs_MOZ_NUM);
-  /* R5/N0: an inline <script> can do `location.href = "..."` during
-   * page_create; if so, redirect immediately instead of rendering
-   * the now-stale tree. */
-  {
-    char nav[512];
-    if (g_page && qjs_page_pending_nav(g_page, nav, sizeof nav)) {
-      char resolved[512];
-      resolve_url(current_url, nav, resolved);
-      strncpy(current_url, resolved, sizeof(current_url) - 1);
-      current_url[sizeof(current_url) - 1] = 0;
-      load_page(current_url);
-      return;
-    }
-  }
+  /* R5/N0+N1: an inline <script> can navigate via
+   * location.href / assign / replace / reload / history.*; if so,
+   * redirect immediately instead of rendering the now-stale tree. */
+  if (drain_pending_nav()) return;
 #endif
 
   rebuild_lines_from_dom();
@@ -2062,6 +2120,9 @@ static void render(const char *filename) {
     strcpy(current_url, history[history_ptr]);
     load_page(current_url);
     is_navigating_history = false;
+#ifdef BROWSER_BUILD
+    qjs_window_set_history_length(history_ptr + 1);
+#endif
   }
 
   /* Refresh Button */
@@ -2123,17 +2184,9 @@ static void render(const char *filename) {
         int click_prevented = 0;
         if (g_page) {
           click_prevented = qjs_page_dispatch_event(g_page, wn, "click");
-          /* R5/N0: handler may have done `location.href = "..."`. If
-           * so, navigate now instead of repainting the dead page. */
-          char nav[512];
-          if (qjs_page_pending_nav(g_page, nav, sizeof nav)) {
-            char resolved[512];
-            resolve_url(current_url, nav, resolved);
-            strncpy(current_url, resolved, sizeof(current_url) - 1);
-            current_url[sizeof(current_url) - 1] = 0;
-            load_page(current_url);
-            return;
-          }
+          /* R5/N0+N1: handler may have navigated via location.* or
+           * history.*; if so, act on it and bail this frame. */
+          if (drain_pending_nav()) return;
           if (qjs_page_consume_dirty(g_page)) {
             rebuild_lines_from_dom();
             /* Don't continue painting against the now-stale loop —
@@ -2195,15 +2248,7 @@ static void render(const char *filename) {
         dom_set_attr(n, "value", buf);
         if (g_page) {
           qjs_page_dispatch_event(g_page, n, "input");
-          char nav[512];
-          if (qjs_page_pending_nav(g_page, nav, sizeof nav)) {
-            char resolved[512];
-            resolve_url(current_url, nav, resolved);
-            strncpy(current_url, resolved, sizeof(current_url) - 1);
-            current_url[sizeof(current_url) - 1] = 0;
-            load_page(current_url);
-            return;
-          }
+          if (drain_pending_nav()) return;
           if (qjs_page_consume_dirty(g_page)) {
             rebuild_lines_from_dom();
             return;
