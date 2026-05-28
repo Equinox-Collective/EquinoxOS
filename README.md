@@ -400,7 +400,7 @@ PCI initialized  |  GUI initialized  |  Shell initialized
 
 <div align="center">
 
-[![License: GPL-2.0](https://img.shields.io/github/license/Equinox-Collective7/EquinoxOS?style=flat-square&color=ff6b35)](LICENSE)
+[![License: GPL-2.0](https://img.shields.io/github/license/Equinox-Collective/EquinoxOS?style=flat-square&color=ff6b35)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/Equinox-Collective/EquinoxOS?style=flat-square&color=f9a825)](https://github.com/Equinox-Collective/EquinoxOS/stargazers)
 [![Forks](https://img.shields.io/github/forks/Equinox-Collective/EquinoxOS?style=flat-square&color=5c6bc0)](https://github.com/Equinox-Collective/EquinoxOS/network/members)
 [![Last Commit](https://img.shields.io/github/last-commit/Equinox-Collective/EquinoxOS?style=flat-square)](https://github.com/Equinox-Collective/EquinoxOS/commits)
