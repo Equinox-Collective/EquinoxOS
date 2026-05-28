@@ -1571,7 +1571,13 @@ static void submit_form_for(dom_node_t *trigger) {
   dom_node_t *form = find_form_ancestor(trigger);
   if (!form) return;
 
-  if (g_page) qjs_page_dispatch_event(g_page, form, "submit");
+  /* R4/F3: honour event.preventDefault() inside submit listeners.
+   * If anyone called it, suppress the navigation but still let
+   * subsequent paints reflect any DOM mutations the handler did. */
+  if (g_page) {
+    int prevented = qjs_page_dispatch_event(g_page, form, "submit");
+    if (prevented) return;
+  }
 
   const char *action_raw = dom_get_attr(form, "action");
   const char *action = (action_raw && action_raw[0]) ? action_raw : current_url;
@@ -2100,8 +2106,9 @@ static void render(const char *filename) {
                                   cur_x, cur_y - 2, btn_w, btn_h);
       if (state & EID_STATE_CLICKED) {
         dom_node_t *wn = (dom_node_t *)lines[idx].widget_node;
+        int click_prevented = 0;
         if (g_page) {
-          qjs_page_dispatch_event(g_page, wn, "click");
+          click_prevented = qjs_page_dispatch_event(g_page, wn, "click");
           if (qjs_page_consume_dirty(g_page)) {
             rebuild_lines_from_dom();
             /* Don't continue painting against the now-stale loop —
@@ -2110,8 +2117,10 @@ static void render(const char *filename) {
           }
         }
         /* R4/F2: after the script handlers (if any) had their say,
-         * a submit-type widget navigates the enclosing form. */
-        if (is_submit_widget(wn)) {
+         * a submit-type widget navigates the enclosing form. R4/F3:
+         * unless the click was preventDefault'd, in which case neither
+         * the click default nor the implicit submit fires. */
+        if (!click_prevented && is_submit_widget(wn)) {
           submit_form_for(wn);
           return;
         }

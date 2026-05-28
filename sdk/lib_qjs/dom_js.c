@@ -417,7 +417,7 @@ static JSValue dom_el_removeEventListener(JSContext *ctx, JSValueConst this_val,
 int qjs_dom_dispatch_event(JSContext *ctx, dom_node_t *target,
                            const char *name) {
   if (!ctx || !target || !name) return 0;
-  int called = 0;
+  int prevented = 0;
   for (el_listener_t *l = g_el_listeners; l; l = l->next) {
     if (l->target == target && strcmp(l->event, name) == 0) {
       JSValue ev = JS_NewObject(ctx);
@@ -442,11 +442,19 @@ int qjs_dom_dispatch_event(JSContext *ctx, dom_node_t *target,
       JSValue ret = JS_Call(ctx, l->fn, JS_UNDEFINED, 1, args);
       if (JS_IsException(ret)) qjs_dump_exception(ctx);
       JS_FreeValue(ctx, ret);
+
+      /* Read defaultPrevented back after the handler ran so the
+       * caller can suppress the default action (form navigation,
+       * link follow, …). One sticky prevent across multiple
+       * listeners — DOM-compatible. */
+      JSValue pf = JS_GetPropertyStr(ctx, ev, "defaultPrevented");
+      if (JS_ToBool(ctx, pf) > 0) prevented = 1;
+      JS_FreeValue(ctx, pf);
+
       JS_FreeValue(ctx, ev);
-      called++;
     }
   }
-  return called;
+  return prevented;
 }
 
 void qjs_dom_teardown(JSContext *ctx) {
