@@ -411,11 +411,14 @@ static JSValue dom_el_removeEventListener(JSContext *ctx, JSValueConst this_val,
   return JS_UNDEFINED;
 }
 
-/* Public dispatcher. Builds a tiny synthetic Event object and passes
- * it as the single argument; supports type/target/preventDefault/
- * defaultPrevented. Bubbling and capture phases are not modelled. */
-int qjs_dom_dispatch_event(JSContext *ctx, dom_node_t *target,
-                           const char *name) {
+/* Internal dispatcher with an optional "decorate this event before
+ * dispatch" callback for event-type-specific extras (KeyboardEvent
+ * .key/.keyCode, MouseEvent .clientX/Y, …). `decorate` may be NULL. */
+typedef void (*event_decorator_t)(JSContext *ctx, JSValue ev, void *ud);
+
+static int dispatch_event_decorated(JSContext *ctx, dom_node_t *target,
+                                    const char *name,
+                                    event_decorator_t decorate, void *ud) {
   if (!ctx || !target || !name) return 0;
   int prevented = 0;
   for (el_listener_t *l = g_el_listeners; l; l = l->next) {
@@ -424,6 +427,7 @@ int qjs_dom_dispatch_event(JSContext *ctx, dom_node_t *target,
       JS_SetPropertyStr(ctx, ev, "type",   JS_NewString(ctx, name));
       JS_SetPropertyStr(ctx, ev, "target", wrap_element(ctx, target));
       JS_SetPropertyStr(ctx, ev, "defaultPrevented", JS_FALSE);
+      if (decorate) decorate(ctx, ev, ud);
       /* preventDefault flips defaultPrevented. */
       const char *pd_src =
         "(function(e){e.preventDefault = function(){"
@@ -455,6 +459,32 @@ int qjs_dom_dispatch_event(JSContext *ctx, dom_node_t *target,
     }
   }
   return prevented;
+}
+
+int qjs_dom_dispatch_event(JSContext *ctx, dom_node_t *target,
+                           const char *name) {
+  return dispatch_event_decorated(ctx, target, name, NULL, NULL);
+}
+
+typedef struct {
+  const char *keystr;
+  int         keycode;
+} key_decorate_t;
+
+static void key_decorate(JSContext *ctx, JSValue ev, void *ud) {
+  key_decorate_t *kd = (key_decorate_t *)ud;
+  JS_SetPropertyStr(ctx, ev, "key",
+      JS_NewString(ctx, kd->keystr ? kd->keystr : ""));
+  JS_SetPropertyStr(ctx, ev, "keyCode", JS_NewInt32(ctx, kd->keycode));
+  /* `which` is a deprecated alias still used by some libs. */
+  JS_SetPropertyStr(ctx, ev, "which",   JS_NewInt32(ctx, kd->keycode));
+}
+
+int qjs_dom_dispatch_key_event(JSContext *ctx, dom_node_t *target,
+                               const char *name,
+                               const char *keystr, int keycode) {
+  key_decorate_t kd = { keystr, keycode };
+  return dispatch_event_decorated(ctx, target, name, key_decorate, &kd);
 }
 
 void qjs_dom_teardown(JSContext *ctx) {

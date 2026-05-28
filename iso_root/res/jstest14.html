@@ -1,0 +1,57 @@
+<html>
+<head><title>N5 timers + keydown</title></head>
+<body>
+<h1>N5: live timers + keydown</h1>
+
+<p>1. setInterval — bumps every 500 ms</p>
+<p>tick: <span id="t">0</span></p>
+
+<p>2. setTimeout — fires once at 2000 ms</p>
+<p>once: <span id="o">(waiting)</span></p>
+
+<p>3. clock since load (ms)</p>
+<p>clock: <span id="c">0</span></p>
+
+<p>4. keydown on input (preventDefault on Esc)</p>
+<input id="i" type="text"/>
+<p>last: <span id="k">-</span> code=<span id="kc">-</span></p>
+<p>swallowed-esc count: <span id="esc">0</span></p>
+
+<script>
+var t = document.getElementById('t');
+var o = document.getElementById('o');
+var c = document.getElementById('c');
+var k = document.getElementById('k');
+var kc= document.getElementById('kc');
+var esc=document.getElementById('esc');
+var i = document.getElementById('i');
+
+var n = 0;
+setInterval(function(){
+  n++;
+  t.textContent = '' + n;
+}, 500);
+
+setTimeout(function(){
+  o.textContent = 'fired';
+}, 2000);
+
+var start = Date.now();
+setInterval(function(){
+  c.textContent = '' + (Date.now() - start);
+}, 100);
+
+var escCount = 0;
+i.addEventListener('keydown', function(e){
+  k.textContent  = e.key;
+  kc.textContent = '' + e.keyCode;
+  /* PS/2 scancode 0x01 = Esc — swallow it as a demo of preventDefault */
+  if(e.keyCode === 1){
+    escCount++;
+    esc.textContent = '' + escCount;
+    e.preventDefault();
+  }
+});
+</script>
+</body>
+</html>

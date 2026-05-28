@@ -211,7 +211,9 @@ qjs_page_t *qjs_page_create(dom_node_t *doc,
   exec_scripts(p->ctx, doc);
   qjs_run_microtasks(p->ctx);
   qjs_fire_DOMContentLoaded(p->ctx);
-  qjs_drain_timers(p->ctx);
+  /* At t=0 only zero-delay setTimeouts fire; setIntervals stay
+   * scheduled for the host's per-frame qjs_page_tick to drive. */
+  qjs_window_tick_timers(p->ctx, 0);
   qjs_fire_load(p->ctx);
 
   /* Initial scripts may have set the dirty flag; clear so the very
@@ -294,6 +296,22 @@ int qjs_page_pending_nav(qjs_page_t *p, char *out, size_t out_len) {
 int qjs_page_consume_dirty(qjs_page_t *p) {
   (void)p;
   return qjs_dom_consume_dirty();
+}
+
+void qjs_page_tick(qjs_page_t *p, uint64_t now_ms) {
+  if (!p || !p->ctx) return;
+  qjs_window_tick_timers(p->ctx, now_ms);
+  /* Timer callbacks commonly schedule Promise.then chains. */
+  qjs_run_microtasks(p->ctx);
+}
+
+int qjs_page_dispatch_key(qjs_page_t *p, dom_node_t *target,
+                          const char *name, const char *keystr,
+                          int keycode) {
+  if (!p || !p->ctx) return 0;
+  int n = qjs_dom_dispatch_key_event(p->ctx, target, name, keystr, keycode);
+  qjs_run_microtasks(p->ctx);
+  return n;
 }
 
 void qjs_page_free(qjs_page_t *p) {

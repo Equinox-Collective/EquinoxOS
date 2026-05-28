@@ -39,6 +39,7 @@
 #ifndef _EQ_QJS_WINDOW_H
 #define _EQ_QJS_WINDOW_H
 
+#include <stdint.h>
 #include "quickjs.h"
 
 void qjs_install_window(JSContext *ctx, const char *url);
@@ -47,6 +48,13 @@ void qjs_install_timers(JSContext *ctx);
 void qjs_install_events(JSContext *ctx);
 
 void qjs_drain_timers(JSContext *ctx);
+
+/* R5/N5: per-frame timer tick. Advances the virtual clock to
+ * `now_ms` (ms since boot from the host) and fires every timer with
+ * due <= now_ms. Intervals are rescheduled; one-shots are unlinked.
+ * Unlike qjs_drain_timers this does NOT free the remaining timer
+ * list — long-running setIntervals survive across frames. */
+void qjs_window_tick_timers(JSContext *ctx, uint64_t now_ms);
 void qjs_fire_DOMContentLoaded(JSContext *ctx);
 void qjs_fire_load(JSContext *ctx);
 void qjs_fire_loaded_events(JSContext *ctx);  /* DOMContentLoaded then load, no timers in between */

@@ -96,4 +96,20 @@ int qjs_page_take_nav(qjs_page_t *p, int *kind_out,
 
 void qjs_page_free(qjs_page_t *p);
 
+/* R5/N5: per-frame tick. Host calls this once per render iteration
+ * with `now_ms` from SYS_GET_TIME so setInterval / setTimeout
+ * callbacks fire in pseudo-real time. Drains microtasks afterwards
+ * so .then() chains land before the renderer reads the DOM. */
+void qjs_page_tick(qjs_page_t *p, uint64_t now_ms);
+
+/* R5/N5: dispatch a keyboard event ('keydown' or 'keyup') with
+ * `key` and `keyCode` fields populated. Returns 1 if any handler
+ * called preventDefault() so the host can swallow the keystroke
+ * before the default widget consumes it. */
+int qjs_page_dispatch_key(qjs_page_t *p,
+                          dom_node_t *target,
+                          const char *name,
+                          const char *keystr,
+                          int keycode);
+
 #endif
