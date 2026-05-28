@@ -11,6 +11,7 @@
 #include "qjs_helpers.h"
 #include "qjs_fetch.h"
 #include "dom_js.h"
+#include "qjs_window.h"
 #include "qjs_page.h"
 
 /* Concatenate every TEXT-node child of `n` into a freshly-malloc'd
@@ -119,6 +120,7 @@ static void exec_scripts(JSContext *ctx, dom_node_t *n) {
 }
 
 void qjs_run_page_scripts(dom_node_t *doc,
+                          const char *page_url,
                           const struct br_x509_trust_anchor *tas,
                           size_t tas_num) {
   if (!doc) return;
@@ -129,12 +131,26 @@ void qjs_run_page_scripts(dom_node_t *doc,
   JSContext *ctx = JS_NewContext(rt);
   if (!ctx) { JS_FreeRuntime(rt); return; }
 
+  /* Order matters: console first (so install logs work); document
+   * before window so the window pass can attach `document.location`;
+   * fetch before scripts so they can call it; storage/timers/events
+   * before scripts so listeners and setTimeout calls land in our
+   * pools. */
   qjs_install_console(ctx);
   qjs_install_dom(ctx, doc);
+  qjs_install_window(ctx, page_url);
   qjs_install_fetch(ctx, tas, tas_num);
+  qjs_install_storage(ctx);
+  qjs_install_timers(ctx);
+  qjs_install_events(ctx);
 
   exec_scripts(ctx, doc);
   qjs_run_microtasks(ctx);
+
+  /* Spec-ish load order: DOMContentLoaded → drain → timers → load.
+   * Real browsers interleave; the difference doesn't matter here. */
+  qjs_fire_loaded_events(ctx);
+  qjs_drain_timers(ctx);
 
   JS_FreeContext(ctx);
   JS_FreeRuntime(rt);

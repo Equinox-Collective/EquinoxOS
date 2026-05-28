@@ -30,7 +30,10 @@
 
 struct br_x509_trust_anchor;
 
+/* `page_url` is plumbed through to window.location; pass NULL for
+ * about:blank. */
 void qjs_run_page_scripts(dom_node_t *doc,
+                          const char *page_url,
                           const struct br_x509_trust_anchor *tas,
                           size_t tas_num);
 
