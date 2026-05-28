@@ -1977,6 +1977,33 @@ static void render(const char *filename) {
   eid_draw_line(fb, WIN_W, WIN_H, 0, WIN_H - 18, WIN_W, WIN_H - 18, CLR_BORDER);
   eid_draw_text(fb, WIN_W, WIN_H, CONTENT_X, WIN_H - 14,
                 "L: Edit URL  Up/Down: Scroll  Esc: Exit", CLR_MUTED);
+
+  /* Software cursor.
+   *
+   * When the app calls SYS_DRAW_BUFFER it becomes the foreground app
+   * (see src/kernel.c sys_draw_app_buffer), and the kernel routes
+   * SYS_GET_MOUSE_FULL exclusively to it — sysgui's compositor stops
+   * receiving mouse coords, so its hardware-emulated cursor sprite
+   * goes stale / invisible inside our window. Draw our own arrow at
+   * the local mouse position so the user can aim at widgets. The
+   * coords in ui.mx/ui.my are already in window-local space (the
+   * main loop subtracts the window offset above). Clip to the
+   * window rect — eid_draw_rect/line already do bounds checks. */
+  {
+    int cx = ui.mx;
+    int cy = ui.my;
+    if (cx >= 0 && cx < WIN_W && cy >= 0 && cy < WIN_H) {
+      /* 12 px L-shaped arrow, white fill + 1 px black outline. */
+      for (int i = 0; i < 12; i++) {
+        int w = 12 - i;            /* triangle row width */
+        eid_draw_rect(fb, WIN_W, WIN_H, cx,         cy + i, 1, 1, 0x000000);
+        eid_draw_rect(fb, WIN_W, WIN_H, cx + 1,     cy + i, w - 2 > 0 ? w - 2 : 0, 1, 0xFFFFFF);
+        eid_draw_rect(fb, WIN_W, WIN_H, cx + w - 1, cy + i, 1, 1, 0x000000);
+      }
+      /* bottom edge */
+      eid_draw_line(fb, WIN_W, WIN_H, cx, cy + 12, cx + 6, cy + 12, 0x000000);
+    }
+  }
 }
 
 #ifdef BROWSER_BUILD
