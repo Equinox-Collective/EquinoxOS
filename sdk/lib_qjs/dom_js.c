@@ -569,9 +569,16 @@ static JSValue doc_querySelector(JSContext *ctx, JSValueConst this_val,
 void qjs_install_dom(JSContext *ctx, dom_node_t *doc) {
   JSRuntime *rt = JS_GetRuntime(ctx);
 
-  /* Register the Element class once per runtime. */
+  /* JS_NewClassID hands out a globally-unique id (process-wide) and
+   * caches into the static. JS_NewClass installs the class def in the
+   * given runtime's class table — and class tables don't survive
+   * JS_FreeRuntime, so we must reinstall it on every fresh runtime
+   * (i.e. every navigation), otherwise the next JS_NewObjectClass on
+   * this id trips `class_id < class_count` in quickjs.c:2581. */
   if (dom_element_class_id == 0) {
     JS_NewClassID(rt, &dom_element_class_id);
+  }
+  if (!JS_IsRegisteredClass(rt, dom_element_class_id)) {
     JS_NewClass(rt, dom_element_class_id, &dom_element_class);
   }
 
