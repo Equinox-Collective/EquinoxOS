@@ -322,8 +322,18 @@ app/htmlview_browser.o: app/htmlview.c sdk/include/http_client.h sdk/include/url
 
 # browser.elf links the full QuickJS + DOM-bindings + fetch stack so
 # inline <script> on a loaded page runs through phase J6a / J7.
-QJS_PAGE_OBJ   := sdk/lib_qjs/qjs_page.o
-QJS_WINDOW_OBJ := sdk/lib_qjs/qjs_window.o
+#
+# NOTE: prerequisites use immediate variable expansion, so every
+# variable referenced in the browser.elf rule's deps list must be
+# defined ABOVE this point. QJS_HELPERS_OBJ / DOM_JS_OBJ / QJS_FETCH_OBJ
+# (further down) are forward-declared here so the rule below sees them;
+# their recipes still live next to the matching test-app rules to keep
+# the per-phase grouping readable.
+QJS_PAGE_OBJ    := sdk/lib_qjs/qjs_page.o
+QJS_WINDOW_OBJ  := sdk/lib_qjs/qjs_window.o
+QJS_HELPERS_OBJ := sdk/lib_qjs/qjs_helpers.o
+DOM_JS_OBJ      := sdk/lib_qjs/dom_js.o
+QJS_FETCH_OBJ   := sdk/lib_qjs/qjs_fetch.o
 
 sdk/lib_qjs/qjs_page.o: sdk/lib_qjs/qjs_page.c sdk/include/qjs_page.h sdk/include/qjs_fetch.h sdk/include/qjs_helpers.h sdk/include/dom_js.h sdk/include/qjs_window.h sdk/include/dom.h
 	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -I./third_party/bearssl/inc -c $< -o $@
@@ -348,8 +358,7 @@ $(ISO_ROOT)/bin/htmlview.elf: app/htmlview.o $(DOM_OBJ) $(SDK_OBJS)
 # sdk/lib_qjs/qjs_helpers.c lives in its own directory so it isn't
 # auto-folded into $(SDK_OBJS) — apps that don't embed QuickJS shouldn't
 # pay for these helpers. Same pattern as sdk/lib_http/http_client.o.
-QJS_HELPERS_OBJ := sdk/lib_qjs/qjs_helpers.o
-
+# QJS_HELPERS_OBJ is forward-declared near the browser.elf rule above.
 sdk/lib_qjs/qjs_helpers.o: sdk/lib_qjs/qjs_helpers.c sdk/include/qjs_helpers.h
 	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
 
@@ -361,9 +370,7 @@ $(ISO_ROOT)/bin/jstest.elf: app/jstest.o $(QJS_HELPERS_OBJ) $(SDK_OBJS) $(QUICKJ
 
 # jsdomtest — phase J4: DOM bindings over QuickJS. Pulls together the
 # DOM library, the QuickJS helpers, the DOM<->JS bridge, and QuickJS
-# itself.
-DOM_JS_OBJ := sdk/lib_qjs/dom_js.o
-
+# itself. DOM_JS_OBJ is forward-declared near the browser.elf rule above.
 sdk/lib_qjs/dom_js.o: sdk/lib_qjs/dom_js.c sdk/include/dom_js.h sdk/include/dom.h sdk/include/qjs_helpers.h
 	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
 
@@ -375,9 +382,8 @@ $(ISO_ROOT)/bin/jsdomtest.elf: app/jsdomtest.o $(QJS_HELPERS_OBJ) $(DOM_JS_OBJ) 
 
 # jsfetchtest — phase J5: fetch + Promise + microtask pump. Links
 # the http_client + BearSSL chain so the same `fetch` binding can be
-# reused later for real http(s).
-QJS_FETCH_OBJ := sdk/lib_qjs/qjs_fetch.o
-
+# reused later for real http(s). QJS_FETCH_OBJ is forward-declared near
+# the browser.elf rule above.
 sdk/lib_qjs/qjs_fetch.o: sdk/lib_qjs/qjs_fetch.c sdk/include/qjs_fetch.h sdk/include/http_client.h
 	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -I./third_party/bearssl/inc -c $< -o $@
 
