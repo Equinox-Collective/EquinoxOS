@@ -1039,8 +1039,13 @@ static void parse_css_block(const char *css, int css_len) {
       p++;
     }
     sel[si] = '\0';
-    if (p >= end || *p != '{')
+    if (p >= end || *p != '{') {
+      char dbgsel[96];
+      sprintf(dbgsel, "[CSS] parse stop: sel='%.60s' p_at='%c' rules=%d\n",
+              sel, (p < end ? *p : '?'), css_rule_count);
+      print(dbgsel);
       break;
+    }
     p++; /* skip { */
 
     /* Find closing } (handle nested braces) */
@@ -2992,12 +2997,18 @@ static void parse_html(const char *html, uint32_t size) {
   copy_title_from_html(html, size);
   extract_css(html, size);
 
-  /* DEBUG: dump CSS rule count after extraction so we can see whether
-   * MAX_CSS_RULES is overflowing on this page. */
+  /* DEBUG: dump CSS rule count + all selectors so we can see exactly
+   * where parse_css_block gives up. */
   {
-    char dbg[64];
+    char dbg[128];
     sprintf(dbg, "[CSS] BROWSER_BUILD: %d rules\n", css_rule_count);
     print(dbg);
+    for (int d = 0; d < css_rule_count; d++) {
+      sprintf(dbg, "  [%03d] '%s' disp=%d gc='%.32s'\n", d,
+              css_rules[d].selector, css_rules[d].display,
+              css_rules[d].grid_cols);
+      print(dbg);
+    }
   }
 
   g_doc = dom_parse(html, size);
