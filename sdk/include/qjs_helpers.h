@@ -28,4 +28,14 @@
 void qjs_install_console(JSContext *ctx);
 void qjs_dump_exception(JSContext *ctx);
 
+/* Drains the runtime's pending job queue (microtasks: Promise then
+ * callbacks, queued thenables, etc.) until either there is no more
+ * work or a job throws. Returns 0 on clean drain or -1 if a job left
+ * an exception pending; in the -1 case the exception is dumped via
+ * qjs_dump_exception.
+ *
+ * Call after every top-level JS_Eval so chained .then() handlers
+ * actually run. */
+int qjs_run_microtasks(JSContext *ctx);
+
 #endif

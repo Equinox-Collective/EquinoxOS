@@ -91,3 +91,26 @@ void qjs_dump_exception(JSContext *ctx) {
 
   JS_FreeValue(ctx, exc);
 }
+
+/* ---------------------------------------------------------------------------
+ * Microtask pump
+ *
+ * Promise then-chains run as queued jobs in QuickJS. After a top-level
+ * eval that involves promises, jobs sit on the runtime's queue until
+ * something drains them. We loop calling JS_ExecutePendingJob until
+ * the queue is empty (return value 0) or a job throws (<0).
+ * ------------------------------------------------------------------------ */
+
+int qjs_run_microtasks(JSContext *ctx) {
+  JSRuntime *rt = JS_GetRuntime(ctx);
+  for (;;) {
+    JSContext *job_ctx = NULL;
+    int r = JS_ExecutePendingJob(rt, &job_ctx);
+    if (r == 0) return 0;        /* idle: no jobs left */
+    if (r < 0) {                 /* a job threw — dump + bail */
+      if (job_ctx) qjs_dump_exception(job_ctx);
+      return -1;
+    }
+    /* r > 0: we ran a job, loop and try the next. */
+  }
+}
