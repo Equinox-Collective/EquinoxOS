@@ -246,6 +246,7 @@ APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_RO
 # explicit rules below because they need (a) BearSSL public headers in the
 # include path and (b) libbearssl.a appended at link time.
 APP_ELFS_TLS    = $(ISO_ROOT)/bin/tlsboot.elf $(ISO_ROOT)/bin/tlstest.elf $(ISO_ROOT)/bin/catest.elf $(ISO_ROOT)/bin/httpsget.elf $(ISO_ROOT)/bin/urlget.elf $(ISO_ROOT)/bin/browser.elf
+APP_ELFS_QJS    = $(ISO_ROOT)/bin/jstest.elf
 
 # Phase 5: HTTP/HTTPS client library. Lives in its own directory so it
 # isn't auto-folded into $(SDK_OBJS) — apps that need it append
@@ -257,7 +258,7 @@ HTTP_CLIENT_OBJ := sdk/lib_http/http_client.o
 # this matters when users run `make -j`.
 $(KERNEL_OBJS) $(SDK_OBJS) $(APP_OBJS) $(DOOM_OBJS): | setup
 
-apps: setup $(SDK_OBJS) $(BEARSSL_LIB) $(APP_ELFS_SIMPLE) $(APP_ELFS_TLS) sysgui_app
+apps: setup $(SDK_OBJS) $(BEARSSL_LIB) $(QUICKJS_LIB) $(APP_ELFS_SIMPLE) $(APP_ELFS_TLS) $(APP_ELFS_QJS) sysgui_app
 
 $(ISO_ROOT)/bin/%.elf: app/%.o $(SDK_OBJS)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< -o $@
