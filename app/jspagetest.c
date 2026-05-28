@@ -18,8 +18,18 @@
 #include "qjs_page.h"
 
 int main(int argc, char **argv) {
-  const char *path = (argc >= 2) ? argv[1] : "res/jstest.html";
-  printf("jspagetest: starting on %s\n", path);
+  /* argv handling:
+   *   jspagetest [path] [--print]
+   * --print dumps the post-script DOM via dom_print so you can see
+   * mutations (J6b). path defaults to res/jstest.html. */
+  const char *path = "res/jstest.html";
+  bool print_after = false;
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--print") == 0) print_after = true;
+    else                                  path = argv[i];
+  }
+  printf("jspagetest: starting on %s%s\n", path,
+         print_after ? " (--print)" : "");
 
   uint32_t size = 0;
   char *html = (char *)_syscall(SYS_READ_FILE, (uint64_t)path,
@@ -37,6 +47,12 @@ int main(int argc, char **argv) {
    * will fail with EQ_HTTP_ERR_NO_ANCHORS, which is what we want here
    * to keep the test offline. */
   qjs_run_page_scripts(doc, NULL, 0);
+
+  if (print_after) {
+    printf("--- DOM after scripts ---\n");
+    dom_print(doc, 0);
+    printf("--- end DOM ---\n");
+  }
 
   dom_free(doc);
   printf("jspagetest: done\n");

@@ -217,16 +217,93 @@ static JSValue dom_el_getElementsByTagName(JSContext *ctx,
   return arr;
 }
 
+/* ------------------------------------------------------------------ */
+/* Mutation bindings (phase J6b)                                       */
+/* ------------------------------------------------------------------ */
+
+static JSValue dom_el_setAttribute(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+  if (argc < 2) return JS_UNDEFINED;
+  dom_node_t *n = unwrap_element(this_val);
+  if (!n) return JS_UNDEFINED;
+  const char *name = JS_ToCString(ctx, argv[0]);
+  const char *val  = JS_ToCString(ctx, argv[1]);
+  if (name && val) dom_set_attr(n, name, val);
+  if (name) JS_FreeCString(ctx, name);
+  if (val)  JS_FreeCString(ctx, val);
+  return JS_UNDEFINED;
+}
+
+static JSValue dom_el_removeAttribute(JSContext *ctx, JSValueConst this_val,
+                                      int argc, JSValueConst *argv) {
+  (void)argc;
+  dom_node_t *n = unwrap_element(this_val);
+  if (!n) return JS_UNDEFINED;
+  const char *name = JS_ToCString(ctx, argv[0]);
+  if (name) {
+    dom_remove_attr(n, name);
+    JS_FreeCString(ctx, name);
+  }
+  return JS_UNDEFINED;
+}
+
+static JSValue dom_el_appendChild(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+  (void)argc;
+  dom_node_t *parent = unwrap_element(this_val);
+  dom_node_t *child  = unwrap_element(argv[0]);
+  if (parent && child) dom_append_child(parent, child);
+  /* Return the child per DOM spec — caller pattern `parent.appendChild(c)` */
+  return JS_DupValue(ctx, argv[0]);
+}
+
+static JSValue dom_el_removeChild(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+  (void)argc;
+  dom_node_t *parent = unwrap_element(this_val);
+  dom_node_t *child  = unwrap_element(argv[0]);
+  if (parent && child) dom_remove_child(parent, child);
+  return JS_DupValue(ctx, argv[0]);
+}
+
+static JSValue dom_el_set_textContent(JSContext *ctx, JSValueConst this_val,
+                                      JSValueConst v) {
+  dom_node_t *n = unwrap_element(this_val);
+  if (!n) return JS_UNDEFINED;
+  const char *s = JS_ToCString(ctx, v);
+  if (!s) return JS_EXCEPTION;
+  dom_set_text_content(n, s);
+  JS_FreeCString(ctx, s);
+  return JS_UNDEFINED;
+}
+
+static JSValue dom_el_set_innerHTML(JSContext *ctx, JSValueConst this_val,
+                                    JSValueConst v) {
+  dom_node_t *n = unwrap_element(this_val);
+  if (!n) return JS_UNDEFINED;
+  size_t len = 0;
+  const char *s = JS_ToCStringLen(ctx, &len, v);
+  if (!s) return JS_EXCEPTION;
+  dom_set_inner_html(n, s, (uint32_t)len);
+  JS_FreeCString(ctx, s);
+  return JS_UNDEFINED;
+}
+
 static const JSCFunctionListEntry dom_element_proto[] = {
   JS_CGETSET_DEF("tagName",      dom_el_get_tagName,     NULL),
   JS_CGETSET_DEF("id",           dom_el_get_id,          NULL),
   JS_CGETSET_DEF("className",    dom_el_get_className,   NULL),
-  JS_CGETSET_DEF("textContent",  dom_el_get_textContent, NULL),
+  JS_CGETSET_DEF("textContent",  dom_el_get_textContent, dom_el_set_textContent),
+  JS_CGETSET_DEF("innerHTML",    NULL,                   dom_el_set_innerHTML),
   JS_CGETSET_DEF("children",     dom_el_get_children,    NULL),
   JS_CGETSET_DEF("parentNode",   dom_el_get_parentNode,  NULL),
   JS_CFUNC_DEF("getAttribute",            1, dom_el_getAttribute),
   JS_CFUNC_DEF("hasAttribute",            1, dom_el_hasAttribute),
   JS_CFUNC_DEF("getElementsByTagName",    1, dom_el_getElementsByTagName),
+  JS_CFUNC_DEF("setAttribute",            2, dom_el_setAttribute),
+  JS_CFUNC_DEF("removeAttribute",         1, dom_el_removeAttribute),
+  JS_CFUNC_DEF("appendChild",             1, dom_el_appendChild),
+  JS_CFUNC_DEF("removeChild",             1, dom_el_removeChild),
 };
 
 /* ------------------------------------------------------------------ */
@@ -263,6 +340,35 @@ static JSValue doc_getElementsByTagName(JSContext *ctx, JSValueConst this_val,
   getByTag_collect(ctx, root, tag, arr, &i);
   JS_FreeCString(ctx, tag);
   return arr;
+}
+
+/* document.createElement: returns a free-standing element wrapper.
+ * Caller must appendChild() to attach. If the script drops the
+ * reference without attaching, the C node leaks until page teardown
+ * — acceptable for now (page lifetime is short). */
+static JSValue doc_createElement(JSContext *ctx, JSValueConst this_val,
+                                 int argc, JSValueConst *argv) {
+  (void)this_val; (void)argc;
+  const char *tag = JS_ToCString(ctx, argv[0]);
+  if (!tag) return JS_EXCEPTION;
+  dom_node_t *n = dom_create_element(tag);
+  JS_FreeCString(ctx, tag);
+  if (!n) return JS_ThrowOutOfMemory(ctx);
+  return wrap_element(ctx, n);
+}
+
+/* document.createTextNode mirrors createElement but for TEXT nodes;
+ * less commonly used by scripts than the .textContent setter but
+ * convenient for surgical insertions. */
+static JSValue doc_createTextNode(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv) {
+  (void)this_val; (void)argc;
+  const char *s = JS_ToCString(ctx, argv[0]);
+  if (!s) return JS_EXCEPTION;
+  dom_node_t *n = dom_create_text(s);
+  JS_FreeCString(ctx, s);
+  if (!n) return JS_ThrowOutOfMemory(ctx);
+  return wrap_element(ctx, n);
 }
 
 /* Minimal querySelector: only `#id` and bare `tag` selectors (good
@@ -317,6 +423,10 @@ void qjs_install_dom(JSContext *ctx, dom_node_t *doc) {
                       "getElementsByTagName", 1));
   JS_SetPropertyStr(ctx, document, "querySelector",
       JS_NewCFunction(ctx, doc_querySelector, "querySelector", 1));
+  JS_SetPropertyStr(ctx, document, "createElement",
+      JS_NewCFunction(ctx, doc_createElement, "createElement", 1));
+  JS_SetPropertyStr(ctx, document, "createTextNode",
+      JS_NewCFunction(ctx, doc_createTextNode, "createTextNode", 1));
 
   /* documentElement / body / head — populated from the tree. */
   dom_node_t *html = dom_get_first_element_by_tag(doc, "html");
