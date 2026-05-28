@@ -246,7 +246,7 @@ APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_RO
 # explicit rules below because they need (a) BearSSL public headers in the
 # include path and (b) libbearssl.a appended at link time.
 APP_ELFS_TLS    = $(ISO_ROOT)/bin/tlsboot.elf $(ISO_ROOT)/bin/tlstest.elf $(ISO_ROOT)/bin/catest.elf $(ISO_ROOT)/bin/httpsget.elf $(ISO_ROOT)/bin/urlget.elf $(ISO_ROOT)/bin/browser.elf
-APP_ELFS_QJS    = $(ISO_ROOT)/bin/jstest.elf $(ISO_ROOT)/bin/domtest.elf
+APP_ELFS_QJS    = $(ISO_ROOT)/bin/jstest.elf $(ISO_ROOT)/bin/domtest.elf $(ISO_ROOT)/bin/jsdomtest.elf
 
 # DOM tree library — used by domtest, htmlview, browser, and (later) the
 # JS DOM bindings. Lives in its own directory so it isn't auto-folded
@@ -347,6 +347,20 @@ app/jstest.o: app/jstest.c sdk/include/qjs_helpers.h
 
 $(ISO_ROOT)/bin/jstest.elf: app/jstest.o $(QJS_HELPERS_OBJ) $(SDK_OBJS) $(QUICKJS_LIB)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(QJS_HELPERS_OBJ) $(QUICKJS_LIB) -o $@
+
+# jsdomtest — phase J4: DOM bindings over QuickJS. Pulls together the
+# DOM library, the QuickJS helpers, the DOM<->JS bridge, and QuickJS
+# itself.
+DOM_JS_OBJ := sdk/lib_qjs/dom_js.o
+
+sdk/lib_qjs/dom_js.o: sdk/lib_qjs/dom_js.c sdk/include/dom_js.h sdk/include/dom.h
+	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
+
+app/jsdomtest.o: app/jsdomtest.c sdk/include/qjs_helpers.h sdk/include/dom_js.h sdk/include/dom.h
+	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
+
+$(ISO_ROOT)/bin/jsdomtest.elf: app/jsdomtest.o $(QJS_HELPERS_OBJ) $(DOM_JS_OBJ) $(DOM_OBJ) $(SDK_OBJS) $(QUICKJS_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(QJS_HELPERS_OBJ) $(DOM_JS_OBJ) $(DOM_OBJ) $(QUICKJS_LIB) -o $@
 
 sdk/lib_dom/dom.o: sdk/lib_dom/dom.c sdk/include/dom.h
 	$(CC) $(USER_CFLAGS) -c $< -o $@
