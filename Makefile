@@ -316,14 +316,22 @@ app/htmlview_browser.o: app/htmlview.c sdk/include/http_client.h sdk/include/url
 $(ISO_ROOT)/bin/browser.elf: app/htmlview_browser.o $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(BEARSSL_LIB)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(HTTP_CLIENT_OBJ) $(BEARSSL_LIB) -o $@
 
-# jstest — phase J1 smoke test for the vendored QuickJS engine.
-# Needs the QuickJS headers at compile time and libquickjs.a appended
-# at link, otherwise identical to the simple SDK-linked apps.
-app/jstest.o: app/jstest.c
+# jstest — smoke test for the vendored QuickJS engine. Covers phases
+# J1 (bytecode + string allocator) and J2 (console.log + Math/Date/JSON).
+#
+# sdk/lib_qjs/qjs_helpers.c lives in its own directory so it isn't
+# auto-folded into $(SDK_OBJS) — apps that don't embed QuickJS shouldn't
+# pay for these helpers. Same pattern as sdk/lib_http/http_client.o.
+QJS_HELPERS_OBJ := sdk/lib_qjs/qjs_helpers.o
+
+sdk/lib_qjs/qjs_helpers.o: sdk/lib_qjs/qjs_helpers.c sdk/include/qjs_helpers.h
 	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
 
-$(ISO_ROOT)/bin/jstest.elf: app/jstest.o $(SDK_OBJS) $(QUICKJS_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(QUICKJS_LIB) -o $@
+app/jstest.o: app/jstest.c sdk/include/qjs_helpers.h
+	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
+
+$(ISO_ROOT)/bin/jstest.elf: app/jstest.o $(QJS_HELPERS_OBJ) $(SDK_OBJS) $(QUICKJS_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(QJS_HELPERS_OBJ) $(QUICKJS_LIB) -o $@
 
 # enGUI's app/sysgui/Makefile links sysgui.elf via `$(wildcard ../../sdk/lib/*.o)`,
 # so under parallel make (`make -j` on Linux CI) sysgui_app would race against the
