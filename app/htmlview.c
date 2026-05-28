@@ -2090,6 +2090,87 @@ static int drain_pending_nav(void) {
 }
 #endif
 
+/* ─────────────────────────────────────────────────────────────────
+ * Phase R6/L3: render_subtree — walk a DOM subtree under a private
+ * layout frame and report which lines were produced and how tall
+ * the resulting block is.
+ *
+ * Why this exists: flex / grid containers (L4 + L5) need to lay
+ * out children *side by side* in columns whose widths are smaller
+ * than the parent's full content width. The natural way to do
+ * that with the existing w_emit_node machinery is to:
+ *   1. push a sub-frame at (column_x, parent_y, column_w),
+ *   2. emit the child subtree into lines[] under that frame,
+ *   3. note (first_line, line_count_in_subtree, sub_height),
+ *   4. pop the sub-frame,
+ *   5. either splice the lines as-is (if the column's left edge is
+ *      already correct from the sub-frame) or translate their
+ *      box_x/box_y in place (when reflowing for align/justify).
+ *
+ * This function does steps 1–4. The caller decides what to do with
+ * the captured range in step 5; L3 itself just gives flex/grid the
+ * primitive they'll build on. Not called yet — pure scaffolding,
+ * exercised first by L4.
+ *
+ * Note: walk_ctx_t style/in_pre/in_list are shared with the
+ * caller because they reflect CSS inheritance from the *parent*
+ * (e.g. a flex item inside <body> still inherits body's font).
+ * The caller is responsible for save/restore around render_subtree
+ * if it wants to isolate them; in practice the standard
+ * pop_style_state() flow already handles per-element styles.
+ *
+ * Out-params (may be NULL):
+ *   *out_first — index of the first line emitted (line_count at
+ *                entry), or -1 if no lines were produced.
+ *   *out_count — number of lines emitted by the subtree.
+ *   *out_h     — vertical advance consumed by the sub-frame, in px.
+ * ────────────────────────────────────────────────────────────── */
+static void render_subtree(walk_ctx_t *w, dom_node_t *node,
+                           int frame_x, int frame_y, int frame_w,
+                           int *out_first, int *out_count, int *out_h) {
+  int first_before = line_count;
+
+  /* Push a private frame; on overflow degrade to the parent frame
+   * so the subtree still emits *somewhere*, just not isolated.
+   * Better than silently dropping content on deeply-nested HTML. */
+  layout_frame_t *f = layout_push(frame_x, frame_y, frame_w, /*flow=*/0);
+  bool pushed = (f != NULL);
+
+  /* w_flush before and after so any pending inline text run from
+   * the parent doesn't leak into / out of the sub-frame's lines. */
+  w_flush(w);
+  if (node) w_emit_node(w, node);
+  w_flush(w);
+
+  int captured_h = 0;
+  if (pushed) {
+    captured_h = layout_pop();
+  }
+  /* Frame-push overflow path: emission still happened on the
+   * parent frame, but we can't cleanly report a height for it,
+   * so leave captured_h at 0 and let the caller fall back to
+   * a "skip this container" path. */
+
+  int captured_n = line_count - first_before;
+  if (out_first) *out_first = (captured_n > 0) ? first_before : -1;
+  if (out_count) *out_count = captured_n;
+  if (out_h)     *out_h     = captured_h;
+}
+
+/* R6/L3 helper: shift an already-emitted range of lines by
+ * (dx, dy) pixels. Used by flex/grid containers in L4+L5 after
+ * they know the final column / cell position. Safe to call with
+ * (0, 0) — becomes a no-op. */
+static void layout_translate_range(int first, int count, int dx, int dy) {
+  if (first < 0 || count <= 0) return;
+  for (int i = 0; i < count; i++) {
+    int idx = first + i;
+    if (idx < 0 || idx >= line_count) break;
+    lines[idx].box_x += dx;
+    lines[idx].box_y += dy;
+  }
+}
+
 static void rebuild_lines_from_dom(void) {
   /* Preserve scroll across in-page rebuilds (e.g. when a click on a
    * checkbox / radio / <select> mutates the DOM). Callers that want
