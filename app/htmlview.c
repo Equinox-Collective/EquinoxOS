@@ -1494,7 +1494,9 @@ static void parse_html(const char *html, uint32_t size) {
   {
     char nav[512];
     if (g_page && qjs_page_pending_nav(g_page, nav, sizeof nav)) {
-      strncpy(current_url, nav, sizeof(current_url) - 1);
+      char resolved[512];
+      resolve_url(current_url, nav, resolved);
+      strncpy(current_url, resolved, sizeof(current_url) - 1);
       current_url[sizeof(current_url) - 1] = 0;
       load_page(current_url);
       return;
@@ -2125,7 +2127,9 @@ static void render(const char *filename) {
            * so, navigate now instead of repainting the dead page. */
           char nav[512];
           if (qjs_page_pending_nav(g_page, nav, sizeof nav)) {
-            strncpy(current_url, nav, sizeof(current_url) - 1);
+            char resolved[512];
+            resolve_url(current_url, nav, resolved);
+            strncpy(current_url, resolved, sizeof(current_url) - 1);
             current_url[sizeof(current_url) - 1] = 0;
             load_page(current_url);
             return;
@@ -2193,7 +2197,9 @@ static void render(const char *filename) {
           qjs_page_dispatch_event(g_page, n, "input");
           char nav[512];
           if (qjs_page_pending_nav(g_page, nav, sizeof nav)) {
-            strncpy(current_url, nav, sizeof(current_url) - 1);
+            char resolved[512];
+            resolve_url(current_url, nav, resolved);
+            strncpy(current_url, resolved, sizeof(current_url) - 1);
             current_url[sizeof(current_url) - 1] = 0;
             load_page(current_url);
             return;
