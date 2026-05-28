@@ -2894,6 +2894,13 @@ int main(int argc, char **argv) {
     if (max_scroll < 0)
       max_scroll = 0;
 
+    /* Esc is reserved as the universal "quit the browser" hotkey and
+     * is NOT exposed to JS — otherwise a runaway handler could trap
+     * the user inside a page. Check it before the keydown dispatch
+     * so preventDefault() can never block exit. */
+    if (key == 0x01)
+      break;
+
 #ifdef BROWSER_BUILD
     /* R5/N5: per-frame timer tick. setInterval / setTimeout drive UI
      * animation now that the host clock is plumbed in. Any DOM
@@ -2942,9 +2949,6 @@ int main(int argc, char **argv) {
     static bool shift_held = false;
     if (key == 0x2A || key == 0x36) shift_held = true;
     else if (key == 0xAA || key == 0xB6) shift_held = false;
-
-    if (key == 0x01)
-      break;
 
     if (is_typing_url) {
       if (key == 0x1C) {
