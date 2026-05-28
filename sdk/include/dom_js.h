@@ -32,4 +32,19 @@
  * outlive every JS evaluation against `ctx`. */
 void qjs_install_dom(JSContext *ctx, dom_node_t *doc);
 
+/* Dispatch a synthetic event of type `name` on `target` to every
+ * Element-level listener registered via element.addEventListener().
+ * Returns the number of handlers invoked. */
+int  qjs_dom_dispatch_event(JSContext *ctx, dom_node_t *target,
+                            const char *name);
+
+/* Free any JSValues held by the per-element listener pool. MUST be
+ * called before JS_FreeContext on the same ctx. */
+void qjs_dom_teardown(JSContext *ctx);
+
+/* DOM has been mutated by JS since the last consume? Returns 1 and
+ * clears the flag if so. Set by every mutation binding (setAttribute,
+ * textContent, appendChild, innerHTML, …). */
+int  qjs_dom_consume_dirty(void);
+
 #endif /* DOM_JS_H */

@@ -37,4 +37,45 @@ void qjs_run_page_scripts(dom_node_t *doc,
                           const struct br_x509_trust_anchor *tas,
                           size_t tas_num);
 
+/* -----------------------------------------------------------------
+ * Persistent page session (phase R4 / F0).
+ *
+ * `qjs_run_page_scripts` is one-shot — it tears the runtime down
+ * before returning, so JS handlers registered via addEventListener
+ * cannot fire after page load. For interactive content (buttons,
+ * inputs, form submits) the renderer needs to keep the JS context
+ * alive across frames and call back into it whenever a widget event
+ * fires.
+ *
+ * Lifecycle:
+ *   qjs_page_t *p = qjs_page_create(doc, url, tas, num);  // runs initial scripts
+ *   ...per frame...
+ *     if (widget_clicked)
+ *       qjs_page_dispatch_event(p, node, "click");        // fires JS handlers
+ *     if (qjs_page_consume_dirty(p))
+ *       rebuild_lines();                                  // re-render after JS mutations
+ *   qjs_page_free(p);                                     // before next nav
+ * ---------------------------------------------------------------- */
+
+typedef struct qjs_page qjs_page_t;
+
+qjs_page_t *qjs_page_create(dom_node_t *doc,
+                            const char *page_url,
+                            const struct br_x509_trust_anchor *tas,
+                            size_t tas_num);
+
+/* Dispatch a synthetic event of type `name` on `target`. Walks the
+ * per-page Element listener pool and calls each matching handler.
+ * Returns 1 if any default action was prevented (event.preventDefault
+ * called), else 0. */
+int qjs_page_dispatch_event(qjs_page_t *p,
+                            dom_node_t *target,
+                            const char *name);
+
+/* Has any JS callback mutated the DOM since the last consume?
+ * Returns 1 and clears the flag, or 0. */
+int qjs_page_consume_dirty(qjs_page_t *p);
+
+void qjs_page_free(qjs_page_t *p);
+
 #endif

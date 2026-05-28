@@ -31,12 +31,55 @@
 #include <stdio.h>
 
 #include "quickjs.h"
+#include "qjs_helpers.h"
 #include "dom.h"
 #include "dom_js.h"
 
 /* ------------------------------------------------------------------ */
 
 static JSClassID dom_element_class_id;
+
+/* --------------------------------------------------------------------
+ * Per-element event listener pool (phase R4/F0).
+ *
+ * Module-static linked list of (target node, event name, JS callback)
+ * triples. Each Element.addEventListener pushes here; dispatcher
+ * walks the list looking for matching (node, name) pairs.
+ *
+ * The pool is reset by qjs_dom_teardown() — call before
+ * JS_FreeContext or QuickJS will assert on the leftover JSValues.
+ * ------------------------------------------------------------------ */
+
+typedef struct el_listener {
+  dom_node_t *target;     /* borrowed; lifetime == DOM tree */
+  char       *event;
+  JSValue     fn;
+  struct el_listener *next;
+} el_listener_t;
+
+static el_listener_t *g_el_listeners;
+static int            g_dom_dirty;    /* set by any mutation binding */
+
+static void el_listeners_reset(JSContext *ctx) {
+  el_listener_t *l = g_el_listeners;
+  while (l) {
+    el_listener_t *n = l->next;
+    JS_FreeValue(ctx, l->fn);
+    free(l->event); free(l); l = n;
+  }
+  g_el_listeners = NULL;
+}
+
+static char *xstrdup(const char *s) {
+  if (!s) return NULL;
+  size_t n = strlen(s) + 1;
+  char *o = (char *)malloc(n); if (o) memcpy(o, s, n);
+  return o;
+}
+
+int qjs_dom_consume_dirty(void) { int d = g_dom_dirty; g_dom_dirty = 0; return d; }
+static void dom_mark_dirty(void) { g_dom_dirty = 1; }
+
 
 static void dom_element_finalizer(JSRuntime *rt, JSValue val) {
   (void)rt; (void)val;
@@ -228,7 +271,7 @@ static JSValue dom_el_setAttribute(JSContext *ctx, JSValueConst this_val,
   if (!n) return JS_UNDEFINED;
   const char *name = JS_ToCString(ctx, argv[0]);
   const char *val  = JS_ToCString(ctx, argv[1]);
-  if (name && val) dom_set_attr(n, name, val);
+  if (name && val) { dom_set_attr(n, name, val); dom_mark_dirty(); }
   if (name) JS_FreeCString(ctx, name);
   if (val)  JS_FreeCString(ctx, val);
   return JS_UNDEFINED;
@@ -241,7 +284,7 @@ static JSValue dom_el_removeAttribute(JSContext *ctx, JSValueConst this_val,
   if (!n) return JS_UNDEFINED;
   const char *name = JS_ToCString(ctx, argv[0]);
   if (name) {
-    dom_remove_attr(n, name);
+    dom_remove_attr(n, name); dom_mark_dirty();
     JS_FreeCString(ctx, name);
   }
   return JS_UNDEFINED;
@@ -252,7 +295,7 @@ static JSValue dom_el_appendChild(JSContext *ctx, JSValueConst this_val,
   (void)argc;
   dom_node_t *parent = unwrap_element(this_val);
   dom_node_t *child  = unwrap_element(argv[0]);
-  if (parent && child) dom_append_child(parent, child);
+  if (parent && child) { dom_append_child(parent, child); dom_mark_dirty(); }
   /* Return the child per DOM spec — caller pattern `parent.appendChild(c)` */
   return JS_DupValue(ctx, argv[0]);
 }
@@ -262,7 +305,7 @@ static JSValue dom_el_removeChild(JSContext *ctx, JSValueConst this_val,
   (void)argc;
   dom_node_t *parent = unwrap_element(this_val);
   dom_node_t *child  = unwrap_element(argv[0]);
-  if (parent && child) dom_remove_child(parent, child);
+  if (parent && child) { dom_remove_child(parent, child); dom_mark_dirty(); }
   return JS_DupValue(ctx, argv[0]);
 }
 
@@ -272,7 +315,7 @@ static JSValue dom_el_set_textContent(JSContext *ctx, JSValueConst this_val,
   if (!n) return JS_UNDEFINED;
   const char *s = JS_ToCString(ctx, v);
   if (!s) return JS_EXCEPTION;
-  dom_set_text_content(n, s);
+  dom_set_text_content(n, s); dom_mark_dirty();
   JS_FreeCString(ctx, s);
   return JS_UNDEFINED;
 }
@@ -284,10 +327,100 @@ static JSValue dom_el_set_innerHTML(JSContext *ctx, JSValueConst this_val,
   size_t len = 0;
   const char *s = JS_ToCStringLen(ctx, &len, v);
   if (!s) return JS_EXCEPTION;
-  dom_set_inner_html(n, s, (uint32_t)len);
+  dom_set_inner_html(n, s, (uint32_t)len); dom_mark_dirty();
   JS_FreeCString(ctx, s);
   return JS_UNDEFINED;
 }
+
+/* --------------------------------------------------------------------
+ * Element.addEventListener / removeEventListener (phase R4/F0)
+ * ------------------------------------------------------------------ */
+
+static JSValue dom_el_addEventListener(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv) {
+  if (argc < 2 || !JS_IsFunction(ctx, argv[1])) return JS_UNDEFINED;
+  dom_node_t *n = unwrap_element(this_val);
+  if (!n) return JS_UNDEFINED;
+  const char *name = JS_ToCString(ctx, argv[0]);
+  if (!name) return JS_UNDEFINED;
+  el_listener_t *l = (el_listener_t *)malloc(sizeof(*l));
+  if (l) {
+    l->target = n;
+    l->event  = xstrdup(name);
+    l->fn     = JS_DupValue(ctx, argv[1]);
+    l->next   = g_el_listeners;
+    g_el_listeners = l;
+  }
+  JS_FreeCString(ctx, name);
+  return JS_UNDEFINED;
+}
+
+static JSValue dom_el_removeEventListener(JSContext *ctx, JSValueConst this_val,
+                                          int argc, JSValueConst *argv) {
+  if (argc < 2) return JS_UNDEFINED;
+  dom_node_t *n = unwrap_element(this_val);
+  if (!n) return JS_UNDEFINED;
+  const char *name = JS_ToCString(ctx, argv[0]);
+  if (!name) return JS_UNDEFINED;
+  el_listener_t *prev = NULL;
+  for (el_listener_t *l = g_el_listeners; l; prev = l, l = l->next) {
+    if (l->target == n && strcmp(l->event, name) == 0 &&
+        JS_VALUE_GET_PTR(l->fn) == JS_VALUE_GET_PTR(argv[1])) {
+      if (prev) prev->next = l->next; else g_el_listeners = l->next;
+      JS_FreeValue(ctx, l->fn);
+      free(l->event); free(l); break;
+    }
+  }
+  JS_FreeCString(ctx, name);
+  return JS_UNDEFINED;
+}
+
+/* Public dispatcher. Builds a tiny synthetic Event object and passes
+ * it as the single argument; supports type/target/preventDefault/
+ * defaultPrevented. Bubbling and capture phases are not modelled. */
+int qjs_dom_dispatch_event(JSContext *ctx, dom_node_t *target,
+                           const char *name) {
+  if (!ctx || !target || !name) return 0;
+  int called = 0;
+  for (el_listener_t *l = g_el_listeners; l; l = l->next) {
+    if (l->target == target && strcmp(l->event, name) == 0) {
+      JSValue ev = JS_NewObject(ctx);
+      JS_SetPropertyStr(ctx, ev, "type",   JS_NewString(ctx, name));
+      JS_SetPropertyStr(ctx, ev, "target", wrap_element(ctx, target));
+      JS_SetPropertyStr(ctx, ev, "defaultPrevented", JS_FALSE);
+      /* preventDefault flips defaultPrevented. */
+      const char *pd_src =
+        "(function(e){e.preventDefault = function(){"
+        "  e.defaultPrevented = true; };"
+        "  e.stopPropagation = function(){};"
+        "  return e; })";
+      JSValue setup = JS_Eval(ctx, pd_src, strlen(pd_src),
+                              "<eventInit>", JS_EVAL_TYPE_GLOBAL);
+      if (!JS_IsException(setup)) {
+        JSValue dummy = JS_Call(ctx, setup, JS_UNDEFINED, 1, (JSValueConst *)&ev);
+        JS_FreeValue(ctx, dummy);
+        JS_FreeValue(ctx, setup);
+      } else { JS_FreeValue(ctx, setup); }
+
+      JSValueConst args[] = { ev };
+      JSValue ret = JS_Call(ctx, l->fn, JS_UNDEFINED, 1, args);
+      if (JS_IsException(ret)) qjs_dump_exception(ctx);
+      JS_FreeValue(ctx, ret);
+      JS_FreeValue(ctx, ev);
+      called++;
+    }
+  }
+  return called;
+}
+
+void qjs_dom_teardown(JSContext *ctx) {
+  el_listeners_reset(ctx);
+  g_dom_dirty = 0;
+}
+
+/* --------------------------------------------------------------------
+ * Element.prototype entries
+ * ------------------------------------------------------------------ */
 
 static const JSCFunctionListEntry dom_element_proto[] = {
   JS_CGETSET_DEF("tagName",      dom_el_get_tagName,     NULL),
@@ -304,6 +437,8 @@ static const JSCFunctionListEntry dom_element_proto[] = {
   JS_CFUNC_DEF("removeAttribute",         1, dom_el_removeAttribute),
   JS_CFUNC_DEF("appendChild",             1, dom_el_appendChild),
   JS_CFUNC_DEF("removeChild",             1, dom_el_removeChild),
+  JS_CFUNC_DEF("addEventListener",        2, dom_el_addEventListener),
+  JS_CFUNC_DEF("removeEventListener",     2, dom_el_removeEventListener),
 };
 
 /* ------------------------------------------------------------------ */

@@ -158,7 +158,82 @@ void qjs_run_page_scripts(dom_node_t *doc,
    * listeners, leftover intervals) before the runtime is freed —
    * QuickJS asserts on a non-empty GC list at teardown. */
   qjs_window_teardown(ctx);
+  qjs_dom_teardown(ctx);
 
   JS_FreeContext(ctx);
   JS_FreeRuntime(rt);
+}
+
+/* ====================================================================
+ * Persistent page session (phase R4 / F0)
+ *
+ * Lives across frames so widget events (button clicks, input change,
+ * eventually form submit) can fire JS callbacks registered during the
+ * initial script run. Created once per page load; freed before the
+ * next load_page().
+ * ================================================================== */
+
+struct qjs_page {
+  JSRuntime *rt;
+  JSContext *ctx;
+};
+
+qjs_page_t *qjs_page_create(dom_node_t *doc,
+                            const char *page_url,
+                            const struct br_x509_trust_anchor *tas,
+                            size_t tas_num) {
+  if (!doc) return NULL;
+  qjs_page_t *p = (qjs_page_t *)calloc(1, sizeof(*p));
+  if (!p) return NULL;
+
+  p->rt = JS_NewRuntime();
+  if (!p->rt) { free(p); return NULL; }
+  p->ctx = JS_NewContext(p->rt);
+  if (!p->ctx) { JS_FreeRuntime(p->rt); free(p); return NULL; }
+
+  script_index = 0;
+  qjs_install_console(p->ctx);
+  qjs_install_dom    (p->ctx, doc);
+  qjs_install_window (p->ctx, page_url);
+  qjs_install_fetch  (p->ctx, tas, tas_num);
+  qjs_install_storage(p->ctx);
+  qjs_install_timers (p->ctx);
+  qjs_install_events (p->ctx);
+
+  exec_scripts(p->ctx, doc);
+  qjs_run_microtasks(p->ctx);
+  qjs_fire_DOMContentLoaded(p->ctx);
+  qjs_drain_timers(p->ctx);
+  qjs_fire_load(p->ctx);
+
+  /* Initial scripts may have set the dirty flag; clear so the very
+   * first frame doesn't unconditionally rebuild lines. */
+  qjs_dom_consume_dirty();
+  return p;
+}
+
+int qjs_page_dispatch_event(qjs_page_t *p, dom_node_t *target,
+                            const char *name) {
+  if (!p || !p->ctx) return 0;
+  int n = qjs_dom_dispatch_event(p->ctx, target, name);
+  /* Handlers commonly schedule microtasks (Promise.then etc); drain
+   * so the user sees the result by the next paint. */
+  qjs_run_microtasks(p->ctx);
+  return n;
+}
+
+int qjs_page_consume_dirty(qjs_page_t *p) {
+  (void)p;
+  return qjs_dom_consume_dirty();
+}
+
+void qjs_page_free(qjs_page_t *p) {
+  if (!p) return;
+  if (p->ctx) {
+    qjs_window_teardown(p->ctx);
+    qjs_dom_teardown   (p->ctx);
+    JS_FreeContext(p->ctx);
+  }
+  if (p->rt) JS_FreeRuntime(p->rt);
+  free(p);
 }
