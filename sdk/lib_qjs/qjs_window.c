@@ -416,9 +416,30 @@ static void fire_one(JSContext *ctx, const char *name) {
   }
 }
 
-void qjs_fire_loaded_events(JSContext *ctx) {
+void qjs_fire_DOMContentLoaded(JSContext *ctx) {
   fire_one(ctx, "DOMContentLoaded");
   qjs_run_microtasks(ctx);
+}
+void qjs_fire_load(JSContext *ctx) {
   fire_one(ctx, "load");
   qjs_run_microtasks(ctx);
+}
+void qjs_fire_loaded_events(JSContext *ctx) {
+  /* Legacy single-shot: still useful for callers that don't care
+   * about ordering with timers. */
+  qjs_fire_DOMContentLoaded(ctx);
+  qjs_fire_load(ctx);
+}
+
+/* ====================================================================
+ * Teardown
+ * ================================================================== */
+
+void qjs_window_teardown(JSContext *ctx) {
+  /* Order doesn't matter — each helper only touches its own pool.
+   * What matters is that every JSValue we ever stored in C state
+   * gets JS_FreeValue'd before the runtime is dropped. */
+  ev_reset(ctx);
+  timers_reset(ctx);
+  ls_reset();   /* strings only, no JSValues, but keep the pool clean */
 }
