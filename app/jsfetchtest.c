@@ -38,7 +38,9 @@ int main(int argc, char **argv) {
   qjs_install_fetch(ctx, NULL, 0);
 
   const char *script =
-    "let done = 0;\n"
+    /* Use globalThis so C can read the counter back — `let` would
+     * scope the binding to the eval and stay invisible from outside. */
+    "globalThis.done = 0;\n"
     "fetch('res/index.html').then(r => {\n"
     "  console.log('A status =', r.status);\n"
     "  console.log('A ok =', r.ok);\n"
@@ -48,7 +50,7 @@ int main(int argc, char **argv) {
     "  console.log('A text length =', t.length);\n"
     "  console.log('A starts with <!doctype =',\n"
     "              t.substring(0, 9).toLowerCase() === '<!doctype');\n"
-    "  done++;\n"
+    "  globalThis.done++;\n"
     "}).catch(e => { console.error('A failed:', e && e.message); });\n"
     "\n"
     "Promise.all([\n"
@@ -57,14 +59,14 @@ int main(int argc, char **argv) {
     "]).then(([a, b]) => {\n"
     "  console.log('B both equal =', a === b);\n"
     "  console.log('B length =', a.length);\n"
-    "  done++;\n"
+    "  globalThis.done++;\n"
     "}).catch(e => { console.error('B failed:', e && e.message); });\n"
     "\n"
     "fetch('res/does_not_exist.html').then(r => {\n"
     "  console.error('C unexpectedly resolved, status=' + r.status);\n"
     "}).catch(e => {\n"
     "  console.log('C correctly rejected:', e && e.message);\n"
-    "  done++;\n"
+    "  globalThis.done++;\n"
     "});\n";
 
   eval_dump(ctx, script, "<jsfetchtest>");
