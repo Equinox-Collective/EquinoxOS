@@ -1105,6 +1105,12 @@ static void parse_css_block(const char *css, int css_len) {
 
 /* ── CSS: extract all <style> blocks from HTML ───────────────── */
 static void extract_css(const char *html, uint32_t size) {
+  {
+    char dbg[96];
+    sprintf(dbg, "[CSS] extract_css(html=%p, size=%u) prev_rules=%d\n",
+            (void *)html, size, css_rule_count);
+    print(dbg);
+  }
   css_rule_count = 0;
 
   for (uint32_t i = 0; i + 6 < size; i++) {
@@ -2976,6 +2982,12 @@ static void rebuild_lines_from_dom(void) {
 }
 
 static void parse_html(const char *html, uint32_t size) {
+  {
+    char dbg[96];
+    sprintf(dbg, "[PARSE] parse_html(size=%u) legacy=%d\n",
+            size, (int)g_use_legacy_parser);
+    print(dbg);
+  }
   if (g_use_legacy_parser) { parse_html_legacy(html, size); return; }
 
   /* Drop the previous page's runtime + tree before we leak. The free
