@@ -150,10 +150,21 @@ static const char *cp_to_translit(uint32_t cp) {
   return NULL;
 }
 
-/* Convert UTF-8 input to ASCII output. Returns the number of bytes
- * written (NOT including the NUL terminator), bounded by out_cap-1.
- * Unknown non-ASCII codepoints are dropped silently (the alternative
- * — '?' — would litter every page that has any symbol we forgot). */
+/* R6/B2c: convert UTF-8 input to *renderer-ready* UTF-8 output.
+ *
+ * Cyrillic Basic (U+0400..U+04FF) now passes straight through —
+ * eid_draw_text knows how to decode UTF-8 and look up the bundled
+ * GNU Unifont Cyrillic glyphs. Everything else stays on the old
+ * path: typographic ASCII subs (en-dash → "--", curly quotes →
+ * "'") and the Cyrillic *transliteration* table is kept ONLY as a
+ * fallback for codepoints outside Basic Cyrillic that previously
+ * had hand-coded substitutions (the Ё/ё specials in
+ * cp_to_translit). Unknown non-ASCII codepoints are dropped
+ * silently (the alternative — '?' — would litter every page that
+ * has any symbol we forgot).
+ *
+ * Returns bytes written (NOT including NUL). out_cap counts bytes,
+ * not codepoints. */
 static int utf8_to_ascii(const char *in, int in_len, char *out, int out_cap) {
   if (out_cap <= 0) return 0;
   int w = 0;
@@ -169,6 +180,14 @@ static int utf8_to_ascii(const char *in, int in_len, char *out, int out_cap) {
       out[w++] = (char)cp;
       continue;
     }
+    /* Cyrillic Basic — pass through as raw UTF-8 (2 bytes/codepoint). */
+    if (cp >= 0x0400 && cp <= 0x04FF) {
+      /* re-encode cp as 2-byte UTF-8 (every value in the range fits) */
+      if (w + 2 >= out_cap) break;
+      out[w++] = (char)(0xC0 | (cp >> 6));
+      out[w++] = (char)(0x80 | (cp & 0x3F));
+      continue;
+    }
     const char *sub = cp_to_ascii_fallback(cp);
     if (!sub) sub = cp_to_translit(cp);
     if (!sub) continue;
@@ -176,6 +195,37 @@ static int utf8_to_ascii(const char *in, int in_len, char *out, int out_cap) {
   }
   out[w] = 0;
   return w;
+}
+
+/* Count visible cells (codepoints) in the first `nbytes` bytes of a
+ * UTF-8 string buffer. Stops at NUL even if nbytes is larger. */
+static int utf8_cells_n(const char *s, int nbytes) {
+  int cells = 0;
+  for (int i = 0; i < nbytes && s[i]; ) {
+    unsigned char b = (unsigned char)s[i];
+    int adv = (b < 0x80) ? 1
+            : ((b & 0xE0) == 0xC0) ? 2
+            : ((b & 0xF0) == 0xE0) ? 3
+            : ((b & 0xF8) == 0xF0) ? 4 : 1;
+    if (i + adv > nbytes) break;
+    cells++; i += adv;
+  }
+  return cells;
+}
+
+/* Count visible columns in a UTF-8 string: each ASCII byte or each
+ * UTF-8 codepoint is exactly one 8-px cell in our renderer. */
+static int utf8_visible_cols(const char *s) {
+  if (!s) return 0;
+  int n = 0;
+  for (const unsigned char *p = (const unsigned char *)s; *p; ) {
+    if (*p < 0x80) { n++; p++; }
+    else if ((*p & 0xE0) == 0xC0) { n++; p += 2; }
+    else if ((*p & 0xF0) == 0xE0) { n++; p += 3; }
+    else if ((*p & 0xF8) == 0xF0) { n++; p += 4; }
+    else { n++; p++; }
+  }
+  return n;
 }
 
 /* ── CSS Engine ────────────────────────────────────────────────── */
@@ -245,8 +295,13 @@ typedef enum {
   STYLE_IMAGE,
 } line_style_t;
 
+/* R6/B2c: text buffer now holds UTF-8 so it must be sized in bytes,
+ * not characters. Cyrillic is 2 bytes per codepoint, other BMP
+ * symbols up to 3, so 4× LINE_CHARS leaves headroom for the rare
+ * mixed line. */
+#define LINE_BYTES (LINE_CHARS * 4 + 1)
 typedef struct {
-  char text[LINE_CHARS + 1];
+  char text[LINE_BYTES];
   line_style_t style;
   bool indent;
   /* CSS overrides – per line */
@@ -1126,19 +1181,28 @@ static void push_line(const char *text, int len, line_style_t style,
   if (len < 0)
     len = 0;
 
-  /* R6/B2: every text line passes through the UTF-8 → ASCII pass
-   * before width-truncation so —/…/→/Cyrillic survive into something
-   * the PSF1 8x16 font can actually paint. The buffer in line_t is
-   * LINE_CHARS+1, so we ask for at most that. Conversion may shrink
-   * (UTF-8 codepoint dropped) or grow (… → "..."); we do it first
-   * and then truncate to LINE_CHARS. */
-  char ascii_buf[LINE_CHARS * 4 + 1];
-  int ascii_len = utf8_to_ascii(text, len, ascii_buf, sizeof(ascii_buf));
-  if (ascii_len > LINE_CHARS) ascii_len = LINE_CHARS;
-  for (int i = 0; i < ascii_len; i++)
-    lines[line_count].text[i] = ascii_buf[i];
-  lines[line_count].text[ascii_len] = '\0';
-  len = ascii_len;
+  /* R6/B2c: every text line passes through the UTF-8 normalise pass
+   * which keeps Cyrillic as raw UTF-8 (so the eid renderer can hit
+   * the bundled Unifont glyph table) and substitutes other non-ASCII
+   * codepoints to plain ASCII (— → "--", … → "...", →/↑ → ASCII). We
+   * then truncate at LINE_CHARS *visible columns*, never mid-byte
+   * inside a UTF-8 sequence. */
+  char norm_buf[LINE_BYTES];
+  int  norm_len = utf8_to_ascii(text, len, norm_buf, sizeof(norm_buf));
+  int  out_w = 0, cols = 0;
+  for (int i = 0; i < norm_len && cols < LINE_CHARS; ) {
+    unsigned char b = (unsigned char)norm_buf[i];
+    int adv = (b < 0x80) ? 1
+            : ((b & 0xE0) == 0xC0) ? 2
+            : ((b & 0xF0) == 0xE0) ? 3
+            : ((b & 0xF8) == 0xF0) ? 4 : 1;
+    if (i + adv > norm_len) break;
+    if (out_w + adv >= (int)sizeof(lines[line_count].text)) break;
+    for (int k = 0; k < adv; k++) lines[line_count].text[out_w++] = norm_buf[i + k];
+    i += adv; cols++;
+  }
+  lines[line_count].text[out_w] = '\0';
+  len = out_w;
 
   /* Apply text-transform: uppercase */
   if (style_stack[style_depth].uppercase) {
@@ -1181,36 +1245,57 @@ static void blank_line(void) {
   push_line("", 0, STYLE_NORMAL, false);
 }
 
+/* R6/B2c: width math is in *cells*, not bytes. `*len` and `word_len`
+ * are byte indices; we use utf8_cells_n to convert. Buffer overflow
+ * is guarded against LINE_BYTES. */
 static void append_word(char *line, int *len, const char *word, int word_len,
                         line_style_t style, bool indent) {
-  int max_chars = indent ? (LINE_CHARS - 4) : LINE_CHARS;
-  if (word_len <= 0)
-    return;
+  int max_cells = indent ? (LINE_CHARS - 4) : LINE_CHARS;
+  if (word_len <= 0) return;
 
-  if (*len > 0 && *len + 1 + word_len > max_chars) {
+  int cur_cells  = utf8_cells_n(line, *len);
+  int word_cells = utf8_cells_n(word, word_len);
+
+  if (cur_cells > 0 && cur_cells + 1 + word_cells > max_cells) {
     push_line(line, *len, style, indent);
     *len = 0;
+    cur_cells = 0;
   }
 
-  if (*len > 0)
+  if (cur_cells > 0 && *len + 1 < LINE_BYTES) {
     line[(*len)++] = ' ';
-
-  while (word_len > max_chars) {
-    int room = max_chars - *len;
-    if (room <= 0) {
-      push_line(line, *len, style, indent);
-      *len = 0;
-      room = max_chars;
-    }
-    for (int i = 0; i < room; i++)
-      line[(*len)++] = *word++;
-    word_len -= room;
-    push_line(line, *len, style, indent);
-    *len = 0;
+    cur_cells++;
   }
 
-  for (int i = 0; i < word_len && *len < max_chars; i++)
-    line[(*len)++] = word[i];
+  /* Word longer than the whole line: split at cell boundaries. */
+  while (word_cells > max_cells) {
+    /* fill what's left of the line in cells */
+    int room_cells = max_cells - cur_cells;
+    int i = 0, took = 0;
+    while (i < word_len && took < room_cells && *len + 4 < LINE_BYTES) {
+      unsigned char b = (unsigned char)word[i];
+      int adv = (b < 0x80) ? 1 : ((b & 0xE0) == 0xC0) ? 2
+              : ((b & 0xF0) == 0xE0) ? 3 : ((b & 0xF8) == 0xF0) ? 4 : 1;
+      if (i + adv > word_len) break;
+      for (int k = 0; k < adv; k++) line[(*len)++] = word[i + k];
+      i += adv; took++;
+    }
+    word += i; word_len -= i; word_cells -= took;
+    push_line(line, *len, style, indent);
+    *len = 0; cur_cells = 0;
+  }
+
+  /* Tail copy: append the rest of the word, byte by byte but
+   * respecting cell budget and buffer headroom. */
+  int i = 0;
+  while (i < word_len && cur_cells < max_cells && *len + 4 < LINE_BYTES) {
+    unsigned char b = (unsigned char)word[i];
+    int adv = (b < 0x80) ? 1 : ((b & 0xE0) == 0xC0) ? 2
+            : ((b & 0xF0) == 0xE0) ? 3 : ((b & 0xF8) == 0xF0) ? 4 : 1;
+    if (i + adv > word_len) break;
+    for (int k = 0; k < adv; k++) line[(*len)++] = word[i + k];
+    i += adv; cur_cells++;
+  }
 }
 
 static void flush_current(char *line, int *len, line_style_t style,
@@ -1313,10 +1398,13 @@ static void copy_title_from_html(const char *html, uint32_t size) {
 #endif
 
 typedef struct {
-  char         current[LINE_CHARS + 1];
-  int          current_len;
-  char         word[LINE_CHARS + 1];
-  int          word_len;
+  /* R6/B2c: buffers hold UTF-8 bytes, sized to fit a full LINE_CHARS
+   * row of Cyrillic-or-wider codepoints. The width caps below
+   * (LINE_CHARS) still mean *visible cells*, not bytes. */
+  char         current[LINE_BYTES];
+  int          current_len;       /* bytes used in current */
+  char         word[LINE_BYTES];
+  int          word_len;          /* bytes used in word */
   line_style_t style;
   bool         in_list;
   bool         in_pre;
@@ -1398,8 +1486,23 @@ static void w_emit_text(walk_ctx_t *w, const char *text) {
       continue;
     }
 
-    /* Non-ASCII: substitute (may be NULL → drop). All fallback strings
-     * are non-whitespace so we don't need to flush a word boundary. */
+    /* R6/B2c: Cyrillic Basic (U+0400..U+04FF) — keep raw UTF-8 in
+     * the word buffer so the renderer can render it directly through
+     * eid_draw_text's Unifont lookup. Word/line buffers still count
+     * visible cells, but cell-width math (LINE_CHARS) below uses
+     * codepoint count not byte count; we just need to make sure we
+     * don't split a UTF-8 sequence across the buffer boundary. */
+    if (cp >= 0x0400 && cp <= 0x04FF) {
+      if (w->word_len + 2 < LINE_CHARS) {
+        w->word[w->word_len++] = (char)(0xC0 | (cp >> 6));
+        w->word[w->word_len++] = (char)(0x80 | (cp & 0x3F));
+      }
+      continue;
+    }
+
+    /* Non-ASCII outside Cyrillic Basic: substitute (may be NULL →
+     * drop). All fallback strings are non-whitespace so we don't
+     * need to flush a word boundary. */
     const char *sub = cp_to_ascii_fallback(cp);
     if (!sub) sub = cp_to_translit(cp);
     if (!sub) continue;
@@ -2462,7 +2565,9 @@ static void draw_text_line(int x, int y, const line_t *ln) {
   line_style_t style = ln->style;
   const char *text = ln->text;
 
-  int w = strlen(text) * 8;
+  /* R6/B2c: width in pixels = visible cells × 8 (Cyrillic is 1 cell
+   * per codepoint but 2 bytes per codepoint, so strlen overcounts). */
+  int w = eid_text_width_utf8(text);
   /* Use TTF width estimate if using TTF font */
   bool use_ttf = false;
   eid_font_t *draw_font = NULL;
@@ -2629,7 +2734,7 @@ static void render(const char *filename) {
     /* R4/F0: <button> widgets render as eid buttons and dispatch a
      * 'click' event into the page JS session when clicked. */
     if (lines[idx].style == STYLE_BUTTON && lines[idx].widget_node) {
-      int btn_w = (int)strlen(lines[idx].text) * 8 + 24;
+      int btn_w = eid_text_width_utf8(lines[idx].text) + 24;
       if (btn_w < 80)  btn_w = 80;
       if (btn_w > CONTENT_W) btn_w = CONTENT_W;
       int btn_h = LINE_H + 4;
@@ -2920,7 +3025,7 @@ static void render(const char *filename) {
     if (lines[idx].style == STYLE_LINK && lines[idx].link_url[0]) {
       uint32_t id = eid_get_id(lines[idx].link_url, cur_x, cur_y);
       uint32_t state = eid_process_interaction(
-          &ui, id, cur_x, cur_y, strlen(lines[idx].text) * 8, LINE_H);
+          &ui, id, cur_x, cur_y, eid_text_width_utf8(lines[idx].text), LINE_H);
       if (state & EID_STATE_CLICKED) {
         char resolved[128];
         resolve_url(current_url, lines[idx].link_url, resolved);
