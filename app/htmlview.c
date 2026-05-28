@@ -1,4 +1,5 @@
 #include <eid.h>
+#include <eid_ext.h>
 #include <equos.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -76,7 +77,12 @@ typedef enum {
   STYLE_CODE,
   STYLE_MUTED,
   STYLE_BULLET,
-  STYLE_HR
+  STYLE_HR,
+  /* Phase R4/F0: interactive widgets. The line text is the label
+   * (button) or the current value (input); widget_node points at
+   * the originating DOM node so dispatched events know their
+   * target. */
+  STYLE_BUTTON,
 } line_style_t;
 
 typedef struct {
@@ -94,6 +100,9 @@ typedef struct {
   int font_size;  /* 0=normal, 1=large, 2=xlarge */
   bool uppercase; /* text-transform: uppercase */
   char link_url[128];
+  /* Phase R4/F0: widget hookup. NULL for plain text lines.
+   * Stored as void* to avoid a forward decl above dom.h's include. */
+  void *widget_node;
 } line_t;
 
 static uint32_t fb[WIN_W * WIN_H];
@@ -1261,6 +1270,47 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
   } else if (tag_eq(tag, "code") || tag_eq(tag, "pre")) {
     w->style = STYLE_CODE;
     w->in_pre = true;
+#ifdef BROWSER_BUILD
+  } else if (tag_eq(tag, "button")) {
+    /* R4/F0: emit a widget line. The button's label is its
+     * concatenated text content; we collect it from descendant TEXT
+     * nodes (good enough for `<button>Click me</button>` and the
+     * common `<button><span>Click</span></button>` patterns). */
+    w_flush(w);
+    char label[LINE_CHARS + 1]; int li = 0;
+    /* Tiny in-order TEXT collector; bounded by LINE_CHARS. */
+    dom_node_t *stack[32]; int sp = 0;
+    stack[sp++] = n;
+    while (sp > 0 && li < LINE_CHARS) {
+      dom_node_t *cur = stack[--sp];
+      if (!cur) continue;
+      if (cur->type == DOM_NODE_TEXT && cur->text) {
+        for (const char *t = cur->text; *t && li < LINE_CHARS; t++) {
+          if (ascii_isspace(*t)) { if (li && label[li-1] != ' ') label[li++] = ' '; }
+          else label[li++] = *t;
+        }
+      } else if (cur->type == DOM_NODE_ELEMENT) {
+        /* push children in reverse so we visit in document order */
+        int n_children = 0;
+        for (dom_node_t *c = cur->first_child; c; c = c->next_sibling) n_children++;
+        dom_node_t *kids[16]; int k = 0;
+        for (dom_node_t *c = cur->first_child; c && k < 16; c = c->next_sibling) kids[k++] = c;
+        while (k > 0 && sp < 32) stack[sp++] = kids[--k];
+      }
+    }
+    while (li > 0 && label[li-1] == ' ') li--;
+    label[li] = 0;
+    if (li == 0) { strcpy(label, "Button"); li = 6; }
+
+    blank_line();
+    push_line(label, li, STYLE_BUTTON, false);
+    lines[line_count - 1].widget_node = n;
+    /* Don't descend — the label is already captured. */
+    pop_style_state();
+    w->style = save.style;
+    w->in_pre = save.in_pre;
+    return;
+#endif
   }
 
   /* ---- recurse into children ----------------------------------- */
@@ -1316,42 +1366,77 @@ static void parse_html_legacy(const char *html, uint32_t size);
 /* Selects the parser. Flipped to true via the --legacy CLI flag. */
 static bool g_use_legacy_parser = false;
 
-static void parse_html(const char *html, uint32_t size) {
-  if (g_use_legacy_parser) { parse_html_legacy(html, size); return; }
+/* --------------------------------------------------------------------
+ * R4/F0: keep the parsed tree + QuickJS session alive across frames so
+ * widget events (button click → JS handler) can fire post-load. The
+ * old "parse → walk → free" pipeline is now split into:
+ *
+ *   parse_html(html, size)
+ *     dom_free(prev) + qjs_page_free(prev)
+ *     dom_parse → walk → install JS session
+ *
+ *   rebuild_lines_from_dom()
+ *     walks the live tree again into a fresh lines[] (after a JS
+ *     mutation, or after a renderer-side widget value change).
+ * ------------------------------------------------------------------ */
 
-  line_count = 0;
+static dom_node_t *g_doc;
+#ifdef BROWSER_BUILD
+static qjs_page_t *g_page;
+#endif
+
+static void rebuild_lines_from_dom(void) {
+  line_count  = 0;
   scroll_line = 0;
-  copy_title_from_html(html, size);
-  extract_css(html, size);
   reset_style_stack();
   body_bg = CLR_BG;
   tag_context[0] = 0;
 
-  dom_node_t *doc = dom_parse(html, size);
-  if (!doc) {
+  if (!g_doc) {
+    push_line("(no document)", 13, STYLE_MUTED, false);
+    return;
+  }
+
+  walk_ctx_t w;
+  memset(&w, 0, sizeof(w));
+  w.style = STYLE_NORMAL;
+  w_emit_node(&w, g_doc);
+  w_flush(&w);
+
+  if (line_count == 0)
+    push_line("(empty HTML document)", 21, STYLE_MUTED, false);
+}
+
+static void parse_html(const char *html, uint32_t size) {
+  if (g_use_legacy_parser) { parse_html_legacy(html, size); return; }
+
+  /* Drop the previous page's runtime + tree before we leak. The free
+   * order matters: JS first (it may hold borrowed DOM pointers via
+   * unwrap_element), then the DOM tree itself. */
+#ifdef BROWSER_BUILD
+  if (g_page) { qjs_page_free(g_page); g_page = NULL; }
+#endif
+  if (g_doc)  { dom_free(g_doc); g_doc = NULL; }
+
+  copy_title_from_html(html, size);
+  extract_css(html, size);
+
+  g_doc = dom_parse(html, size);
+  if (!g_doc) {
+    line_count = 0; scroll_line = 0;
     push_line("(out of memory parsing HTML)", 28, STYLE_MUTED, false);
     return;
   }
 
 #ifdef BROWSER_BUILD
-  /* Phase J6a: hand the parsed tree to QuickJS so inline <script>
-   * tags run before render. Mutations from JS are not yet honored
-   * (J6b), so the render below reflects the post-parse tree as-is —
-   * scripts can still observe the DOM and produce console output. */
-  qjs_run_page_scripts(doc, current_url, TAs_MOZ, TAs_MOZ_NUM);
+  /* J6a + R4/F0: stand up the persistent JS session. Initial inline
+   * scripts run inside qjs_page_create; addEventListener callbacks
+   * registered there survive until the next navigation, so widget
+   * events (post-paint) can dispatch into them. */
+  g_page = qjs_page_create(g_doc, current_url, TAs_MOZ, TAs_MOZ_NUM);
 #endif
 
-  walk_ctx_t w;
-  memset(&w, 0, sizeof(w));
-  w.style = STYLE_NORMAL;
-
-  w_emit_node(&w, doc);
-  w_flush(&w);
-
-  if (line_count == 0)
-    push_line("(empty HTML document)", 21, STYLE_MUTED, false);
-
-  dom_free(doc);
+  rebuild_lines_from_dom();
 }
 
 static void parse_html_legacy(const char *html, uint32_t size) {
@@ -1823,6 +1908,33 @@ static void render(const char *filename) {
       break;
 
     int cur_x = CONTENT_X + (lines[idx].indent ? 18 : 0);
+
+#ifdef BROWSER_BUILD
+    /* R4/F0: <button> widgets render as eid buttons and dispatch a
+     * 'click' event into the page JS session when clicked. */
+    if (lines[idx].style == STYLE_BUTTON && lines[idx].widget_node) {
+      int btn_w = (int)strlen(lines[idx].text) * 8 + 24;
+      if (btn_w < 80)  btn_w = 80;
+      if (btn_w > CONTENT_W) btn_w = CONTENT_W;
+      int btn_h = LINE_H + 4;
+      uint32_t state = eid_button(&ui, lines[idx].text,
+                                  cur_x, cur_y - 2, btn_w, btn_h);
+      if ((state & EID_STATE_CLICKED) && g_page) {
+        qjs_page_dispatch_event(g_page,
+                                (dom_node_t *)lines[idx].widget_node,
+                                "click");
+        if (qjs_page_consume_dirty(g_page)) {
+          rebuild_lines_from_dom();
+          /* Don't continue painting against the now-stale loop —
+           * next frame paints the fresh tree. */
+          return;
+        }
+      }
+      cur_y += LINE_H + 6;
+      continue;
+    }
+#endif
+
     draw_text_line(cur_x, cur_y, &lines[idx]);
 
     /* Handle link interaction */

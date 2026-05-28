@@ -364,7 +364,7 @@ $(ISO_ROOT)/bin/jstest.elf: app/jstest.o $(QJS_HELPERS_OBJ) $(SDK_OBJS) $(QUICKJ
 # itself.
 DOM_JS_OBJ := sdk/lib_qjs/dom_js.o
 
-sdk/lib_qjs/dom_js.o: sdk/lib_qjs/dom_js.c sdk/include/dom_js.h sdk/include/dom.h
+sdk/lib_qjs/dom_js.o: sdk/lib_qjs/dom_js.c sdk/include/dom_js.h sdk/include/dom.h sdk/include/qjs_helpers.h
 	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
 
 app/jsdomtest.o: app/jsdomtest.c sdk/include/qjs_helpers.h sdk/include/dom_js.h sdk/include/dom.h
