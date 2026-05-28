@@ -1,0 +1,59 @@
+<!doctype html>
+<html>
+<head>
+  <title>J6b Mutation Smoke</title>
+</head>
+<body>
+  <h1 id="hdr">Before JS</h1>
+  <p id="status">no status yet</p>
+  <ul id="items">
+    <li>existing-1</li>
+    <li>existing-2</li>
+  </ul>
+
+  <script>
+    // textContent setter
+    var h = document.getElementById("hdr");
+    h.textContent = "Mutated by JS";
+    console.log("[mut] h.textContent =", JSON.stringify(h.textContent));
+
+    // setAttribute / removeAttribute
+    var s = document.getElementById("status");
+    s.setAttribute("data-state", "ready");
+    s.removeAttribute("id");
+    console.log("[mut] status data-state =",
+                JSON.stringify(s.getAttribute("data-state")));
+    console.log("[mut] status still has id? =", s.hasAttribute("id"));
+
+    // createElement + appendChild
+    var body = document.body;
+    var p = document.createElement("p");
+    p.textContent = "Hello from JS";
+    p.setAttribute("class", "js-added");
+    body.appendChild(p);
+
+    // grow the list
+    var ul = document.getElementById("items");
+    for (var i = 0; i < 3; i++) {
+      var li = document.createElement("li");
+      li.textContent = "added-" + (i + 1);
+      ul.appendChild(li);
+    }
+    console.log("[mut] li count after =",
+                document.getElementsByTagName("li").length);
+
+    // innerHTML setter
+    var box = document.createElement("div");
+    box.setAttribute("id", "box");
+    box.innerHTML = "<span>one</span> <b>two</b> <i>three</i>";
+    body.appendChild(box);
+    console.log("[mut] box children count =", box.children.length);
+
+    // removeChild
+    var firstLi = ul.children[0];
+    ul.removeChild(firstLi);
+    console.log("[mut] li count after remove =",
+                document.getElementsByTagName("li").length);
+  </script>
+</body>
+</html>

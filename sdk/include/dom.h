@@ -75,4 +75,43 @@ dom_node_t *dom_get_first_element_by_tag(dom_node_t *root, const char *tag);
 /* Recursive debug dump to stdout. Useful for smoke tests. */
 void dom_print(const dom_node_t *node, int indent);
 
+/* ---------------------------------------------------------------------------
+ * Mutation API (phase J6b).
+ *
+ * All helpers malloc()-copy any string they store, so callers retain
+ * ownership of the C strings they pass in. They return 0 on success and
+ * a negative value on OOM. NULL nodes are tolerated as no-ops (return -1).
+ * ------------------------------------------------------------------------- */
+
+/* Create a free-standing ELEMENT/TEXT node not yet attached to a tree.
+ * Returns NULL on OOM. tag is lower-cased internally. */
+dom_node_t *dom_create_element(const char *tag);
+dom_node_t *dom_create_text(const char *text);
+
+/* Set or replace an attribute on an element. Idempotent.
+ * value may be "" but not NULL. */
+int dom_set_attr(dom_node_t *node, const char *name, const char *value);
+
+/* Remove an attribute by name (case-insensitive). Returns 0 if removed
+ * or 1 if it was absent. */
+int dom_remove_attr(dom_node_t *node, const char *name);
+
+/* Append `child` to the end of `parent`'s child list. Adopts the
+ * subtree (sets parent/sibling links). If `child` already has a
+ * parent, it is detached from it first. */
+int dom_append_child(dom_node_t *parent, dom_node_t *child);
+
+/* Detach `child` from its parent (does NOT free). Returns 0 if removed
+ * or -1 if child was not attached. */
+int dom_remove_child(dom_node_t *parent, dom_node_t *child);
+
+/* Replace all children of `node` with a single TEXT child whose payload
+ * is `text`. Frees the previous subtree. */
+int dom_set_text_content(dom_node_t *node, const char *text);
+
+/* Replace all children of `node` with the parsed HTML. The new HTML
+ * is parsed as if it were a fragment and the resulting children are
+ * adopted. Frees the previous subtree. */
+int dom_set_inner_html(dom_node_t *node, const char *html, uint32_t size);
+
 #endif

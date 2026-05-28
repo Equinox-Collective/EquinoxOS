@@ -472,3 +472,128 @@ void dom_print(const dom_node_t *node, int indent) {
     dom_print(c, indent + 2);
   }
 }
+
+/* =========================================================================
+ *  Mutation API (phase J6b)
+ *
+ *  All helpers copy any input strings — caller retains ownership.
+ *  Idempotent and tolerant of NULL arguments (return -1 on NULL).
+ * ========================================================================= */
+
+dom_node_t *dom_create_element(const char *tag) {
+  if (!tag) return NULL;
+  dom_node_t *n = node_new(DOM_NODE_ELEMENT);
+  if (!n) return NULL;
+  uint32_t len = (uint32_t)strlen(tag);
+  n->tag_name = d_strndup_lower(tag, len);
+  if (!n->tag_name) { free(n); return NULL; }
+  return n;
+}
+
+dom_node_t *dom_create_text(const char *text) {
+  dom_node_t *n = node_new(DOM_NODE_TEXT);
+  if (!n) return NULL;
+  uint32_t len = text ? (uint32_t)strlen(text) : 0;
+  n->text = text ? d_strndup(text, len) : d_strdup_empty();
+  if (!n->text) { free(n); return NULL; }
+  return n;
+}
+
+int dom_set_attr(dom_node_t *node, const char *name, const char *value) {
+  if (!node || !name || !value) return -1;
+  /* Search existing — replace value in place. */
+  for (dom_attr_t *a = node->attrs; a; a = a->next) {
+    if (d_strcasecmp(a->name, name) == 0) {
+      char *nv = d_strndup(value, (uint32_t)strlen(value));
+      if (!nv) return -1;
+      free(a->value);
+      a->value = nv;
+      return 0;
+    }
+  }
+  /* Otherwise append. Match insertion order from the parser. */
+  dom_attr_t *a = (dom_attr_t *)malloc(sizeof(*a));
+  if (!a) return -1;
+  a->name  = d_strndup_lower(name,  (uint32_t)strlen(name));
+  a->value = d_strndup(value, (uint32_t)strlen(value));
+  a->next  = NULL;
+  if (!a->name || !a->value) {
+    free(a->name); free(a->value); free(a); return -1;
+  }
+  if (!node->attrs) node->attrs = a;
+  else {
+    dom_attr_t *t = node->attrs;
+    while (t->next) t = t->next;
+    t->next = a;
+  }
+  return 0;
+}
+
+int dom_remove_attr(dom_node_t *node, const char *name) {
+  if (!node || !name) return -1;
+  dom_attr_t *prev = NULL;
+  for (dom_attr_t *a = node->attrs; a; prev = a, a = a->next) {
+    if (d_strcasecmp(a->name, name) == 0) {
+      if (prev) prev->next = a->next;
+      else      node->attrs = a->next;
+      free(a->name); free(a->value); free(a);
+      return 0;
+    }
+  }
+  return 1;
+}
+
+int dom_remove_child(dom_node_t *parent, dom_node_t *child) {
+  if (!parent || !child || child->parent != parent) return -1;
+  if (child->prev_sibling) child->prev_sibling->next_sibling = child->next_sibling;
+  else                     parent->first_child = child->next_sibling;
+  if (child->next_sibling) child->next_sibling->prev_sibling = child->prev_sibling;
+  else                     parent->last_child  = child->prev_sibling;
+  child->parent = child->prev_sibling = child->next_sibling = NULL;
+  return 0;
+}
+
+int dom_append_child(dom_node_t *parent, dom_node_t *child) {
+  if (!parent || !child) return -1;
+  if (child->parent) dom_remove_child(child->parent, child);
+  node_append_child(parent, child);
+  return 0;
+}
+
+static void clear_children(dom_node_t *node) {
+  dom_node_t *c = node->first_child;
+  while (c) { dom_node_t *next = c->next_sibling; dom_free(c); c = next; }
+  node->first_child = node->last_child = NULL;
+}
+
+int dom_set_text_content(dom_node_t *node, const char *text) {
+  if (!node) return -1;
+  clear_children(node);
+  if (!text || !*text) return 0;
+  dom_node_t *t = dom_create_text(text);
+  if (!t) return -1;
+  node_append_child(node, t);
+  return 0;
+}
+
+int dom_set_inner_html(dom_node_t *node, const char *html, uint32_t size) {
+  if (!node) return -1;
+  clear_children(node);
+  if (!html || size == 0) return 0;
+  /* Parse as a full doc, then steal the DOCUMENT's children. The
+   * fragment ends up under DOM_NODE_DOCUMENT — we re-parent each
+   * top-level child onto `node`. */
+  dom_node_t *frag = dom_parse(html, size);
+  if (!frag) return -1;
+  dom_node_t *c = frag->first_child;
+  while (c) {
+    dom_node_t *next = c->next_sibling;
+    c->parent = c->prev_sibling = c->next_sibling = NULL;
+    node_append_child(node, c);
+    c = next;
+  }
+  /* The DOCUMENT wrapper itself is now child-less — free just it. */
+  frag->first_child = frag->last_child = NULL;
+  dom_free(frag);
+  return 0;
+}
