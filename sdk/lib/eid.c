@@ -1,6 +1,7 @@
 #include <eid.h>
 #include <equos.h>
 #include <string.h>
+#include <cyr_font.h>
 
 // Структура шрифта PSF1 (встроена в ядро)
 typedef struct {
@@ -118,36 +119,124 @@ void eid_draw_rect(uint32_t *fb, int win_w, int win_h, int x, int y, int w,
   }
 }
 
+/* R6/B2c: UTF-8 aware text drawing.
+ *
+ * Pure-ASCII strings still hit the original PSF1 fast-path. When we
+ * see a continuation-style byte (>= 0xC2 start byte) we decode one
+ * codepoint and try the bundled GNU Unifont Cyrillic glyph table
+ * (U+0400..U+04FF). Anything else (other UTF-8 ranges, malformed
+ * bytes) falls back to '?' so the caller never silently drops a
+ * column-width and downstream width math stays predictable.
+ *
+ * The PSF1 glyph and the Cyrillic table are both 8x16 (or whatever
+ * sys_font->charsize is for height), so cell advance is always 8 px
+ * regardless of which source we drew from. */
+
+static inline int utf8_decode_one_internal(const unsigned char *p, int rem,
+                                           uint32_t *cp) {
+  if (rem <= 0) return 0;
+  unsigned char b0 = p[0];
+  if (b0 < 0x80) { *cp = b0; return 1; }
+  if ((b0 & 0xE0) == 0xC0 && rem >= 2 && (p[1] & 0xC0) == 0x80) {
+    *cp = ((uint32_t)(b0 & 0x1F) << 6) | (p[1] & 0x3F);
+    return 2;
+  }
+  if ((b0 & 0xF0) == 0xE0 && rem >= 3 &&
+      (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80) {
+    *cp = ((uint32_t)(b0 & 0x0F) << 12) |
+          ((uint32_t)(p[1] & 0x3F) << 6) | (p[2] & 0x3F);
+    return 3;
+  }
+  if ((b0 & 0xF8) == 0xF0 && rem >= 4 && (p[1] & 0xC0) == 0x80 &&
+      (p[2] & 0xC0) == 0x80 && (p[3] & 0xC0) == 0x80) {
+    *cp = ((uint32_t)(b0 & 0x07) << 18) |
+          ((uint32_t)(p[1] & 0x3F) << 12) |
+          ((uint32_t)(p[2] & 0x3F) << 6) | (p[3] & 0x3F);
+    return 4;
+  }
+  /* Malformed — consume one byte and emit '?'. */
+  *cp = '?';
+  return 1;
+}
+
+static void eid_draw_glyph_at(uint32_t *fb, int win_w, int win_h,
+                              int x, int y, const uint8_t *glyph,
+                              int rows, uint32_t color) {
+  for (int cy = 0; cy < rows; cy++) {
+    int py = y + cy;
+    if (py < 0 || py >= win_h) { glyph++; continue; }
+    uint32_t *line = &fb[py * win_w];
+    uint8_t row = *glyph++;
+    for (int cx = 0; cx < 8; cx++) {
+      int px = x + cx;
+      if (px >= 0 && px < win_w && ((row >> (7 - cx)) & 1)) {
+        line[px] = color;
+      }
+    }
+  }
+}
+
 void eid_draw_text(uint32_t *fb, int win_w, int win_h, int x, int y,
                    const char *text, uint32_t color) {
-  if (!sys_font)
-    return;
+  if (!sys_font || !text) return;
 
-  while (*text) {
-    uint8_t *glyph = (uint8_t *)sys_font + sizeof(psf1_t) +
-                     ((uint8_t)*text * sys_font->charsize);
-
-    for (int cy = 0; cy < sys_font->charsize; cy++) {
-      int py = y + cy;
-      if (py < 0 || py >= win_h) {
-        glyph++;
-        continue;
-      }
-
-      uint32_t *line = &fb[py * win_w];
-      for (int cx = 0; cx < 8; cx++) {
-        int px = x + cx;
-        if (px >= 0 && px < win_w) {
-          if ((*glyph >> (7 - cx)) & 1) {
-            line[px] = color;
-          }
-        }
-      }
-      glyph++;
+  const unsigned char *p = (const unsigned char *)text;
+  int rows = sys_font->charsize;
+  while (*p) {
+    uint32_t cp = 0;
+    int adv;
+    if (*p < 0x80) {
+      cp = *p; adv = 1;
+    } else {
+      /* Compute remaining bytes lazily — strlen is bounded by ~74 in
+       * htmlview's worst case and these UTF-8 sequences are short. */
+      int rem = 0; const unsigned char *q = p;
+      while (*q && rem < 4) { rem++; q++; }
+      adv = utf8_decode_one_internal(p, rem, &cp);
     }
+
+    const uint8_t *glyph = NULL;
+    if (cp < 0x80) {
+      glyph = (uint8_t *)sys_font + sizeof(psf1_t) + cp * rows;
+    } else if (cp >= 0x0400 && cp <= 0x04FF) {
+      /* GNU Unifont row count is 16 — clamp to what sys_font expects
+       * but we only ship 16 rows so larger charsizes will draw blank
+       * tail rows (fine, no current font is larger). */
+      glyph = cyr_font_8x16[cp - 0x0400];
+    } else if (cp == 0x2014 || cp == 0x2013) {
+      /* en/em dash → ASCII '-' for now. */
+      glyph = (uint8_t *)sys_font + sizeof(psf1_t) + '-' * rows;
+    } else if (cp == 0x00A0) {
+      /* non-breaking space */
+      glyph = (uint8_t *)sys_font + sizeof(psf1_t) + ' ' * rows;
+    } else {
+      glyph = (uint8_t *)sys_font + sizeof(psf1_t) + '?' * rows;
+    }
+
+    eid_draw_glyph_at(fb, win_w, win_h, x, y, glyph,
+                      rows > 16 ? 16 : rows, color);
     x += 8;
-    text++;
+    p += adv;
   }
+}
+
+/* R6/B2c: visible width of a UTF-8 string, in pixels. Each codepoint
+ * is one 8 px cell. Callers that previously used `strlen(s) * 8`
+ * should migrate to this for any string that might carry Cyrillic
+ * or other multi-byte UTF-8. */
+int eid_text_width_utf8(const char *text) {
+  if (!text) return 0;
+  const unsigned char *p = (const unsigned char *)text;
+  int cells = 0;
+  while (*p) {
+    if (*p < 0x80) { cells++; p++; continue; }
+    int rem = 0; const unsigned char *q = p;
+    while (*q && rem < 4) { rem++; q++; }
+    uint32_t cp;
+    int adv = utf8_decode_one_internal(p, rem, &cp);
+    cells++; p += adv;
+  }
+  return cells * 8;
 }
 
 void eid_draw_line(uint32_t *fb, int win_w, int win_h, int x1, int y1, int x2,
