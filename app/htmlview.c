@@ -1074,6 +1074,15 @@ static void copy_title_from_html(const char *html, uint32_t size) {
 
 #include "dom.h"
 
+#ifdef BROWSER_BUILD
+/* Phase J6a: pull QuickJS + ca-bundle in early so parse_html (defined
+ * well above the load_page() switch) can hand the DOM off to scripts.
+ * The original includes lower in the file (inside the load_page
+ * branch) are kept for clarity. */
+#include "qjs_page.h"
+#include "../third_party/ca_bundle/ca_bundle.h"
+#endif
+
 typedef struct {
   char         current[LINE_CHARS + 1];
   int          current_len;
@@ -1323,6 +1332,14 @@ static void parse_html(const char *html, uint32_t size) {
     push_line("(out of memory parsing HTML)", 28, STYLE_MUTED, false);
     return;
   }
+
+#ifdef BROWSER_BUILD
+  /* Phase J6a: hand the parsed tree to QuickJS so inline <script>
+   * tags run before render. Mutations from JS are not yet honored
+   * (J6b), so the render below reflects the post-parse tree as-is —
+   * scripts can still observe the DOM and produce console output. */
+  qjs_run_page_scripts(doc, TAs_MOZ, TAs_MOZ_NUM);
+#endif
 
   walk_ctx_t w;
   memset(&w, 0, sizeof(w));

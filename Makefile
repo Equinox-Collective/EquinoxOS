@@ -246,7 +246,7 @@ APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_RO
 # explicit rules below because they need (a) BearSSL public headers in the
 # include path and (b) libbearssl.a appended at link time.
 APP_ELFS_TLS    = $(ISO_ROOT)/bin/tlsboot.elf $(ISO_ROOT)/bin/tlstest.elf $(ISO_ROOT)/bin/catest.elf $(ISO_ROOT)/bin/httpsget.elf $(ISO_ROOT)/bin/urlget.elf $(ISO_ROOT)/bin/browser.elf
-APP_ELFS_QJS    = $(ISO_ROOT)/bin/jstest.elf $(ISO_ROOT)/bin/domtest.elf $(ISO_ROOT)/bin/jsdomtest.elf $(ISO_ROOT)/bin/jsfetchtest.elf
+APP_ELFS_QJS    = $(ISO_ROOT)/bin/jstest.elf $(ISO_ROOT)/bin/domtest.elf $(ISO_ROOT)/bin/jsdomtest.elf $(ISO_ROOT)/bin/jsfetchtest.elf $(ISO_ROOT)/bin/jspagetest.elf
 
 # DOM tree library — used by domtest, htmlview, browser, and (later) the
 # JS DOM bindings. Lives in its own directory so it isn't auto-folded
@@ -317,11 +317,18 @@ $(ISO_ROOT)/bin/urlget.elf: app/urlget.o $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(BEARSS
 # variant (full HTTP/HTTPS via the phase-5 client). htmlview.elf is built
 # from the same source without the define and keeps its original local-file
 # loading path, so both binaries coexist.
-app/htmlview_browser.o: app/htmlview.c sdk/include/http_client.h sdk/include/url.h sdk/include/dom.h third_party/ca_bundle/ca_bundle.h
-	$(CC) $(USER_CFLAGS) -DBROWSER_BUILD -I./third_party/bearssl/inc -c $< -o $@
+app/htmlview_browser.o: app/htmlview.c sdk/include/http_client.h sdk/include/url.h sdk/include/dom.h third_party/ca_bundle/ca_bundle.h sdk/include/qjs_page.h
+	$(CC) $(USER_CFLAGS) -DBROWSER_BUILD -I./third_party/bearssl/inc -I./third_party/quickjs -c $< -o $@
 
-$(ISO_ROOT)/bin/browser.elf: app/htmlview_browser.o $(HTTP_CLIENT_OBJ) $(DOM_OBJ) $(SDK_OBJS) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(HTTP_CLIENT_OBJ) $(DOM_OBJ) $(BEARSSL_LIB) -o $@
+# browser.elf links the full QuickJS + DOM-bindings + fetch stack so
+# inline <script> on a loaded page runs through phase J6a.
+QJS_PAGE_OBJ := sdk/lib_qjs/qjs_page.o
+
+sdk/lib_qjs/qjs_page.o: sdk/lib_qjs/qjs_page.c sdk/include/qjs_page.h sdk/include/qjs_fetch.h sdk/include/qjs_helpers.h sdk/include/dom_js.h sdk/include/dom.h
+	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -I./third_party/bearssl/inc -c $< -o $@
+
+$(ISO_ROOT)/bin/browser.elf: app/htmlview_browser.o $(HTTP_CLIENT_OBJ) $(DOM_OBJ) $(QJS_PAGE_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(SDK_OBJS) $(QUICKJS_LIB) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(HTTP_CLIENT_OBJ) $(QJS_PAGE_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(DOM_OBJ) $(QUICKJS_LIB) $(BEARSSL_LIB) -o $@
 
 # htmlview.elf — explicit rule (overrides the generic %.elf one) so we
 # can link the DOM library. The compile rule for app/htmlview.o still
@@ -375,6 +382,15 @@ app/jsfetchtest.o: app/jsfetchtest.c sdk/include/qjs_helpers.h sdk/include/qjs_f
 
 $(ISO_ROOT)/bin/jsfetchtest.elf: app/jsfetchtest.o $(QJS_HELPERS_OBJ) $(QJS_FETCH_OBJ) $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(QUICKJS_LIB) $(BEARSSL_LIB)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(QJS_HELPERS_OBJ) $(QJS_FETCH_OBJ) $(HTTP_CLIENT_OBJ) $(QUICKJS_LIB) $(BEARSSL_LIB) -o $@
+
+# jspagetest — phase J6a: dom_parse → qjs_run_page_scripts pipeline,
+# without renderer or network. Loads res/jstest.html (an inline-
+# script-bearing page) so the on-load script path is testable offline.
+app/jspagetest.o: app/jspagetest.c sdk/include/qjs_page.h sdk/include/dom.h
+	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
+
+$(ISO_ROOT)/bin/jspagetest.elf: app/jspagetest.o $(QJS_PAGE_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(DOM_OBJ) $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(QUICKJS_LIB) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(QJS_PAGE_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(DOM_OBJ) $(HTTP_CLIENT_OBJ) $(QUICKJS_LIB) $(BEARSSL_LIB) -o $@
 
 sdk/lib_dom/dom.o: sdk/lib_dom/dom.c sdk/include/dom.h
 	$(CC) $(USER_CFLAGS) -c $< -o $@
