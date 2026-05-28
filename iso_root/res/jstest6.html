@@ -1,0 +1,19 @@
+<!doctype html>
+<html>
+<head><title>F2 form test</title></head>
+<body>
+<h2>F2 form test</h2>
+<p>Type a query and press Enter, or click Search.</p>
+
+<form action="res/jstest6_ok.html" method="get">
+  <input type="text"   name="q"     value="hello world">
+  <input type="hidden" name="src"   value="equos">
+  <input type="text"   name="empty" value="">
+  <button type="submit">Search</button>
+  <input type="submit" value="Go!">
+</form>
+
+<p>(After submit, the new page URL should end with
+   <code>?q=hello+world&amp;src=equos&amp;empty=</code>.)</p>
+</body>
+</html>
