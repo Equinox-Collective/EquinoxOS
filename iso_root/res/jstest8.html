@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head><title>N0 location.href nav</title></head>
+<body>
+<h2>R5/N0: JS-driven navigation</h2>
+<p>The button below sets <code>location.href</code> from JS instead of
+   using an anchor or a form. Should land on <code>jstest6_ok.html?from=js</code>.</p>
+
+<button id="go">Go via location.href</button>
+<button id="ext">Go to jstest7</button>
+
+<p>Status: <span id="status">(idle)</span></p>
+
+<script>
+  var s = document.getElementById('status');
+  document.getElementById('go').addEventListener('click', function(){
+    s.textContent = 'navigating via location.href';
+    location.href = 'jstest6_ok.html?from=js';
+  });
+  document.getElementById('ext').addEventListener('click', function(){
+    location.href = 'jstest7.html';
+  });
+</script>
+</body>
+</html>
