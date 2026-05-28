@@ -9,6 +9,10 @@
 #include "qjs_window.h"   /* qjs_window_set_history_length proto */
 #include <image_decode.h> /* eq_image_decode for <img> rendering    */
 #endif
+/* dom.h has no BROWSER_BUILD gates and the DOM walker (w_emit_node)
+ * is shared by both builds — include it unconditionally so
+ * apply_css_for_node can reference dom_node_t in either config. */
+#include "dom.h"
 
 /* Defined in sdk/lib/string.c but not declared in sdk/include/string.h yet.
  * Pulled forward here to silence -Wimplicit-function-declaration in the
@@ -255,6 +259,26 @@ typedef struct {
   int max_width;  /* max-width in pixels (0 = unset)   */
   int font_size;  /* font-size hint: 0=normal, 1=large, 2=xlarge */
   bool uppercase; /* text-transform: uppercase         */
+  /* R6/L4: flex (and L5: grid) container properties.
+   *   display: 0 = unset (inherit/block), 1 = flex, 2 = grid
+   *            (display:none is encoded in `display_none` above).
+   *   flex_dir: 0 = row, 1 = column.
+   *   gap: pixels between flex/grid items (both axes).
+   *   justify: 0 = start, 1 = end, 2 = center, 3 = space-between.
+   *   align_items: 0 = stretch, 1 = start, 2 = end, 3 = center.
+   *   flex_grow / flex_basis: item-level. Read by the *parent*
+   *     flex container when distributing remaining width.
+   *     flex_basis=0 means "auto" (intrinsic). */
+  int display;
+  int flex_dir;
+  int gap_px;
+  int justify;
+  int align_items;
+  int flex_grow;
+  int flex_basis;
+  /* L5 (grid): raw `grid-template-columns` string, parsed by the
+   * container when laying out children. */
+  char grid_cols[64];
 } css_rule_t;
 
 static css_rule_t css_rules[MAX_CSS_RULES];
@@ -494,6 +518,19 @@ typedef struct {
   int max_width;
   int font_size;
   bool uppercase;
+  /* R6/L4+L5: container CSS that controls how the *children* of
+   * the current element are laid out. NOT inherited; these are
+   * read from the element's own CSS rule and used to dispatch
+   * to emit_flex_container / emit_grid_container instead of the
+   * normal recursive emit. */
+  int display;
+  int flex_dir;
+  int gap_px;
+  int justify;
+  int align_items;
+  int flex_grow;
+  int flex_basis;
+  char grid_cols[64];
 } style_state_t;
 
 static eid_font_t *h_font = NULL;
@@ -539,6 +576,30 @@ static void apply_css_to_current_state(const css_rule_t *r) {
     style_stack[style_depth].font_size = r->font_size;
   if (r->uppercase)
     style_stack[style_depth].uppercase = true;
+  /* R6/L4+L5: container layout. These OVERWRITE rather than OR
+   * because they describe how this element's children are laid
+   * out; a flex/grid declaration replaces any inherited value. */
+  if (r->display != 0)
+    style_stack[style_depth].display = r->display;
+  if (r->flex_dir != 0)
+    style_stack[style_depth].flex_dir = r->flex_dir;
+  if (r->gap_px > 0)
+    style_stack[style_depth].gap_px = r->gap_px;
+  if (r->justify != 0)
+    style_stack[style_depth].justify = r->justify;
+  if (r->align_items != 0)
+    style_stack[style_depth].align_items = r->align_items;
+  /* flex_grow / flex_basis describe how this element behaves as
+   * an item *within* a parent flex container; the parent reads
+   * them via lookup_flex_item_props(). They still land here so a
+   * child container that's also a flex item can be re-queried. */
+  if (r->flex_grow > 0)
+    style_stack[style_depth].flex_grow = r->flex_grow;
+  if (r->flex_basis > 0)
+    style_stack[style_depth].flex_basis = r->flex_basis;
+  if (r->grid_cols[0])
+    strncpy(style_stack[style_depth].grid_cols, r->grid_cols,
+            sizeof(style_stack[style_depth].grid_cols) - 1);
 }
 
 static void pop_style_state(void) {
@@ -750,7 +811,66 @@ static void apply_css_property(css_rule_t *rule, const char *prop,
   } else if (strncmp(prop, "display", 7) == 0) {
     if (strstr(val, "none")) {
       rule->display_none = true;
+    } else if (strstr(val, "grid")) {
+      /* check grid before flex because "inline-grid" / "grid"
+       * substrings both contain "grid"; flex check below also
+       * matches "inline-flex" — both are accepted. */
+      rule->display = 2;
+    } else if (strstr(val, "flex")) {
+      rule->display = 1;
     }
+  } else if (strncmp(prop, "flex-direction", 14) == 0) {
+    if (strstr(val, "column")) rule->flex_dir = 1;
+    else                        rule->flex_dir = 0;
+  } else if (strncmp(prop, "gap", 3) == 0 &&
+             (prop[3] == '\0' || prop[3] == ':' )) {
+    int px = 0; const char *v = val;
+    while (*v >= '0' && *v <= '9') { px = px * 10 + (*v - '0'); v++; }
+    if (px > 0) rule->gap_px = px;
+  } else if (strncmp(prop, "justify-content", 15) == 0) {
+    if      (strstr(val, "space-between")) rule->justify = 3;
+    else if (strstr(val, "center"))        rule->justify = 2;
+    else if (strstr(val, "flex-end")  ||
+             strstr(val, "end"))           rule->justify = 1;
+    else                                   rule->justify = 0;
+  } else if (strncmp(prop, "align-items", 11) == 0) {
+    if      (strstr(val, "center"))        rule->align_items = 3;
+    else if (strstr(val, "flex-end")  ||
+             strstr(val, "end"))           rule->align_items = 2;
+    else if (strstr(val, "flex-start")||
+             strstr(val, "start"))         rule->align_items = 1;
+    else                                   rule->align_items = 0;
+  } else if (strncmp(prop, "flex-basis", 10) == 0) {
+    int px = 0; const char *v = val;
+    while (*v >= '0' && *v <= '9') { px = px * 10 + (*v - '0'); v++; }
+    if (px > 0) rule->flex_basis = px;
+  } else if (strncmp(prop, "flex-grow", 9) == 0) {
+    int g = 0; const char *v = val;
+    while (*v >= '0' && *v <= '9') { g = g * 10 + (*v - '0'); v++; }
+    if (g > 0) rule->flex_grow = g;
+  } else if (strncmp(prop, "flex", 4) == 0 &&
+             (prop[4] == '\0' || prop[4] == ':')) {
+    /* CSS `flex: <grow> <shrink>? <basis>?` shorthand. We honour
+     * the first number as grow, and if a second number / Xpx
+     * follows it lands in basis. The common cases are `flex: 1`
+     * (grow=1, basis=0) and `flex: 0 0 200px` (basis=200). */
+    int g = 0; const char *v = val;
+    while (*v == ' ') v++;
+    while (*v >= '0' && *v <= '9') { g = g * 10 + (*v - '0'); v++; }
+    if (g > 0) rule->flex_grow = g;
+    while (*v == ' ' || (*v >= '0' && *v <= '9')) v++; /* skip shrink */
+    int basis = 0;
+    while (*v == ' ') v++;
+    while (*v >= '0' && *v <= '9') { basis = basis * 10 + (*v - '0'); v++; }
+    if (basis > 0) rule->flex_basis = basis;
+  } else if (strncmp(prop, "grid-template-columns", 21) == 0) {
+    /* Store the raw value; the grid container parses it at
+     * layout time so we don't lose precision (1fr vs 200px etc). */
+    int n = 0;
+    while (val[n] && n < (int)sizeof(rule->grid_cols) - 1) {
+      rule->grid_cols[n] = val[n]; n++;
+    }
+    rule->grid_cols[n] = 0;
   } else if (strncmp(prop, "padding", 7) == 0 && prop[7] == '\0') {
     /* Convert px to line-units: rough heuristic */
     int px = 0;
@@ -1102,17 +1222,8 @@ static void extract_attr(const char *tag, const char *attr, char *out,
 }
 
 /* ── Apply CSS overrides for the current element ─────────────── */
-static void apply_css_for_element(const char *tag) {
-  char elem[MAX_SELECTOR];
-  char cls[MAX_CSS_CLASS];
-  char id[MAX_CSS_CLASS];
-  char inline_style[256];
-
-  extract_element_name(tag, elem, MAX_SELECTOR);
-  extract_attr(tag, "class", cls, MAX_CSS_CLASS);
-  extract_attr(tag, "id", id, MAX_CSS_CLASS);
-  extract_attr(tag, "style", inline_style, sizeof(inline_style));
-
+static void apply_css_with_attrs(const char *elem, const char *cls,
+                                 const char *id, const char *inline_style) {
   /* 1. Stylesheet rules (element, .class, #id, element.class selectors) */
   for (int i = 0; i < css_rule_count; i++) {
     const css_rule_t *r = &css_rules[i];
@@ -1166,9 +1277,41 @@ static void apply_css_for_element(const char *tag) {
   }
 
   /* 2. Inline style attribute */
-  if (inline_style[0]) {
+  if (inline_style && inline_style[0]) {
     parse_css_declarations_to_state(inline_style);
   }
+}
+
+/* Legacy entry: takes a raw tag string (e.g. `a class="x" href="y"`)
+ * and parses its attributes out of the string. Used by the legacy
+ * parse_html() pipeline that doesn't have a DOM at hand. */
+static void apply_css_for_element(const char *tag) {
+  char elem[MAX_SELECTOR];
+  char cls[MAX_CSS_CLASS];
+  char id[MAX_CSS_CLASS];
+  char inline_style[256];
+
+  extract_element_name(tag, elem, MAX_SELECTOR);
+  extract_attr(tag, "class", cls, MAX_CSS_CLASS);
+  extract_attr(tag, "id", id, MAX_CSS_CLASS);
+  extract_attr(tag, "style", inline_style, sizeof(inline_style));
+
+  apply_css_with_attrs(elem, cls, id, inline_style);
+}
+
+/* R6/L4: DOM-walk entry. Reads class/id/style directly off the
+ * DOM node (the previous code path was passing only the tag name
+ * to apply_css_for_element, so class/id selectors silently
+ * missed for every element walked through the DOM tree — that
+ * was effectively breaking *all* class-based CSS during the
+ * w_emit_node pass). */
+static void apply_css_for_node(dom_node_t *n) {
+  if (!n || !n->tag_name) return;
+  const char *cls = dom_get_attr(n, "class");
+  const char *id  = dom_get_attr(n, "id");
+  const char *st  = dom_get_attr(n, "style");
+  apply_css_with_attrs(n->tag_name, cls ? cls : "", id ? id : "",
+                       st ? st : "");
 }
 
 static void parse_css_declarations_to_state(const char *decl) {
@@ -1664,6 +1807,316 @@ static void w_set_link_context(const dom_node_t *n) {
   tag_context[o] = 0;
 }
 
+/* Forward decl: emit_flex_container / emit_grid_container call
+ * w_emit_node via render_subtree, but they themselves are called
+ * from w_emit_node, so we need a declaration up front. */
+static void w_emit_node(walk_ctx_t *w, dom_node_t *n);
+/* L3 helpers live further down the file (just above
+ * rebuild_lines_from_dom); flex / grid containers call into
+ * them. */
+static void render_subtree(walk_ctx_t *w, dom_node_t *node,
+                           int frame_x, int frame_y, int frame_w,
+                           int *out_first, int *out_count, int *out_h);
+static void layout_translate_range(int first, int count, int dx, int dy);
+
+/* ─────────────────────────────────────────────────────────────────
+ * R6/L4: flex container layout.
+ *
+ * Called by w_emit_node when the current element's CSS resolves
+ * display:flex. Iterates the element's children, decides widths
+ * for flex-direction:row (each child gets a column-shaped sub-
+ * frame), and drops back to vertical stacking for
+ * flex-direction:column. In all cases `gap` and `align-items`
+ * are honoured.
+ *
+ * Width distribution (row):
+ *   - sum_basis = Σ child.flex_basis (children whose basis > 0
+ *                                     consume their basis verbatim)
+ *   - remaining = container_w − sum_basis − (n−1)*gap
+ *   - sum_grow  = Σ child.flex_grow  (default 0; "flex:1" sets to 1)
+ *   - any child with flex_grow > 0 gets:
+ *         child_w = basis + remaining * grow / sum_grow
+ *   - children with neither basis nor grow get an equal share of
+ *     whatever's left (i.e. they behave like flex:1).
+ *
+ * Height computation (row):
+ *   - render_subtree each child into its column.
+ *   - row height = max(child heights).
+ *   - apply align-items: stretch (default) leaves children as is;
+ *     start/end/center re-translate each child vertically within
+ *     the row.
+ *
+ * Column direction:
+ *   - children are stacked normally with `gap` separation; no
+ *     width splitting (each child gets the full container width).
+ *
+ * Justify-content (row):
+ *   - flex-start (default): no horizontal redistribution.
+ *   - center: shift each child by leftover/2.
+ *   - flex-end: shift each child by leftover.
+ *   - space-between: split leftover between gaps.
+ *
+ * The function returns after handling the children; the caller
+ * skips the normal child-recursion loop. The container's own
+ * outer style stack frame (push_style_state above) is left
+ * untouched and will be popped after the postlude.
+ * ────────────────────────────────────────────────────────────── */
+
+/* Helper: read an element's flex-item props (basis, grow) without
+ * touching the global style stack. Used by emit_flex_container
+ * to decide each child's width. */
+typedef struct {
+  int basis;
+  int grow;
+  bool has_grow;
+  bool has_basis;
+} flex_item_props_t;
+
+static void lookup_flex_item_props(dom_node_t *n, flex_item_props_t *out) {
+  out->basis = 0; out->grow = 0;
+  out->has_basis = false; out->has_grow = false;
+  if (!n || !n->tag_name) return;
+  const char *cls = dom_get_attr(n, "class");
+  const char *id  = dom_get_attr(n, "id");
+  const char *st  = dom_get_attr(n, "style");
+
+  /* Walk the global stylesheet rules and accumulate any flex-grow
+   * / flex-basis that matches this element. Mirrors apply_css's
+   * matching but doesn't touch style_stack. */
+  for (int i = 0; i < css_rule_count; i++) {
+    const css_rule_t *r = &css_rules[i];
+    bool match = false;
+    if (r->selector[0] == '.') {
+      if (cls && has_class(cls, r->selector + 1)) match = true;
+    } else if (r->selector[0] == '#') {
+      if (id && strcmp(r->selector + 1, id) == 0) match = true;
+    } else {
+      char sel_elem[MAX_SELECTOR];
+      int dot_idx = -1, hash_idx = -1;
+      for (int k = 0; r->selector[k]; k++) {
+        if (r->selector[k] == '.') { dot_idx = k; break; }
+        if (r->selector[k] == '#') { hash_idx = k; break; }
+      }
+      if (dot_idx != -1) {
+        strncpy(sel_elem, r->selector, dot_idx);
+        sel_elem[dot_idx] = 0;
+        if (strcmp(sel_elem, n->tag_name) == 0 &&
+            cls && has_class(cls, r->selector + dot_idx + 1)) match = true;
+      } else if (hash_idx != -1) {
+        strncpy(sel_elem, r->selector, hash_idx);
+        sel_elem[hash_idx] = 0;
+        if (strcmp(sel_elem, n->tag_name) == 0 &&
+            id && strcmp(r->selector + hash_idx + 1, id) == 0) match = true;
+      } else {
+        if (strcmp(r->selector, n->tag_name) == 0) match = true;
+      }
+    }
+    if (match) {
+      if (r->flex_grow  > 0) { out->grow  = r->flex_grow;  out->has_grow  = true; }
+      if (r->flex_basis > 0) { out->basis = r->flex_basis; out->has_basis = true; }
+    }
+  }
+  /* Inline style overrides stylesheet matches. */
+  if (st && st[0]) {
+    css_rule_t tmp;
+    memset(&tmp, 0, sizeof(tmp));
+    parse_css_declarations(&tmp, st, (int)strlen(st));
+    if (tmp.flex_grow  > 0) { out->grow  = tmp.flex_grow;  out->has_grow  = true; }
+    if (tmp.flex_basis > 0) { out->basis = tmp.flex_basis; out->has_basis = true; }
+  }
+}
+
+/* Count renderable element children (skip text-only / comment
+ * nodes; they get absorbed into whichever flex item contains
+ * them by virtue of being inside that item's subtree). */
+static int count_flex_children(dom_node_t *parent) {
+  int n = 0;
+  for (dom_node_t *c = parent->first_child; c; c = c->next_sibling) {
+    if (c->type == DOM_NODE_ELEMENT) n++;
+  }
+  return n;
+}
+
+static void emit_flex_container(walk_ctx_t *w, dom_node_t *n) {
+  layout_frame_t *parent = layout_top();
+  int container_x = parent->x;
+  int container_y = parent->y;
+  int container_w = parent->w;
+  int flex_dir    = style_stack[style_depth].flex_dir;
+  int gap         = style_stack[style_depth].gap_px;
+  int justify     = style_stack[style_depth].justify;
+  int align       = style_stack[style_depth].align_items;
+
+  /* Flush any pending inline text from the parent first; we
+   * don't want the container's children to inherit a half-built
+   * word run from before. */
+  w_flush(w);
+
+  /* Column direction → no horizontal splitting. Just walk the
+   * children normally but insert `gap` between them. Cheap and
+   * sufficient because the existing block stream already stacks
+   * vertically. The only thing we add is the gap. */
+  if (flex_dir == 1) {
+    int first = 1;
+    for (dom_node_t *c = n->first_child; c; c = c->next_sibling) {
+      if (c->type != DOM_NODE_ELEMENT) {
+        /* keep text/comment in-line behaviour for column flex */
+        w_emit_node(w, c);
+        continue;
+      }
+      if (!first && gap > 0) {
+        layout_top()->y += gap;
+      }
+      w_emit_node(w, c);
+      first = 0;
+    }
+    w_flush(w);
+    return;
+  }
+
+  /* ---- flex-direction: row ---- */
+  int nchildren = count_flex_children(n);
+  if (nchildren <= 0) {
+    /* No element children → fall back to normal recursion so
+     * orphan text still gets rendered. */
+    for (dom_node_t *c = n->first_child; c; c = c->next_sibling)
+      w_emit_node(w, c);
+    w_flush(w);
+    return;
+  }
+
+  /* Single child row is the same as normal recursion. */
+  if (nchildren == 1) {
+    for (dom_node_t *c = n->first_child; c; c = c->next_sibling)
+      w_emit_node(w, c);
+    w_flush(w);
+    return;
+  }
+
+  /* If the container is too narrow to give every child at least
+   * MIN_COL_W pixels, degrade to vertical stacking. This is
+   * critical at our 604-px content width: 6+ columns just turn
+   * into chopped text. */
+  const int MIN_COL_W = 80;
+  int gross_w = container_w - (nchildren - 1) * gap;
+  if (gross_w / nchildren < MIN_COL_W) {
+    int first = 1;
+    for (dom_node_t *c = n->first_child; c; c = c->next_sibling) {
+      if (c->type != DOM_NODE_ELEMENT) { w_emit_node(w, c); continue; }
+      if (!first && gap > 0) layout_top()->y += gap;
+      w_emit_node(w, c);
+      first = 0;
+    }
+    w_flush(w);
+    return;
+  }
+
+  /* Compute each child's column width. */
+  int widths[16] = {0};
+  int starts[16] = {0};
+  int first_idx[16];
+  int counts[16];
+  int heights[16] = {0};
+
+  if (nchildren > 16) nchildren = 16; /* clamp; rare in practice */
+
+  /* Pass 1: gather props. */
+  int sum_basis = 0;
+  int sum_grow  = 0;
+  int n_auto    = 0;
+  flex_item_props_t props[16] = {{0}};
+  {
+    int idx = 0;
+    for (dom_node_t *c = n->first_child; c && idx < nchildren;
+         c = c->next_sibling) {
+      if (c->type != DOM_NODE_ELEMENT) continue;
+      lookup_flex_item_props(c, &props[idx]);
+      if (props[idx].has_basis) sum_basis += props[idx].basis;
+      if (props[idx].has_grow ) sum_grow  += props[idx].grow;
+      if (!props[idx].has_basis && !props[idx].has_grow) n_auto++;
+      idx++;
+    }
+  }
+
+  int remaining = container_w - sum_basis - (nchildren - 1) * gap;
+  if (remaining < 0) remaining = 0;
+  /* Pool to distribute to grow-children. If no child has grow but
+   * some are "auto" (neither grow nor basis), treat each auto as
+   * flex:1 — this is the dominant case (3-column "div / div / div"
+   * without explicit flex on any item). */
+  int eff_sum_grow = sum_grow;
+  if (eff_sum_grow == 0 && n_auto > 0) eff_sum_grow = n_auto;
+
+  /* Pass 2: assign widths. */
+  for (int i = 0; i < nchildren; i++) {
+    int wpx = props[i].has_basis ? props[i].basis : 0;
+    if (props[i].has_grow) {
+      wpx += (remaining * props[i].grow) / (eff_sum_grow > 0 ? eff_sum_grow : 1);
+    } else if (!props[i].has_basis && n_auto > 0) {
+      wpx += (remaining * 1) / (eff_sum_grow > 0 ? eff_sum_grow : 1);
+    }
+    if (wpx < MIN_COL_W) wpx = MIN_COL_W;
+    widths[i] = wpx;
+  }
+
+  /* Justify-content: compute extra horizontal offset per column. */
+  int total_used = (nchildren - 1) * gap;
+  for (int i = 0; i < nchildren; i++) total_used += widths[i];
+  int leftover = container_w - total_used;
+  if (leftover < 0) leftover = 0;
+
+  int extra_gap = gap;
+  int x_cursor  = container_x;
+  if (justify == 2 /*center*/) {
+    x_cursor += leftover / 2;
+  } else if (justify == 1 /*flex-end*/) {
+    x_cursor += leftover;
+  } else if (justify == 3 /*space-between*/ && nchildren > 1) {
+    extra_gap = gap + (leftover / (nchildren - 1));
+  }
+  for (int i = 0; i < nchildren; i++) {
+    starts[i] = x_cursor;
+    x_cursor += widths[i] + extra_gap;
+  }
+
+  /* Pass 3: render each child into its column. We anchor each
+   * column at (starts[i], container_y, widths[i]); render_subtree
+   * pushes that as a private frame so emitted lines get correct
+   * box_x/box_y. */
+  int max_h = 0;
+  {
+    int idx = 0;
+    for (dom_node_t *c = n->first_child; c && idx < nchildren;
+         c = c->next_sibling) {
+      if (c->type != DOM_NODE_ELEMENT) continue;
+      int first = -1, count = 0, h = 0;
+      render_subtree(w, c, starts[idx], container_y, widths[idx],
+                     &first, &count, &h);
+      first_idx[idx] = first;
+      counts[idx]    = count;
+      heights[idx]   = h;
+      if (h > max_h) max_h = h;
+      idx++;
+    }
+  }
+
+  /* Pass 4: align-items vertical fixup. */
+  if (align != 0) {
+    for (int i = 0; i < nchildren; i++) {
+      if (counts[i] <= 0) continue;
+      int dy = 0;
+      if      (align == 3 /*center*/) dy = (max_h - heights[i]) / 2;
+      else if (align == 2 /*end*/)    dy = (max_h - heights[i]);
+      /* align == 1 (start): dy = 0 */
+      if (dy > 0) layout_translate_range(first_idx[i], counts[i], 0, dy);
+    }
+  }
+
+  /* Advance the parent frame's cursor by the row's max height. */
+  parent->y = container_y + max_h;
+  w_flush(w);
+}
+
 static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
   if (!n) return;
 
@@ -1699,7 +2152,7 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
   }
 
   push_style_state();
-  apply_css_for_element(tag);
+  apply_css_for_node(n);
   if (style_stack[style_depth].display_none) { pop_style_state(); return; }
 
   style_save_t save = { w->style, w->in_pre };
@@ -1946,8 +2399,16 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
   }
 
   /* ---- recurse into children ----------------------------------- */
-  for (dom_node_t *c = n->first_child; c; c = c->next_sibling) {
-    w_emit_node(w, c);
+  /* R6/L4: dispatch to the flex layout instead of plain recursion
+   * when the element resolved display:flex. Grid (display:2) will
+   * land in L5. */
+  int disp = style_stack[style_depth].display;
+  if (disp == 1) {
+    emit_flex_container(w, n);
+  } else {
+    for (dom_node_t *c = n->first_child; c; c = c->next_sibling) {
+      w_emit_node(w, c);
+    }
   }
 
   /* ---- per-tag postlude ---------------------------------------- */
