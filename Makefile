@@ -334,6 +334,10 @@ QJS_WINDOW_OBJ  := sdk/lib_qjs/qjs_window.o
 QJS_HELPERS_OBJ := sdk/lib_qjs/qjs_helpers.o
 DOM_JS_OBJ      := sdk/lib_qjs/dom_js.o
 QJS_FETCH_OBJ   := sdk/lib_qjs/qjs_fetch.o
+IMAGE_DECODE_OBJ := sdk/lib_image/image_decode.o
+
+sdk/lib_image/image_decode.o: sdk/lib_image/image_decode.c sdk/include/image_decode.h third_party/stb_image/stb_image.h
+	$(CC) $(USER_CFLAGS) -I./third_party/stb_image -Wno-unused-function -Wno-implicit-fallthrough -c $< -o $@
 
 sdk/lib_qjs/qjs_page.o: sdk/lib_qjs/qjs_page.c sdk/include/qjs_page.h sdk/include/qjs_fetch.h sdk/include/qjs_helpers.h sdk/include/dom_js.h sdk/include/qjs_window.h sdk/include/dom.h
 	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -I./third_party/bearssl/inc -c $< -o $@
@@ -341,8 +345,8 @@ sdk/lib_qjs/qjs_page.o: sdk/lib_qjs/qjs_page.c sdk/include/qjs_page.h sdk/includ
 sdk/lib_qjs/qjs_window.o: sdk/lib_qjs/qjs_window.c sdk/include/qjs_window.h sdk/include/qjs_helpers.h
 	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
 
-$(ISO_ROOT)/bin/browser.elf: app/htmlview_browser.o $(HTTP_CLIENT_OBJ) $(DOM_OBJ) $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(SDK_OBJS) $(QUICKJS_LIB) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(HTTP_CLIENT_OBJ) $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(DOM_OBJ) $(QUICKJS_LIB) $(BEARSSL_LIB) -o $@
+$(ISO_ROOT)/bin/browser.elf: app/htmlview_browser.o $(HTTP_CLIENT_OBJ) $(DOM_OBJ) $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(IMAGE_DECODE_OBJ) $(SDK_OBJS) $(QUICKJS_LIB) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(HTTP_CLIENT_OBJ) $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(IMAGE_DECODE_OBJ) $(DOM_OBJ) $(QUICKJS_LIB) $(BEARSSL_LIB) -o $@
 
 # htmlview.elf — explicit rule (overrides the generic %.elf one) so we
 # can link the DOM library. The compile rule for app/htmlview.o still
