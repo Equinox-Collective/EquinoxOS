@@ -429,6 +429,12 @@ clean:
 	@if exist $(OBJ_DIR) rmdir /s /q $(OBJ_DIR)
 	@if exist sdk\lib\*.o del /q sdk\lib\*.o
 	@if exist sdk\lib\*.d del /q sdk\lib\*.d
+	@if exist sdk\lib_qjs\*.o del /q sdk\lib_qjs\*.o
+	@if exist sdk\lib_qjs\*.d del /q sdk\lib_qjs\*.d
+	@if exist sdk\lib_dom\*.o del /q sdk\lib_dom\*.o
+	@if exist sdk\lib_dom\*.d del /q sdk\lib_dom\*.d
+	@if exist sdk\lib_http\*.o del /q sdk\lib_http\*.o
+	@if exist sdk\lib_http\*.d del /q sdk\lib_http\*.d
 	@if exist app\*.o del /q app\*.o
 	@if exist app\*.d del /q app\*.d
 	@if exist kernel.elf del /q kernel.elf
@@ -440,6 +446,9 @@ else
 clean:
 	@rm -rf $(OBJ_DIR)
 	@rm -f sdk/lib/*.o sdk/lib/*.d
+	@rm -f sdk/lib_qjs/*.o sdk/lib_qjs/*.d
+	@rm -f sdk/lib_dom/*.o sdk/lib_dom/*.d
+	@rm -f sdk/lib_http/*.o sdk/lib_http/*.d
 	@rm -f app/*.o app/*.d
 	@rm -f kernel.elf equos.iso
 	@rm -f app/sysgui/sysgui.elf
