@@ -1056,7 +1056,12 @@ static void read_tag(const char *html, uint32_t size, uint32_t *pos, char *tag,
   tag[len] = '\0';
 }
 
-static int visible_lines(void) { return (WIN_H - CONTENT_Y - 20) / LINE_H; }
+/* Status bar is 18 px; content starts at CONTENT_Y + 14 (page title bar
+ * offset matches what render() uses). Leave LINE_H slack so the
+ * bottom-most line isn't clipped against the status bar border. */
+static int visible_lines(void) {
+  return (WIN_H - 18 - (CONTENT_Y + 14) - LINE_H) / LINE_H;
+}
 
 /* ── Apply CSS overrides for the current element ─────────────── */
 
@@ -2360,9 +2365,14 @@ static void render(const char *filename) {
     scroll_line = max_scroll;
 
   int cur_y = CONTENT_Y + 14; /* Offset for the page title bar */
+  /* Bottom of usable content (above the 18-px status bar). Lines
+   * that don't fully fit are skipped so glyphs aren't truncated. */
+  const int content_bottom = WIN_H - 18;
   for (int i = 0; i < v_lines; i++) {
     int idx = scroll_line + i;
     if (idx >= line_count)
+      break;
+    if (cur_y + LINE_H > content_bottom)
       break;
 
     int cur_x = CONTENT_X + (lines[idx].indent ? 18 : 0);
