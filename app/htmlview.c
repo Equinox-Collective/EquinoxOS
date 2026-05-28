@@ -1321,11 +1321,13 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
     w->in_pre = save.in_pre;
     return;
   } else if (tag_eq(tag, "input")) {
-    /* R4/F1: emit an editable input line. We only render text-style
-     * inputs here; type="button"/"submit" buttons go through the
-     * <button> path. The widget text is the current `value`
-     * attribute; if no value is present we leave the buffer empty.
-     * <input> is void in HTML, so don't try to descend. */
+    /* R4/F1: emit an editable input line. We render text-style inputs
+     * as STYLE_INPUT widgets, and (R4/F2) type="submit" as STYLE_BUTTON
+     * widgets carrying the input node so the click handler can submit
+     * the enclosing form. Other types (hidden / file / image / reset /
+     * button) are skipped at render time but still participate in
+     * form_collect (except where excluded). <input> is void in HTML,
+     * so don't descend. */
     const char *type = dom_get_attr(n, "type");
     bool is_textish = (!type ||
                        strcasecmp(type, "text")   == 0 ||
@@ -1334,6 +1336,7 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
                        strcasecmp(type, "email")  == 0 ||
                        strcasecmp(type, "tel")    == 0 ||
                        strcasecmp(type, "password") == 0);
+    bool is_submit  = type && strcasecmp(type, "submit") == 0;
     if (is_textish) {
       w_flush(w);
       const char *val = dom_get_attr(n, "value");
@@ -1344,6 +1347,17 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
       vbuf[vlen] = 0;
       blank_line();
       push_line(vbuf, vlen, STYLE_INPUT, false);
+      lines[line_count - 1].widget_node = n;
+    } else if (is_submit) {
+      w_flush(w);
+      const char *val = dom_get_attr(n, "value");
+      const char *label = (val && val[0]) ? val : "Submit";
+      int li = (int)strlen(label);
+      if (li > LINE_CHARS) li = LINE_CHARS;
+      char lbuf[LINE_CHARS + 1];
+      memcpy(lbuf, label, li); lbuf[li] = 0;
+      blank_line();
+      push_line(lbuf, li, STYLE_BUTTON, false);
       lines[line_count - 1].widget_node = n;
     }
     pop_style_state();
@@ -1478,6 +1492,131 @@ static void parse_html(const char *html, uint32_t size) {
 
   rebuild_lines_from_dom();
 }
+
+#ifdef BROWSER_BUILD
+/* --------------------------------------------------------------------
+ * R4/F2 — HTML form submission
+ *
+ * Triggered by:
+ *   - click on `<input type="submit">` (rendered as a STYLE_BUTTON)
+ *   - click on `<button type="submit">`
+ *   - Enter pressed while a STYLE_INPUT widget is focused
+ *
+ * Walks the form's descendants, collects name=value pairs from named
+ * inputs (skipping submit/button/reset/image/file/no-name), URL-encodes
+ * them, and navigates to `action`?...query. POST is downgraded to GET
+ * for now (no body upload path in HTTP client yet) — same observable
+ * behaviour for static pages.
+ *
+ * A `submit` event is dispatched to the form node before navigation so
+ * scripts can observe; preventDefault is not implemented yet, so JS
+ * cannot cancel.
+ * ------------------------------------------------------------------ */
+static dom_node_t *find_form_ancestor(dom_node_t *n) {
+  for (dom_node_t *p = n ? n->parent : NULL; p; p = p->parent) {
+    if (p->type == DOM_NODE_ELEMENT && p->tag_name &&
+        strcmp(p->tag_name, "form") == 0) return p;
+  }
+  return NULL;
+}
+
+static int url_encode_into(const char *s, char *dst, int j, int cap) {
+  static const char hex[] = "0123456789ABCDEF";
+  for (int i = 0; s && s[i] && j + 3 < cap; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+        (c >= '0' && c <= '9') ||
+         c == '-' || c == '_' || c == '.' || c == '~') {
+      dst[j++] = (char)c;
+    } else if (c == ' ') {
+      dst[j++] = '+';
+    } else {
+      dst[j++] = '%';
+      dst[j++] = hex[(c >> 4) & 0xF];
+      dst[j++] = hex[c & 0xF];
+    }
+  }
+  if (j < cap) dst[j] = 0;
+  return j;
+}
+
+static void form_collect(dom_node_t *node, char *qbuf, int *jp, int cap, int *first) {
+  if (!node) return;
+  if (node->type == DOM_NODE_ELEMENT && node->tag_name &&
+      strcmp(node->tag_name, "input") == 0) {
+    const char *name = dom_get_attr(node, "name");
+    const char *type = dom_get_attr(node, "type");
+    bool skip = false;
+    if (type) {
+      if (strcasecmp(type, "submit") == 0 ||
+          strcasecmp(type, "button") == 0 ||
+          strcasecmp(type, "reset")  == 0 ||
+          strcasecmp(type, "image")  == 0 ||
+          strcasecmp(type, "file")   == 0) skip = true;
+    }
+    if (name && name[0] && !skip) {
+      const char *val = dom_get_attr(node, "value");
+      if (!*first && *jp < cap - 1) qbuf[(*jp)++] = '&';
+      *first = 0;
+      *jp = url_encode_into(name, qbuf, *jp, cap);
+      if (*jp < cap - 1) qbuf[(*jp)++] = '=';
+      *jp = url_encode_into(val ? val : "", qbuf, *jp, cap);
+    }
+  }
+  for (dom_node_t *c = node->first_child; c; c = c->next_sibling)
+    form_collect(c, qbuf, jp, cap, first);
+}
+
+static void submit_form_for(dom_node_t *trigger) {
+  dom_node_t *form = find_form_ancestor(trigger);
+  if (!form) return;
+
+  if (g_page) qjs_page_dispatch_event(g_page, form, "submit");
+
+  const char *action_raw = dom_get_attr(form, "action");
+  const char *action = (action_raw && action_raw[0]) ? action_raw : current_url;
+
+  char qbuf[1024]; int jp = 0; int first = 1;
+  form_collect(form, qbuf, &jp, (int)sizeof qbuf, &first);
+  qbuf[jp] = 0;
+
+  char resolved[256];
+  resolve_url(current_url, action, resolved);
+
+  if (jp > 0) {
+    char sep = strchr(resolved, '?') ? '&' : '?';
+    int rl = (int)strlen(resolved);
+    if (rl + 1 + jp < (int)sizeof resolved) {
+      resolved[rl++] = sep;
+      memcpy(resolved + rl, qbuf, (size_t)jp);
+      resolved[rl + jp] = 0;
+    }
+  }
+
+  strcpy(current_url, resolved);
+  load_page(current_url);
+}
+
+/* True iff `node` is `<input type="submit">` or `<button type="submit">`.
+ * Used to decide whether STYLE_BUTTON click should also trigger a form
+ * submit on top of the JS 'click' dispatch. */
+static bool is_submit_widget(dom_node_t *n) {
+  if (!n || !n->tag_name) return false;
+  const char *type = dom_get_attr(n, "type");
+  if (strcmp(n->tag_name, "input") == 0) {
+    return type && strcasecmp(type, "submit") == 0;
+  }
+  if (strcmp(n->tag_name, "button") == 0) {
+    /* Real HTML default for `<button>` is type=submit, but to avoid
+     * surprising scripted buttons we require the type to be explicit
+     * OR for the button to live inside a <form>. Bare button outside
+     * any form is always click-only. */
+    if (type) return strcasecmp(type, "submit") == 0;
+    return find_form_ancestor(n) != NULL;
+  }
+  return false;
+}
+#endif /* BROWSER_BUILD */
 
 static void parse_html_legacy(const char *html, uint32_t size) {
   line_count = 0;
@@ -1959,14 +2098,21 @@ static void render(const char *filename) {
       int btn_h = LINE_H + 4;
       uint32_t state = eid_button(&ui, lines[idx].text,
                                   cur_x, cur_y - 2, btn_w, btn_h);
-      if ((state & EID_STATE_CLICKED) && g_page) {
-        qjs_page_dispatch_event(g_page,
-                                (dom_node_t *)lines[idx].widget_node,
-                                "click");
-        if (qjs_page_consume_dirty(g_page)) {
-          rebuild_lines_from_dom();
-          /* Don't continue painting against the now-stale loop —
-           * next frame paints the fresh tree. */
+      if (state & EID_STATE_CLICKED) {
+        dom_node_t *wn = (dom_node_t *)lines[idx].widget_node;
+        if (g_page) {
+          qjs_page_dispatch_event(g_page, wn, "click");
+          if (qjs_page_consume_dirty(g_page)) {
+            rebuild_lines_from_dom();
+            /* Don't continue painting against the now-stale loop —
+             * next frame paints the fresh tree. */
+            return;
+          }
+        }
+        /* R4/F2: after the script handlers (if any) had their say,
+         * a submit-type widget navigates the enclosing form. */
+        if (is_submit_widget(wn)) {
+          submit_form_for(wn);
           return;
         }
       }
@@ -2001,8 +2147,15 @@ static void render(const char *filename) {
       char id_label[24];
       sprintf(id_label, "input@%p", (void *)n);
 
-      eid_text_input(&ui, id_label, cur_x, cur_y - 2, in_w, in_h,
-                     buf, (int)sizeof buf);
+      /* R4/F2: snapshot last_key BEFORE eid_text_input — it consumes
+       * the key while focused, including Enter (which scancode_to_ascii
+       * maps to '\n' but eid_text_input filters as non-printable).
+       * If we saw Enter and the widget ends up focused, treat it as
+       * "submit the enclosing form". */
+      uint8_t key_before = ui.last_key;
+
+      uint32_t in_state = eid_text_input(&ui, id_label, cur_x, cur_y - 2,
+                                         in_w, in_h, buf, (int)sizeof buf);
 
       if (!cur_val || strcmp(buf, cur_val) != 0) {
         dom_set_attr(n, "value", buf);
@@ -2013,6 +2166,11 @@ static void render(const char *filename) {
             return;
           }
         }
+      }
+      if ((in_state & EID_STATE_FOCUSED) && key_before == 0x1C) {
+        /* Enter while focused → submit enclosing form (if any). */
+        submit_form_for(n);
+        return;
       }
       cur_y += LINE_H + 6;
       continue;
@@ -2119,8 +2277,17 @@ static void load_page(const char *url) {
   /* --- File path (local resource) -------------------------------- */
   if (strncasecmp(url, "http://", 7) != 0 &&
       strncasecmp(url, "https://", 8) != 0) {
+    /* Form submission can append `?key=val` to a local-file action
+     * (R4/F2). The filesystem doesn't know what to do with the query,
+     * so strip it before SYS_READ_FILE while leaving `current_url`
+     * unchanged (so back/forward replay the same path). */
+    char fpath[128];
+    int fl = 0;
+    for (const char *t = url; *t && *t != '?' && fl < (int)sizeof fpath - 1; t++)
+      fpath[fl++] = *t;
+    fpath[fl] = 0;
     uint32_t fsize = 0;
-    char *data = (char *)_syscall(SYS_READ_FILE, (uint64_t)url,
+    char *data = (char *)_syscall(SYS_READ_FILE, (uint64_t)fpath,
                                   (uint64_t)&fsize, 0, 0, 0);
     if (!data) {
       line_count = 0;
