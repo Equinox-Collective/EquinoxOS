@@ -83,6 +83,17 @@ int qjs_page_consume_dirty(qjs_page_t *p);
  * navigation was requested, else 0. */
 int qjs_page_pending_nav(qjs_page_t *p, char *out, size_t out_len);
 
+/* R5/N1: richer navigation poll. Reports both explicit verbs
+ * (location.assign/replace/reload, history.back/forward/go) and the
+ * implicit href-overwrite case. `kind_out`:
+ *   1 ASSIGN   url_out is the target, push history.
+ *   2 REPLACE  url_out is the target, don't push history.
+ *   3 RELOAD   reload the current URL (url_out is empty).
+ *   4 HISTORY  history.go(delta_out).
+ * Returns 1 if a navigation was requested (and clears it), else 0. */
+int qjs_page_take_nav(qjs_page_t *p, int *kind_out,
+                      char *url_out, size_t url_len, int *delta_out);
+
 void qjs_page_free(qjs_page_t *p);
 
 #endif
