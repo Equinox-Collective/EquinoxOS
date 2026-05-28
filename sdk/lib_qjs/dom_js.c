@@ -320,6 +320,42 @@ static JSValue dom_el_set_textContent(JSContext *ctx, JSValueConst this_val,
   return JS_UNDEFINED;
 }
 
+/* --------------------------------------------------------------------
+ * Element.value (phase R4/F1)
+ *
+ * In real browsers `input.value` is a *live* property that mirrors the
+ * `value` attribute. Scripts set the attribute via `setAttribute("value",
+ * x)` or assign to `.value` and expect both paths to behave the same.
+ * We model that with a plain attribute proxy: getter reads the `value`
+ * attr (empty string if unset, NOT null — matches HTMLInputElement);
+ * setter writes the attr and marks the DOM dirty so the next renderer
+ * tick rebuilds the line list with the new buffer contents.
+ *
+ * This is also how the renderer round-trips user keystrokes back to JS:
+ * htmlview copies the attr into a local buffer, hands it to
+ * eid_text_input, then writes the mutated buffer back via dom_set_attr
+ * and dispatches an 'input' event. The JS-visible value is therefore
+ * always consistent with what was last drawn on screen.
+ * ------------------------------------------------------------------ */
+static JSValue dom_el_get_value(JSContext *ctx, JSValueConst this_val) {
+  dom_node_t *n = unwrap_element(this_val);
+  if (!n) return JS_NewString(ctx, "");
+  const char *v = dom_get_attr(n, "value");
+  return JS_NewString(ctx, v ? v : "");
+}
+
+static JSValue dom_el_set_value(JSContext *ctx, JSValueConst this_val,
+                                JSValueConst v) {
+  dom_node_t *n = unwrap_element(this_val);
+  if (!n) return JS_UNDEFINED;
+  const char *s = JS_ToCString(ctx, v);
+  if (!s) return JS_EXCEPTION;
+  dom_set_attr(n, "value", s);
+  dom_mark_dirty();
+  JS_FreeCString(ctx, s);
+  return JS_UNDEFINED;
+}
+
 static JSValue dom_el_set_innerHTML(JSContext *ctx, JSValueConst this_val,
                                     JSValueConst v) {
   dom_node_t *n = unwrap_element(this_val);
@@ -428,6 +464,7 @@ static const JSCFunctionListEntry dom_element_proto[] = {
   JS_CGETSET_DEF("className",    dom_el_get_className,   NULL),
   JS_CGETSET_DEF("textContent",  dom_el_get_textContent, dom_el_set_textContent),
   JS_CGETSET_DEF("innerHTML",    NULL,                   dom_el_set_innerHTML),
+  JS_CGETSET_DEF("value",        dom_el_get_value,       dom_el_set_value),
   JS_CGETSET_DEF("children",     dom_el_get_children,    NULL),
   JS_CGETSET_DEF("parentNode",   dom_el_get_parentNode,  NULL),
   JS_CFUNC_DEF("getAttribute",            1, dom_el_getAttribute),

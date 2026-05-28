@@ -6,6 +6,11 @@
 #include <stdio.h>
 #include <string.h>
 
+/* Defined in sdk/lib/string.c but not declared in sdk/include/string.h yet.
+ * Pulled forward here to silence -Wimplicit-function-declaration in the
+ * <input> type= matcher below. */
+extern int strcasecmp(const char *s1, const char *s2);
+
 #define WIN_W 640
 #define WIN_H 420
 #define CONTENT_X 18
@@ -83,6 +88,11 @@ typedef enum {
    * the originating DOM node so dispatched events know their
    * target. */
   STYLE_BUTTON,
+  /* Phase R4/F1: editable single-line input. widget_node points at
+   * the `<input>` DOM element; its current text is stored on the
+   * `value` attribute and read/written per frame by the renderer
+   * (it round-trips through eid_text_input's caller-owned buffer). */
+  STYLE_INPUT,
 } line_style_t;
 
 typedef struct {
@@ -1310,6 +1320,36 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
     w->style = save.style;
     w->in_pre = save.in_pre;
     return;
+  } else if (tag_eq(tag, "input")) {
+    /* R4/F1: emit an editable input line. We only render text-style
+     * inputs here; type="button"/"submit" buttons go through the
+     * <button> path. The widget text is the current `value`
+     * attribute; if no value is present we leave the buffer empty.
+     * <input> is void in HTML, so don't try to descend. */
+    const char *type = dom_get_attr(n, "type");
+    bool is_textish = (!type ||
+                       strcasecmp(type, "text")   == 0 ||
+                       strcasecmp(type, "search") == 0 ||
+                       strcasecmp(type, "url")    == 0 ||
+                       strcasecmp(type, "email")  == 0 ||
+                       strcasecmp(type, "tel")    == 0 ||
+                       strcasecmp(type, "password") == 0);
+    if (is_textish) {
+      w_flush(w);
+      const char *val = dom_get_attr(n, "value");
+      char vbuf[LINE_CHARS + 1]; int vlen = 0;
+      if (val) {
+        for (const char *t = val; *t && vlen < LINE_CHARS; t++) vbuf[vlen++] = *t;
+      }
+      vbuf[vlen] = 0;
+      blank_line();
+      push_line(vbuf, vlen, STYLE_INPUT, false);
+      lines[line_count - 1].widget_node = n;
+    }
+    pop_style_state();
+    w->style = save.style;
+    w->in_pre = save.in_pre;
+    return;
 #endif
   }
 
@@ -1928,6 +1968,50 @@ static void render(const char *filename) {
           /* Don't continue painting against the now-stale loop —
            * next frame paints the fresh tree. */
           return;
+        }
+      }
+      cur_y += LINE_H + 6;
+      continue;
+    }
+    /* R4/F1: <input type=text> widgets. The DOM `value` attribute
+     * holds the canonical text; we copy it into a local buffer,
+     * hand that to eid_text_input (which mutates it based on
+     * focused keyboard input), then if the buffer changed we
+     * write it back to the DOM and dispatch a synthetic 'input'
+     * event into JS. We don't trigger rebuild_lines_from_dom on
+     * every keystroke — only if JS itself mutated the DOM in
+     * response (qjs_page_consume_dirty). The input line's own
+     * `text[]` field re-syncs on the next full rebuild. */
+    if (lines[idx].style == STYLE_INPUT && lines[idx].widget_node) {
+      dom_node_t *n = (dom_node_t *)lines[idx].widget_node;
+      int in_w = CONTENT_W - 4;
+      if (in_w > 360) in_w = 360;
+      int in_h = LINE_H + 4;
+
+      char buf[LINE_CHARS + 1];
+      const char *cur_val = dom_get_attr(n, "value");
+      int  bn = 0;
+      if (cur_val) {
+        for (const char *t = cur_val; *t && bn < LINE_CHARS; t++) buf[bn++] = *t;
+      }
+      buf[bn] = 0;
+
+      /* Use the node pointer as part of the eid label so two empty
+       * inputs at the same column don't share an ID. */
+      char id_label[24];
+      sprintf(id_label, "input@%p", (void *)n);
+
+      eid_text_input(&ui, id_label, cur_x, cur_y - 2, in_w, in_h,
+                     buf, (int)sizeof buf);
+
+      if (!cur_val || strcmp(buf, cur_val) != 0) {
+        dom_set_attr(n, "value", buf);
+        if (g_page) {
+          qjs_page_dispatch_event(g_page, n, "input");
+          if (qjs_page_consume_dirty(g_page)) {
+            rebuild_lines_from_dom();
+            return;
+          }
         }
       }
       cur_y += LINE_H + 6;
