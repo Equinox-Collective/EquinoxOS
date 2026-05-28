@@ -124,7 +124,6 @@ static const char *cp_to_ascii_fallback(uint32_t cp) {
     case 0x2606: return "*";   /* ☆                        */
     case 0x2713: return "+";   /* ✓                        */
     case 0x2717: return "x";   /* ✗                        */
-    case 0x2192 + 0x100: return "->"; /* keep dummy        */
     case 0x2122: return "(tm)";
     default: return NULL;
   }
@@ -1227,12 +1226,19 @@ static void copy_title_from_html(const char *html, uint32_t size) {
         end++;
       }
 
-      int out = 0;
-      for (uint32_t j = start; j < end && out < 63; j++) {
-        if (!ascii_isspace(html[j]) || (out > 0 && page_title[out - 1] != ' '))
-          page_title[out++] = ascii_isspace(html[j]) ? ' ' : html[j];
+      /* R6/B2: titles often contain U+2014 em-dashes etc. Collapse
+       * whitespace inline as before, but route the byte stream through
+       * the same UTF-8 → ASCII pass everything else uses. */
+      char raw[256];
+      int rlen = 0;
+      for (uint32_t j = start; j < end && rlen < (int)sizeof(raw) - 1; j++) {
+        char c = html[j];
+        if (ascii_isspace(c)) c = ' ';
+        if (c == ' ' && rlen > 0 && raw[rlen - 1] == ' ') continue;
+        raw[rlen++] = c;
       }
-      page_title[out] = '\0';
+      raw[rlen] = '\0';
+      utf8_to_ascii(raw, rlen, page_title, sizeof(page_title));
       return;
     }
   }
@@ -1468,6 +1474,16 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
   } else if (tag_eq(tag, "u")) {
     style_stack[style_depth].underline = true;
   } else if (tag_eq(tag, "a")) {
+    /* R6: force a word boundary on link open so consecutive inline
+     * <a>…</a><a>…</a> pairs without surrounding whitespace
+     * ("FeaturesRepos…") don't get glued into one giant word.
+     * append_word will re-introduce a separating space the next
+     * time something is pushed because current_len > 0. */
+    if (w->word_len > 0) {
+      append_word(w->current, &w->current_len, w->word, w->word_len,
+                  w->style, w->in_list);
+      w->word_len = 0;
+    }
     w_set_link_context(n);
     w->style = STYLE_LINK;
     style_stack[style_depth].underline = true;
@@ -1661,6 +1677,13 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
     w->style = STYLE_NORMAL;
     w->at_li_start = false;
   } else if (tag_eq(tag, "a")) {
+    /* R6: mirror the open-side flush so the next inline run starts
+     * fresh and append_word inserts a separator. */
+    if (w->word_len > 0) {
+      append_word(w->current, &w->current_len, w->word, w->word_len,
+                  w->style, w->in_list);
+      w->word_len = 0;
+    }
     w->style = w->in_list ? STYLE_BULLET : STYLE_NORMAL;
     tag_context[0] = 0;
   } else if (tag_eq(tag, "code") || tag_eq(tag, "pre")) {
