@@ -1382,6 +1382,7 @@ static void parse_html(const char *html, uint32_t size) {
   bool in_style_tag = false;
   bool in_script_tag = false;
   bool in_noscript_tag = false;
+  bool in_svg_tag = false;
 
   char current[LINE_CHARS + 1];
   char word[LINE_CHARS + 1];
@@ -1439,6 +1440,25 @@ static void parse_html(const char *html, uint32_t size) {
       }
       if (tag_eq(tag, "/noscript")) {
         in_noscript_tag = false;
+        continue;
+      }
+      /* SVG: treat as opaque. Inline SVG icons would otherwise
+       * push_style_state for every <svg>, <path/>, <g> etc. since
+       * our self-closing detector only knows about a few HTML
+       * void elements (not the `/>` XML notation). Each unmatched
+       * push leaks one level of depth, which then mis-tags the
+       * next sibling element's grid_col/grid_row. */
+      if (tag_eq(tag, "svg")) {
+        in_svg_tag = true;
+        continue;
+      }
+      if (tag_eq(tag, "/svg")) {
+        in_svg_tag = false;
+        continue;
+      }
+      if (in_svg_tag) {
+        /* Eat every other tag — open, close, self-close — inside
+         * the SVG without touching the style stack. */
         continue;
       }
       if (tag_eq(tag, "head")) {
@@ -1615,6 +1635,7 @@ static void parse_html(const char *html, uint32_t size) {
 
     /* Skip content if hidden or in metadata tags */
     if (in_style_tag || in_script_tag || in_noscript_tag ||
+        in_svg_tag ||
         style_stack[style_depth].display_none) {
       i++;
       continue;
