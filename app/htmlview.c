@@ -234,7 +234,14 @@ static int utf8_visible_cols(const char *s) {
 
 /* ── CSS Engine ────────────────────────────────────────────────── */
 
-#define MAX_CSS_RULES 128
+/* Real-world pages (e.g. the EquinoxOS landing page) push past
+ * the old 128-rule limit. With ~200 rules in their stylesheet,
+ * everything past .feat-grid / .hero-grid / .stats was silently
+ * truncated — which made the L5 grid layout look like a no-op
+ * because the matching display:grid rules were never stored.
+ * 512 leaves comfortable headroom for the bigger sites we
+ * actually try to render. */
+#define MAX_CSS_RULES 512
 #define MAX_SELECTOR 64
 #define MAX_CSS_CLASS 128
 
