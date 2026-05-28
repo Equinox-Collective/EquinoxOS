@@ -127,6 +127,6 @@ double atan2(double y, double x) {
   __asm__ volatile("fpatan" : "=t"(res) : "0"(x), "u"(y));
   return res;
 }
-double asin(double x) { return 0; } // Оставим как есть для простоты
-double acos(double x) { return 0; }
+/* asin/acos moved to sdk/lib/qjs_math.c (the stubs here returned 0
+ * which broke Math.asin / Math.acos for QuickJS — see qjs_math.c). */
 double difftime(time_t t1, time_t t0) { return (double)(t1 - t0); }
