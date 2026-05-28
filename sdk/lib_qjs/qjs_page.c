@@ -148,9 +148,16 @@ void qjs_run_page_scripts(dom_node_t *doc,
   qjs_run_microtasks(ctx);
 
   /* Spec-ish load order: DOMContentLoaded → drain → timers → load.
-   * Real browsers interleave; the difference doesn't matter here. */
-  qjs_fire_loaded_events(ctx);
+   * Most pages don't care about the precise interleaving; we match
+   * the common "DCL first, work, then load" expectation. */
+  qjs_fire_DOMContentLoaded(ctx);
   qjs_drain_timers(ctx);
+  qjs_fire_load(ctx);
+
+  /* Drop any JSValues we parked in module-static state (event
+   * listeners, leftover intervals) before the runtime is freed —
+   * QuickJS asserts on a non-empty GC list at teardown. */
+  qjs_window_teardown(ctx);
 
   JS_FreeContext(ctx);
   JS_FreeRuntime(rt);

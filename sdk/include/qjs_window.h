@@ -47,6 +47,14 @@ void qjs_install_timers(JSContext *ctx);
 void qjs_install_events(JSContext *ctx);
 
 void qjs_drain_timers(JSContext *ctx);
-void qjs_fire_loaded_events(JSContext *ctx);
+void qjs_fire_DOMContentLoaded(JSContext *ctx);
+void qjs_fire_load(JSContext *ctx);
+void qjs_fire_loaded_events(JSContext *ctx);  /* DOMContentLoaded then load, no timers in between */
+
+/* Releases every JSValue still held in module-static state (event
+ * listener callbacks, leftover interval timers, storage entries).
+ * MUST be called before JS_FreeContext/JS_FreeRuntime — QuickJS
+ * asserts on a non-empty GC list at runtime teardown. */
+void qjs_window_teardown(JSContext *ctx);
 
 #endif
