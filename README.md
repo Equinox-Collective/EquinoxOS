@@ -6,7 +6,7 @@
 
 **A hobby monolithic kernel for x86_64 — with a real GUI, preemptive multitasking, networking, and audio.**
 
-[![License: GPL-3.0](https://img.shields.io/github/license/Equinox-Collective/EquinoxOS?style=for-the-badge&color=ff6b35&logo=gnu)](LICENSE)
+[![License: GPL-2.0](https://img.shields.io/github/license/Equinox-Collective/EquinoxOS?style=for-the-badge&color=ff6b35&logo=gnu)](LICENSE)
 [![Kernel](https://img.shields.io/badge/Kernel-Monolithic-crimson?style=for-the-badge)]()
 [![Arch](https://img.shields.io/badge/Arch-x86__64-5c6bc0?style=for-the-badge)]()
 [![Boot](https://img.shields.io/badge/Bootloader-Limine-1a1a2e?style=for-the-badge)]()
@@ -271,7 +271,7 @@ EquinoxOS/
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/ewasion137/EquinoxOS.git
+git clone https://github.com/Equinox-Collective/EquinoxOS.git
 cd EquinoxOS
 
 # 2. Build kernel + all apps + create ISO + HDD image
@@ -400,10 +400,10 @@ PCI initialized  |  GUI initialized  |  Shell initialized
 
 <div align="center">
 
-[![License: GPL-3.0](https://img.shields.io/github/license/ewasion137/EquinoxOS?style=flat-square&color=ff6b35)](LICENSE)
-[![Stars](https://img.shields.io/github/stars/ewasion137/EquinoxOS?style=flat-square&color=f9a825)](https://github.com/ewasion137/EquinoxOS/stargazers)
-[![Forks](https://img.shields.io/github/forks/ewasion137/EquinoxOS?style=flat-square&color=5c6bc0)](https://github.com/ewasion137/EquinoxOS/network/members)
-[![Last Commit](https://img.shields.io/github/last-commit/ewasion137/EquinoxOS?style=flat-square)](https://github.com/ewasion137/EquinoxOS/commits)
+[![License: GPL-2.0](https://img.shields.io/github/license/Equinox-Collective7/EquinoxOS?style=flat-square&color=ff6b35)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/Equinox-Collective/EquinoxOS?style=flat-square&color=f9a825)](https://github.com/Equinox-Collective/EquinoxOS/stargazers)
+[![Forks](https://img.shields.io/github/forks/Equinox-Collective/EquinoxOS?style=flat-square&color=5c6bc0)](https://github.com/Equinox-Collective/EquinoxOS/network/members)
+[![Last Commit](https://img.shields.io/github/last-commit/Equinox-Collective/EquinoxOS?style=flat-square)](https://github.com/Equinox-Collective/EquinoxOS/commits)
 
 *Built from scratch, for the love of low-level programming.*
 
