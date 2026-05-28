@@ -2417,7 +2417,12 @@ static void render(const char *filename) {
       dom_node_t *n = (dom_node_t *)lines[idx].widget_node;
       int in_w = CONTENT_W - 4;
       if (in_w > 360) in_w = 360;
-      int in_h = LINE_H + 4;
+      /* 8x16 PSF1 font ⇒ make the box just tall enough that the
+       * glyphs sit centred with ~2 px breathing room on each side.
+       * LINE_H+4 left visible vertical padding because the page-line
+       * advance is only LINE_H+6 below, which made the input look
+       * like it cropped the text. */
+      int in_h = 20;
 
       char buf[LINE_CHARS + 1];
       const char *cur_val = dom_get_attr(n, "value");
