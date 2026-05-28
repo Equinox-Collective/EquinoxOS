@@ -557,21 +557,32 @@ static void push_style_state(void) {
   if (style_depth < MAX_STYLE_STACK - 1) {
     style_stack[style_depth + 1] = style_stack[style_depth];
     style_depth++;
-    /* Container-layout CSS (display, flex-*, grid-*, gap) is NOT
-     * inherited — it describes how *this* element lays out its
-     * own children. Reset on the new frame so a grid/flex parent
-     * doesn't accidentally re-fire emit_grid_container /
-     * emit_flex_container for every nested descendant. The
-     * descendant's own CSS rule (if any) will reinstate these
-     * fields via apply_css_to_current_state. */
-    style_stack[style_depth].display     = 0;
-    style_stack[style_depth].flex_dir    = 0;
-    style_stack[style_depth].gap_px      = 0;
-    style_stack[style_depth].justify     = 0;
-    style_stack[style_depth].align_items = 0;
-    style_stack[style_depth].flex_grow   = 0;
-    style_stack[style_depth].flex_basis  = 0;
-    style_stack[style_depth].grid_cols[0] = '\0';
+    /* CSS inheritance: only color/font/text-align/uppercase/bold/
+     * underline propagate from parent. The rest describe how
+     * *this* element renders and must NOT bleed to children:
+     *
+     *   - background (bg / full_width_bg): a black .nav-bar must
+     *     not paint a full-width black bar behind every line of
+     *     every descendant text run.
+     *   - padding / max-width: layout box sizing belongs to the
+     *     element that declared it.
+     *   - display / flex-* / grid-* / gap: container-layout fields
+     *     (see L5 inheritance fix in 3a26734).
+     *
+     * The descendant's own CSS rule (if any) reinstates these via
+     * apply_css_to_current_state. */
+    style_stack[style_depth].bg            = 0;
+    style_stack[style_depth].full_width_bg = false;
+    style_stack[style_depth].padding       = 0;
+    style_stack[style_depth].max_width     = 0;
+    style_stack[style_depth].display       = 0;
+    style_stack[style_depth].flex_dir      = 0;
+    style_stack[style_depth].gap_px        = 0;
+    style_stack[style_depth].justify       = 0;
+    style_stack[style_depth].align_items   = 0;
+    style_stack[style_depth].flex_grow     = 0;
+    style_stack[style_depth].flex_basis    = 0;
+    style_stack[style_depth].grid_cols[0]  = '\0';
   }
 }
 
