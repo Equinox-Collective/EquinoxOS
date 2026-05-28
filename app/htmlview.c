@@ -42,6 +42,142 @@ static void render(const char *filename);
 static void blank_line(void);
 static void parse_css_declarations_to_state(const char *decl);
 
+/* ── R6/B2: UTF-8 → ASCII fallback ─────────────────────────────
+ *
+ * Our PSF1 console font has only 256 glyphs (ASCII + a CP437-ish
+ * upper half), so any UTF-8 multi-byte sequence reaching it shows up
+ * as garbled high-bit pairs ("ÔÇö" for "—", etc.). Modern hand-written
+ * pages contain *lots* of punctuation in U+2000-2FFF (— … → ★ · ™),
+ * and our target site is bilingual EN/RU, so we also transliterate
+ * Cyrillic into Latin so Russian text remains roughly readable.
+ *
+ * The pipeline runs once per push_line(): decode UTF-8 → codepoint,
+ * substitute via the table below, drop anything else. ASCII is
+ * passed through unchanged. */
+
+/* Decode the first UTF-8 codepoint at *p, returning bytes consumed
+ * (1..4). Sets *cp to the codepoint, or U+FFFD on a malformed
+ * sequence (and consumes a single byte). */
+static int utf8_decode_one(const unsigned char *p, int rem, uint32_t *cp) {
+  if (rem <= 0) { *cp = 0; return 0; }
+  unsigned char b0 = p[0];
+  if (b0 < 0x80) { *cp = b0; return 1; }
+  if ((b0 & 0xE0) == 0xC0 && rem >= 2 && (p[1] & 0xC0) == 0x80) {
+    *cp = ((uint32_t)(b0 & 0x1F) << 6) | (uint32_t)(p[1] & 0x3F);
+    return 2;
+  }
+  if ((b0 & 0xF0) == 0xE0 && rem >= 3 &&
+      (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80) {
+    *cp = ((uint32_t)(b0 & 0x0F) << 12) |
+          ((uint32_t)(p[1] & 0x3F) << 6) |
+          (uint32_t)(p[2] & 0x3F);
+    return 3;
+  }
+  if ((b0 & 0xF8) == 0xF0 && rem >= 4 &&
+      (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80 &&
+      (p[3] & 0xC0) == 0x80) {
+    *cp = ((uint32_t)(b0 & 0x07) << 18) |
+          ((uint32_t)(p[1] & 0x3F) << 12) |
+          ((uint32_t)(p[2] & 0x3F) << 6) |
+          (uint32_t)(p[3] & 0x3F);
+    return 4;
+  }
+  *cp = 0xFFFD;
+  return 1;
+}
+
+/* codepoint → ASCII string (possibly multi-char). NULL means
+ * "no substitution defined". */
+static const char *cp_to_ascii_fallback(uint32_t cp) {
+  switch (cp) {
+    /* Latin-1 punctuation */
+    case 0x00A0: return " ";   /* nbsp                     */
+    case 0x00A9: return "(c)"; /* ©                        */
+    case 0x00AE: return "(r)"; /* ®                        */
+    case 0x00B0: return "*";   /* °                        */
+    case 0x00B7: return "*";   /* ·                        */
+    case 0x00AB: return "<<";  /* «                        */
+    case 0x00BB: return ">>";  /* »                        */
+    case 0x00D7: return "x";   /* ×                        */
+    case 0x00F7: return "/";   /* ÷                        */
+    /* General punctuation */
+    case 0x2010: case 0x2011: case 0x2012: case 0x2013: return "-";
+    case 0x2014: return "--";  /* em dash                  */
+    case 0x2018: case 0x2019: return "'";
+    case 0x201C: case 0x201D: return "\"";
+    case 0x2022: return "*";   /* bullet                   */
+    case 0x2026: return "..."; /* ellipsis                 */
+    case 0x2032: return "'";
+    case 0x2033: return "\"";
+    /* Arrows */
+    case 0x2190: return "<-";
+    case 0x2191: return "^";
+    case 0x2192: return "->";
+    case 0x2193: return "v";
+    case 0x2194: return "<>";
+    case 0x2196: return "<-";
+    case 0x2197: return "->";
+    case 0x2198: return "->";
+    case 0x2199: return "<-";
+    /* Misc symbols */
+    case 0x2605: return "*";   /* ★                        */
+    case 0x2606: return "*";   /* ☆                        */
+    case 0x2713: return "+";   /* ✓                        */
+    case 0x2717: return "x";   /* ✗                        */
+    case 0x2192 + 0x100: return "->"; /* keep dummy        */
+    case 0x2122: return "(tm)";
+    default: return NULL;
+  }
+}
+
+/* Cyrillic transliteration table (U+0410..U+044F).
+ * Capital/lowercase pair-by-pair so we can index by (cp - 0x0410). */
+static const char *cyr_translit[] = {
+  /* 0410 А */ "A",  "B",  "V",  "G",  "D",  "E",  "Zh", "Z",
+  /* 0418 И */ "I",  "J",  "K",  "L",  "M",  "N",  "O",  "P",
+  /* 0420 Р */ "R",  "S",  "T",  "U",  "F",  "H",  "C",  "Ch",
+  /* 0428 Ш */ "Sh", "Sch","\"", "Y",  "'",  "E",  "Yu", "Ya",
+  /* 0430 а */ "a",  "b",  "v",  "g",  "d",  "e",  "zh", "z",
+  /* 0438 и */ "i",  "j",  "k",  "l",  "m",  "n",  "o",  "p",
+  /* 0440 р */ "r",  "s",  "t",  "u",  "f",  "h",  "c",  "ch",
+  /* 0448 ш */ "sh", "sch","\"", "y",  "'",  "e",  "yu", "ya",
+};
+
+static const char *cp_to_translit(uint32_t cp) {
+  if (cp >= 0x0410 && cp <= 0x044F) return cyr_translit[cp - 0x0410];
+  if (cp == 0x0401) return "Yo";   /* Ё */
+  if (cp == 0x0451) return "yo";   /* ё */
+  return NULL;
+}
+
+/* Convert UTF-8 input to ASCII output. Returns the number of bytes
+ * written (NOT including the NUL terminator), bounded by out_cap-1.
+ * Unknown non-ASCII codepoints are dropped silently (the alternative
+ * — '?' — would litter every page that has any symbol we forgot). */
+static int utf8_to_ascii(const char *in, int in_len, char *out, int out_cap) {
+  if (out_cap <= 0) return 0;
+  int w = 0;
+  const unsigned char *p = (const unsigned char *)in;
+  int rem = in_len;
+  while (rem > 0 && w < out_cap - 1) {
+    uint32_t cp = 0;
+    int n = utf8_decode_one(p, rem, &cp);
+    if (n <= 0) break;
+    p += n; rem -= n;
+
+    if (cp < 0x80) {
+      out[w++] = (char)cp;
+      continue;
+    }
+    const char *sub = cp_to_ascii_fallback(cp);
+    if (!sub) sub = cp_to_translit(cp);
+    if (!sub) continue;
+    while (*sub && w < out_cap - 1) out[w++] = *sub++;
+  }
+  out[w] = 0;
+  return w;
+}
+
 /* ── CSS Engine ────────────────────────────────────────────────── */
 
 #define MAX_CSS_RULES 128
@@ -954,12 +1090,20 @@ static void push_line(const char *text, int len, line_style_t style,
 
   if (len < 0)
     len = 0;
-  if (len > LINE_CHARS)
-    len = LINE_CHARS;
 
-  for (int i = 0; i < len; i++)
-    lines[line_count].text[i] = text[i];
-  lines[line_count].text[len] = '\0';
+  /* R6/B2: every text line passes through the UTF-8 → ASCII pass
+   * before width-truncation so —/…/→/Cyrillic survive into something
+   * the PSF1 8x16 font can actually paint. The buffer in line_t is
+   * LINE_CHARS+1, so we ask for at most that. Conversion may shrink
+   * (UTF-8 codepoint dropped) or grow (… → "..."); we do it first
+   * and then truncate to LINE_CHARS. */
+  char ascii_buf[LINE_CHARS * 4 + 1];
+  int ascii_len = utf8_to_ascii(text, len, ascii_buf, sizeof(ascii_buf));
+  if (ascii_len > LINE_CHARS) ascii_len = LINE_CHARS;
+  for (int i = 0; i < ascii_len; i++)
+    lines[line_count].text[i] = ascii_buf[i];
+  lines[line_count].text[ascii_len] = '\0';
+  len = ascii_len;
 
   /* Apply text-transform: uppercase */
   if (style_stack[style_depth].uppercase) {
@@ -1153,39 +1297,68 @@ static void w_flush(walk_ctx_t *w) {
 
 static void w_emit_text(walk_ctx_t *w, const char *text) {
   if (!text) return;
-  for (const char *p = text; *p; p++) {
-    char c = *p;
+
+  /* R6/B2: walk UTF-8 by codepoint, not byte. The word/line buffers
+   * count ASCII chars (matching the renderer's 1 char = 8 px font),
+   * so non-ASCII codepoints have to be substituted *before* we hit
+   * the width math in append_word() — otherwise a 2-byte cyrillic
+   * char would be split mid-sequence the moment the byte-counted
+   * word fills up. */
+  const unsigned char *p = (const unsigned char *)text;
+  int rem = 0; while (text[rem]) rem++;
+  while (rem > 0) {
+    uint32_t cp = 0;
+    int n = utf8_decode_one(p, rem, &cp);
+    if (n <= 0) break;
+    p += n; rem -= n;
+
     if (w->at_li_start) {
       append_word(w->current, &w->current_len, "*", 1, STYLE_BULLET, true);
       w->at_li_start = false;
     }
-    if (w->in_pre && (c == '\n' || c == '\r')) {
-      if (w->word_len > 0) {
-        append_word(w->current, &w->current_len, w->word, w->word_len,
-                    w->style, w->in_list);
-        w->word_len = 0;
-      }
-      flush_current(w->current, &w->current_len, w->style, w->in_list);
-      continue;
-    }
-    if (c == '&') {
-      char decoded;
-      int consumed = decode_entity(p, &decoded);
-      if (consumed > 0) {
-        if (w->word_len < LINE_CHARS) w->word[w->word_len++] = decoded;
-        p += consumed - 1;   /* loop increment compensates */
+
+    if (cp < 0x80) {
+      char c = (char)cp;
+      if (w->in_pre && (c == '\n' || c == '\r')) {
+        if (w->word_len > 0) {
+          append_word(w->current, &w->current_len, w->word, w->word_len,
+                      w->style, w->in_list);
+          w->word_len = 0;
+        }
+        flush_current(w->current, &w->current_len, w->style, w->in_list);
         continue;
       }
-    }
-    if (ascii_isspace(c)) {
-      if (w->word_len > 0) {
-        append_word(w->current, &w->current_len, w->word, w->word_len,
-                    w->style, w->in_list);
-        w->word_len = 0;
+      if (c == '&') {
+        char decoded;
+        int consumed = decode_entity((const char *)(p - 1), &decoded);
+        if (consumed > 0) {
+          if (w->word_len < LINE_CHARS) w->word[w->word_len++] = decoded;
+          /* skip the entity body. We already consumed '&'; advance by
+           * (consumed-1) more bytes. */
+          int extra = consumed - 1;
+          if (extra > rem) extra = rem;
+          p += extra; rem -= extra;
+          continue;
+        }
       }
-    } else if (w->word_len < LINE_CHARS) {
-      w->word[w->word_len++] = c;
+      if (ascii_isspace(c)) {
+        if (w->word_len > 0) {
+          append_word(w->current, &w->current_len, w->word, w->word_len,
+                      w->style, w->in_list);
+          w->word_len = 0;
+        }
+      } else if (w->word_len < LINE_CHARS) {
+        w->word[w->word_len++] = c;
+      }
+      continue;
     }
+
+    /* Non-ASCII: substitute (may be NULL → drop). All fallback strings
+     * are non-whitespace so we don't need to flush a word boundary. */
+    const char *sub = cp_to_ascii_fallback(cp);
+    if (!sub) sub = cp_to_translit(cp);
+    if (!sub) continue;
+    while (*sub && w->word_len < LINE_CHARS) w->word[w->word_len++] = *sub++;
   }
 }
 
