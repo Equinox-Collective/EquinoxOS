@@ -1055,7 +1055,289 @@ static void copy_title_from_html(const char *html, uint32_t size) {
   }
 }
 
+/* =====================================================================
+ * DOM-tree-driven parser (phase J3 step 2).
+ *
+ * Replaces the byte-stream state machine below with: build a dom_node_t
+ * tree, then walk it emitting lines through the existing push_line /
+ * append_word / flush_current / blank_line / style-stack helpers. The
+ * line-emission layer is therefore unchanged — only the input layer
+ * (HTML bytes → events) is swapped.
+ *
+ * Why: J4 needs DOM bindings in QuickJS. The tree becomes the single
+ * source of truth that both the renderer and the JS DOM bindings
+ * share.
+ *
+ * Safety net: the legacy parser is kept under parse_html_legacy() and
+ * is reachable via the --legacy CLI flag in case of regression.
+ * ===================================================================== */
+
+#include "dom.h"
+
+typedef struct {
+  char         current[LINE_CHARS + 1];
+  int          current_len;
+  char         word[LINE_CHARS + 1];
+  int          word_len;
+  line_style_t style;
+  bool         in_list;
+  bool         in_pre;
+  bool         at_li_start;
+} walk_ctx_t;
+
+/* Save/restore the renderer-visible style for tags that override it.
+ * The CSS style stack already handles colour/bold/etc; this is only
+ * about the per-line `line_style_t` enum (H1/H2/CODE/LINK/BULLET/...). */
+typedef struct {
+  line_style_t style;
+  bool         in_pre;
+} style_save_t;
+
+static void w_flush(walk_ctx_t *w) {
+  if (w->word_len > 0) {
+    append_word(w->current, &w->current_len, w->word, w->word_len,
+                w->style, w->in_list);
+    w->word_len = 0;
+  }
+  flush_current(w->current, &w->current_len, w->style, w->in_list);
+}
+
+static void w_emit_text(walk_ctx_t *w, const char *text) {
+  if (!text) return;
+  for (const char *p = text; *p; p++) {
+    char c = *p;
+    if (w->at_li_start) {
+      append_word(w->current, &w->current_len, "*", 1, STYLE_BULLET, true);
+      w->at_li_start = false;
+    }
+    if (w->in_pre && (c == '\n' || c == '\r')) {
+      if (w->word_len > 0) {
+        append_word(w->current, &w->current_len, w->word, w->word_len,
+                    w->style, w->in_list);
+        w->word_len = 0;
+      }
+      flush_current(w->current, &w->current_len, w->style, w->in_list);
+      continue;
+    }
+    if (c == '&') {
+      char decoded;
+      int consumed = decode_entity(p, &decoded);
+      if (consumed > 0) {
+        if (w->word_len < LINE_CHARS) w->word[w->word_len++] = decoded;
+        p += consumed - 1;   /* loop increment compensates */
+        continue;
+      }
+    }
+    if (ascii_isspace(c)) {
+      if (w->word_len > 0) {
+        append_word(w->current, &w->current_len, w->word, w->word_len,
+                    w->style, w->in_list);
+        w->word_len = 0;
+      }
+    } else if (w->word_len < LINE_CHARS) {
+      w->word[w->word_len++] = c;
+    }
+  }
+}
+
+/* Synthesize an `<a href="...">`-style string into tag_context so
+ * push_line can pick it up via extract_attr() when emitting STYLE_LINK
+ * lines. Matches the original parser's contract. */
+static void w_set_link_context(const dom_node_t *n) {
+  const char *href = dom_get_attr(n, "href");
+  if (!href) { tag_context[0] = 0; return; }
+  /* Format: a href="VALUE" — exactly what extract_attr expects. */
+  int o = 0;
+  const char *prefix = "a href=\"";
+  while (prefix[o]) { tag_context[o] = prefix[o]; o++; }
+  for (const char *s = href; *s && o < (int)sizeof(tag_context) - 2; s++)
+    tag_context[o++] = *s;
+  tag_context[o++] = '"';
+  tag_context[o] = 0;
+}
+
+static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
+  if (!n) return;
+
+  if (n->type == DOM_NODE_TEXT) { w_emit_text(w, n->text); return; }
+  if (n->type == DOM_NODE_COMMENT) return;
+  if (n->type == DOM_NODE_DOCUMENT) {
+    for (dom_node_t *c = n->first_child; c; c = c->next_sibling)
+      w_emit_node(w, c);
+    return;
+  }
+  /* ELEMENT */
+  const char *tag = n->tag_name;
+
+  /* Skip metadata / non-rendered subtrees. */
+  if (tag_eq(tag, "head")     || tag_eq(tag, "script")   ||
+      tag_eq(tag, "style")    || tag_eq(tag, "noscript") ||
+      tag_eq(tag, "title")    || tag_eq(tag, "meta")     ||
+      tag_eq(tag, "link")) {
+    /* <link rel="stylesheet" href="..."> — fetch local CSS like the
+     * legacy parser did. */
+    if (tag_eq(tag, "link")) {
+      const char *rel  = dom_get_attr(n, "rel");
+      const char *href = dom_get_attr(n, "href");
+      if (rel && strstr(rel, "stylesheet") && href && href[0] &&
+          !strstr(href, "http")) {
+        uint32_t css_size = 0;
+        void *css_data = (void *)_syscall(SYS_READ_FILE, (uint64_t)href,
+                                          (uint64_t)&css_size, 0, 0, 0);
+        if (css_data) parse_css_block((const char *)css_data, css_size);
+      }
+    }
+    return;
+  }
+
+  push_style_state();
+  apply_css_for_element(tag);
+  if (style_stack[style_depth].display_none) { pop_style_state(); return; }
+
+  style_save_t save = { w->style, w->in_pre };
+
+  /* ---- per-tag prelude ----------------------------------------- */
+  if (tag_eq(tag, "body")) {
+    if (style_stack[style_depth].bg) body_bg = style_stack[style_depth].bg;
+  } else if (tag_eq(tag, "h1")) {
+    w_flush(w);
+    blank_line();
+    w->style = STYLE_H1;
+  } else if (tag_eq(tag, "h2") || tag_eq(tag, "h3") || tag_eq(tag, "h4") ||
+             tag_eq(tag, "h5") || tag_eq(tag, "h6")) {
+    w_flush(w);
+    blank_line();
+    w->style = STYLE_H2;
+    style_stack[style_depth].bold = true;
+  } else if (tag_eq(tag, "p")       || tag_eq(tag, "div")     ||
+             tag_eq(tag, "section") || tag_eq(tag, "header")  ||
+             tag_eq(tag, "footer")  || tag_eq(tag, "article") ||
+             tag_eq(tag, "main")    || tag_eq(tag, "nav")     ||
+             tag_eq(tag, "aside")   || tag_eq(tag, "blockquote")) {
+    w_flush(w);
+    int pad = style_stack[style_depth].padding;
+    if (pad > 0) {
+      for (int p = 0; p < pad; p++) push_line("", 0, STYLE_NORMAL, false);
+    } else if (line_count > 0) {
+      blank_line();
+    }
+  } else if (tag_eq(tag, "center")) {
+    w_flush(w);
+    style_stack[style_depth].align = ALIGN_CENTER;
+  } else if (tag_eq(tag, "br")) {
+    w_flush(w);
+  } else if (tag_eq(tag, "hr")) {
+    w_flush(w);
+    push_line("", 0, STYLE_HR, false);
+  } else if (tag_eq(tag, "img")) {
+    w_flush(w);
+    push_line("[ IMAGE ]", 9, STYLE_MUTED, w->in_list);
+  } else if (tag_eq(tag, "ul") || tag_eq(tag, "ol")) {
+    w_flush(w);
+    w->in_list = true;
+  } else if (tag_eq(tag, "li")) {
+    w_flush(w);
+    w->style = STYLE_BULLET;
+    w->at_li_start = true;
+  } else if (tag_eq(tag, "b") || tag_eq(tag, "strong")) {
+    style_stack[style_depth].bold = true;
+  } else if (tag_eq(tag, "i") || tag_eq(tag, "em")) {
+    style_stack[style_depth].color = CLR_MUTED;
+  } else if (tag_eq(tag, "u")) {
+    style_stack[style_depth].underline = true;
+  } else if (tag_eq(tag, "a")) {
+    w_set_link_context(n);
+    w->style = STYLE_LINK;
+    style_stack[style_depth].underline = true;
+  } else if (tag_eq(tag, "code") || tag_eq(tag, "pre")) {
+    w->style = STYLE_CODE;
+    w->in_pre = true;
+  }
+
+  /* ---- recurse into children ----------------------------------- */
+  for (dom_node_t *c = n->first_child; c; c = c->next_sibling) {
+    w_emit_node(w, c);
+  }
+
+  /* ---- per-tag postlude ---------------------------------------- */
+  if (tag_eq(tag, "h1") ||
+      tag_eq(tag, "h2") || tag_eq(tag, "h3") || tag_eq(tag, "h4") ||
+      tag_eq(tag, "h5") || tag_eq(tag, "h6")) {
+    w_flush(w);
+    w->style = STYLE_NORMAL;
+    blank_line();
+  } else if (tag_eq(tag, "p")       || tag_eq(tag, "div")     ||
+             tag_eq(tag, "section") || tag_eq(tag, "header")  ||
+             tag_eq(tag, "footer")  || tag_eq(tag, "article") ||
+             tag_eq(tag, "main")    || tag_eq(tag, "nav")     ||
+             tag_eq(tag, "aside")   || tag_eq(tag, "blockquote")) {
+    w_flush(w);
+    int pad = style_stack[style_depth].padding;
+    if (pad > 0) {
+      for (int p = 0; p < pad; p++) push_line("", 0, STYLE_NORMAL, false);
+    } else {
+      blank_line();
+    }
+  } else if (tag_eq(tag, "center")) {
+    w_flush(w);
+  } else if (tag_eq(tag, "ul") || tag_eq(tag, "ol")) {
+    w_flush(w);
+    w->in_list = false;
+    blank_line();
+  } else if (tag_eq(tag, "li")) {
+    w_flush(w);
+    w->style = STYLE_NORMAL;
+    w->at_li_start = false;
+  } else if (tag_eq(tag, "a")) {
+    w->style = w->in_list ? STYLE_BULLET : STYLE_NORMAL;
+    tag_context[0] = 0;
+  } else if (tag_eq(tag, "code") || tag_eq(tag, "pre")) {
+    w_flush(w);
+    w->style = w->in_list ? STYLE_BULLET : STYLE_NORMAL;
+    w->in_pre = false;
+  }
+  (void)save;   /* most paths overwrite explicitly; struct kept for clarity */
+
+  pop_style_state();
+}
+
+/* Renamed-forward declaration. Original definition below this block. */
+static void parse_html_legacy(const char *html, uint32_t size);
+
+/* Selects the parser. Flipped to true via the --legacy CLI flag. */
+static bool g_use_legacy_parser = false;
+
 static void parse_html(const char *html, uint32_t size) {
+  if (g_use_legacy_parser) { parse_html_legacy(html, size); return; }
+
+  line_count = 0;
+  scroll_line = 0;
+  copy_title_from_html(html, size);
+  extract_css(html, size);
+  reset_style_stack();
+  body_bg = CLR_BG;
+  tag_context[0] = 0;
+
+  dom_node_t *doc = dom_parse(html, size);
+  if (!doc) {
+    push_line("(out of memory parsing HTML)", 28, STYLE_MUTED, false);
+    return;
+  }
+
+  walk_ctx_t w;
+  memset(&w, 0, sizeof(w));
+  w.style = STYLE_NORMAL;
+
+  w_emit_node(&w, doc);
+  w_flush(&w);
+
+  if (line_count == 0)
+    push_line("(empty HTML document)", 21, STYLE_MUTED, false);
+
+  dom_free(doc);
+}
+
+static void parse_html_legacy(const char *html, uint32_t size) {
   line_count = 0;
   scroll_line = 0;
   line_style_t style = STYLE_NORMAL;
@@ -1730,23 +2012,34 @@ int main(int argc, char **argv) {
     h_font_large = eid_load_font((unsigned char *)f_data, 22.0f);
   }
 
-  if (argc > 1 && argv[1] != 0) {
-    /* User passed a target. Truncate quietly into current_url[]. */
-    size_t alen = strlen(argv[1]);
+  /* Scan argv for the global --legacy flag (compact pre-pass so the
+   * existing positional argv[1]/argv[2] semantics are preserved). */
+  int positional[8]; int p_count = 0;
+  for (int ai = 1; ai < argc && p_count < 8; ai++) {
+    if (argv[ai] && strcmp(argv[ai], "--legacy") == 0) {
+      g_use_legacy_parser = true;
+    } else {
+      positional[p_count++] = ai;
+    }
+  }
+  if (p_count > 0) {
+    char *arg1 = argv[positional[0]];
+    size_t alen = strlen(arg1);
     if (alen >= sizeof current_url) alen = sizeof current_url - 1;
-    memcpy(current_url, argv[1], alen);
+    memcpy(current_url, arg1, alen);
     current_url[alen] = '\0';
   }
 #ifdef BROWSER_BUILD
-  else {
+  if (p_count == 0) {
     /* browser.elf defaults to a real internet page; htmlview.elf keeps
      * its original "index.html" local-file default. */
     strcpy(current_url, "http://example.com/");
   }
-  /* Optional argv[2]: dotted-quad IP override for the first load_page().
-   * Same convention as urlget — useful while QEMU SLIRP DNS is flaky. */
-  if (argc > 2 && argv[2] != 0) {
-    uint32_t ip_be = net_dns_resolve(argv[2]);  /* parses dotted-quad too */
+  /* Optional 2nd positional arg: dotted-quad IP override for the first
+   * load_page() (same convention as urlget — useful while QEMU SLIRP
+   * DNS is flaky). */
+  if (p_count > 1 && argv[positional[1]] != 0) {
+    uint32_t ip_be = net_dns_resolve(argv[positional[1]]);
     if (ip_be) g_first_load_ip_override_be = ip_be;
   }
 #endif
