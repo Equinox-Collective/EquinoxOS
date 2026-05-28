@@ -47,6 +47,21 @@ void qjs_install_storage(JSContext *ctx);
 void qjs_install_timers(JSContext *ctx);
 void qjs_install_events(JSContext *ctx);
 
+/* R6/B1: `window.navigator` with `.language`, `.languages` and
+ * `.userAgent`. Many real-world bundles assume `navigator` exists
+ * (e.g. `navigator.language.slice(0,2)`); without it the whole
+ * top-level script aborts with ReferenceError. The strings are
+ * fixed at install-time; if `lang` is NULL, defaults to "en". */
+void qjs_install_navigator(JSContext *ctx, const char *lang);
+
+/* R6/B3: install scrollY/scrollTo/getComputedStyle/innerWidth on
+ * window. scrollY reads from a host-supplied value set by
+ * qjs_window_set_scroll_y(); scrollTo({top:N}) stashes the desired
+ * top in a pending slot the host polls with qjs_window_take_scroll(). */
+void qjs_install_scroll(JSContext *ctx);
+void qjs_window_set_scroll_y(int y);
+int  qjs_window_take_scroll(int *out_y);
+
 void qjs_drain_timers(JSContext *ctx);
 
 /* R5/N5: per-frame timer tick. Advances the virtual clock to

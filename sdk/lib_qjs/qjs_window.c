@@ -605,6 +605,180 @@ void qjs_fire_loaded_events(JSContext *ctx) {
 }
 
 /* ====================================================================
+ * R6/B3: window.scrollY + window.scrollTo + IntersectionObserver stub
+ *
+ * scrollY is a live getter pulled from a value the host sets each
+ * frame (`qjs_window_set_scroll_y`). scrollTo writes a pending
+ * request that the host polls via `qjs_window_take_scroll`.
+ *
+ * IntersectionObserver: real impl needs layout. We don't have layout.
+ * The site (and most reveal-on-scroll setups) has an explicit
+ * fallback path keyed on `'IntersectionObserver' in window`, so the
+ * cleanest thing is to *not* install it — the fallback then runs
+ * unconditionally and shows every revealable section straight away.
+ * ================================================================== */
+
+static int g_scroll_y     = 0;
+static int g_pending_scroll = -1;   /* -1 = none, else target Y in px */
+
+void qjs_window_set_scroll_y(int y) { g_scroll_y = y; }
+int  qjs_window_take_scroll(int *out_y) {
+  if (g_pending_scroll < 0) return 0;
+  if (out_y) *out_y = g_pending_scroll;
+  g_pending_scroll = -1;
+  return 1;
+}
+
+static JSValue js_win_get_scrollY(JSContext *ctx, JSValueConst this_val) {
+  (void)this_val;
+  return JS_NewInt32(ctx, g_scroll_y);
+}
+
+static JSValue js_win_get_scrollX(JSContext *ctx, JSValueConst this_val) {
+  (void)ctx; (void)this_val;
+  return JS_NewInt32(ctx, 0);
+}
+
+static JSValue js_win_scrollTo(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv) {
+  (void)this_val;
+  int y = 0;
+  if (argc >= 1 && JS_IsObject(argv[0]) && !JS_IsNull(argv[0])) {
+    JSValue top = JS_GetPropertyStr(ctx, argv[0], "top");
+    int32_t v = 0;
+    if (!JS_IsUndefined(top)) JS_ToInt32(ctx, &v, top);
+    JS_FreeValue(ctx, top);
+    y = v;
+  } else if (argc >= 2) {
+    int32_t v = 0;
+    JS_ToInt32(ctx, &v, argv[1]);
+    y = v;
+  } else if (argc >= 1) {
+    int32_t v = 0;
+    JS_ToInt32(ctx, &v, argv[0]);
+    y = v;
+  }
+  if (y < 0) y = 0;
+  g_pending_scroll = y;
+  return JS_UNDEFINED;
+}
+
+static JSValue js_win_scrollBy(JSContext *ctx, JSValueConst this_val,
+                               int argc, JSValueConst *argv) {
+  (void)this_val;
+  int dy = 0;
+  if (argc >= 1 && JS_IsObject(argv[0]) && !JS_IsNull(argv[0])) {
+    JSValue t = JS_GetPropertyStr(ctx, argv[0], "top");
+    int32_t v = 0;
+    if (!JS_IsUndefined(t)) JS_ToInt32(ctx, &v, t);
+    JS_FreeValue(ctx, t);
+    dy = v;
+  } else if (argc >= 2) {
+    int32_t v = 0; JS_ToInt32(ctx, &v, argv[1]); dy = v;
+  }
+  int y = g_scroll_y + dy;
+  if (y < 0) y = 0;
+  g_pending_scroll = y;
+  return JS_UNDEFINED;
+}
+
+/* getComputedStyle stub — returns an empty object so accesses like
+ * .getPropertyValue('--foo') won't crash. */
+static JSValue js_getPropertyValue(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+  (void)ctx; (void)this_val; (void)argc; (void)argv;
+  return JS_NewString(ctx, "");
+}
+static JSValue js_getComputedStyle(JSContext *ctx, JSValueConst this_val,
+                                   int argc, JSValueConst *argv) {
+  (void)this_val; (void)argc; (void)argv;
+  JSValue o = JS_NewObject(ctx);
+  JS_SetPropertyStr(ctx, o, "getPropertyValue",
+      JS_NewCFunction(ctx, js_getPropertyValue, "getPropertyValue", 1));
+  return o;
+}
+
+void qjs_install_scroll(JSContext *ctx) {
+  JSValue global = JS_GetGlobalObject(ctx);
+
+  JSAtom a;
+  a = JS_NewAtom(ctx, "scrollY");
+  JS_DefinePropertyGetSet(ctx, global, a,
+      JS_NewCFunction2(ctx, (JSCFunction *)js_win_get_scrollY,
+                       "get scrollY", 0, JS_CFUNC_getter, 0),
+      JS_UNDEFINED, JS_PROP_CONFIGURABLE);
+  JS_FreeAtom(ctx, a);
+
+  a = JS_NewAtom(ctx, "pageYOffset");
+  JS_DefinePropertyGetSet(ctx, global, a,
+      JS_NewCFunction2(ctx, (JSCFunction *)js_win_get_scrollY,
+                       "get pageYOffset", 0, JS_CFUNC_getter, 0),
+      JS_UNDEFINED, JS_PROP_CONFIGURABLE);
+  JS_FreeAtom(ctx, a);
+
+  a = JS_NewAtom(ctx, "scrollX");
+  JS_DefinePropertyGetSet(ctx, global, a,
+      JS_NewCFunction2(ctx, (JSCFunction *)js_win_get_scrollX,
+                       "get scrollX", 0, JS_CFUNC_getter, 0),
+      JS_UNDEFINED, JS_PROP_CONFIGURABLE);
+  JS_FreeAtom(ctx, a);
+
+  JS_SetPropertyStr(ctx, global, "scrollTo",
+      JS_NewCFunction(ctx, js_win_scrollTo, "scrollTo", 1));
+  JS_SetPropertyStr(ctx, global, "scrollBy",
+      JS_NewCFunction(ctx, js_win_scrollBy, "scrollBy", 1));
+  JS_SetPropertyStr(ctx, global, "getComputedStyle",
+      JS_NewCFunction(ctx, js_getComputedStyle, "getComputedStyle", 1));
+
+  /* innerWidth/innerHeight — many pages branch on these. Defaults
+   * track the EquinoxOS browser viewport. */
+  JS_SetPropertyStr(ctx, global, "innerWidth",  JS_NewInt32(ctx, 640));
+  JS_SetPropertyStr(ctx, global, "innerHeight", JS_NewInt32(ctx, 420));
+  JS_SetPropertyStr(ctx, global, "devicePixelRatio", JS_NewFloat64(ctx, 1.0));
+
+  JS_FreeValue(ctx, global);
+}
+
+/* ====================================================================
+ * R6/B1: navigator
+ * ================================================================== */
+
+void qjs_install_navigator(JSContext *ctx, const char *lang) {
+  if (!lang || !*lang) lang = "en";
+  /* Truncate to bare language tag; many call sites do
+   * navigator.language.slice(0,2) anyway, but giving them a clean
+   * "en"/"ru" avoids `en-US` surprises in switch-cases. */
+  char tag[8]; int i;
+  for (i = 0; i < 7 && lang[i] && lang[i] != ',' && lang[i] != ';'; i++)
+    tag[i] = lang[i];
+  tag[i] = '\0';
+
+  JSValue global = JS_GetGlobalObject(ctx);
+  JSValue nav = JS_NewObject(ctx);
+  JS_SetPropertyStr(ctx, nav, "language",  JS_NewString(ctx, tag));
+  JS_SetPropertyStr(ctx, nav, "userAgent",
+                    JS_NewString(ctx,
+      "Mozilla/5.0 (EquinoxOS; x86_64) EQX/0.1 like Gecko"));
+  JS_SetPropertyStr(ctx, nav, "appName",   JS_NewString(ctx, "Netscape"));
+  JS_SetPropertyStr(ctx, nav, "appVersion",JS_NewString(ctx, "5.0 (EquinoxOS)"));
+  JS_SetPropertyStr(ctx, nav, "platform",  JS_NewString(ctx, "EquinoxOS"));
+  JS_SetPropertyStr(ctx, nav, "vendor",    JS_NewString(ctx, "Equinox Collective"));
+  JS_SetPropertyStr(ctx, nav, "product",   JS_NewString(ctx, "Gecko"));
+  JS_SetPropertyStr(ctx, nav, "onLine",    JS_TRUE);
+  JS_SetPropertyStr(ctx, nav, "cookieEnabled", JS_FALSE);
+  JS_SetPropertyStr(ctx, nav, "doNotTrack",    JS_NULL);
+
+  /* navigator.languages = [tag] — 1-element array is enough for the
+   * usual `(navigator.languages||[]).map(...)` idioms. */
+  JSValue langs = JS_NewArray(ctx);
+  JS_SetPropertyUint32(ctx, langs, 0, JS_NewString(ctx, tag));
+  JS_SetPropertyStr(ctx, nav, "languages", langs);
+
+  JS_SetPropertyStr(ctx, global, "navigator", nav);
+  JS_FreeValue(ctx, global);
+}
+
+/* ====================================================================
  * Teardown
  * ================================================================== */
 

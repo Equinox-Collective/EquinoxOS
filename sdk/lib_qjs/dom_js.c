@@ -496,6 +496,694 @@ void qjs_dom_teardown(JSContext *ctx) {
  * Element.prototype entries
  * ------------------------------------------------------------------ */
 
+/* ====================================================================
+ * R6/B3: querySelectorAll + selector engine
+ *
+ * A compact CSS selector engine that handles real-world selectors
+ * found in modern hand-written sites, without dragging in a full
+ * CSS-3 implementation:
+ *
+ *   #id                 id match
+ *   tag                 tag match (case-insensitive)
+ *   .class              class token match (space-separated list)
+ *   [attr]              attribute presence
+ *   [attr=value]        attribute equality
+ *   [attr^=value]       prefix
+ *   [attr$=value]       suffix
+ *   [attr*=value]       substring
+ *   tag.class[attr=v]   compound — all simple parts ANDed
+ *   "a b"               descendant combinator (one or more spaces)
+ *
+ *  Not handled (uncommon in our target site):
+ *   - >  +  ~           child / adjacent / sibling combinators
+ *   - pseudo-classes    :hover :nth-child(...)
+ *   - escape sequences  \. etc.
+ *
+ *  Memory: parses into a stack-allocated `sel_t` (≤8 compounds × ≤16
+ *  simple parts). Selectors that don't fit return zero matches —
+ *  good enough for the sites we target.
+ * ================================================================== */
+
+#define SEL_MAX_COMPOUND   8
+#define SEL_MAX_SIMPLE    16
+
+typedef enum {
+  SIM_TAG = 0,
+  SIM_ID,
+  SIM_CLASS,
+  SIM_ATTR_HAS,
+  SIM_ATTR_EQ,
+  SIM_ATTR_PREFIX,
+  SIM_ATTR_SUFFIX,
+  SIM_ATTR_CONTAINS,
+} sim_kind_t;
+
+typedef struct {
+  sim_kind_t kind;
+  char       a[64];   /* tag / class / id / attr name */
+  char       b[64];   /* attr value */
+} sim_t;
+
+typedef struct {
+  sim_t    parts[SEL_MAX_SIMPLE];
+  int      n_parts;
+} compound_t;
+
+typedef struct {
+  compound_t comps[SEL_MAX_COMPOUND];
+  int        n_comps;
+  int        ok;
+} sel_t;
+
+static void sel_skip_ws(const char **pp) {
+  while (**pp == ' ' || **pp == '\t') (*pp)++;
+}
+
+/* Parse one compound selector starting at *pp. Stops on space or end. */
+static int sel_parse_compound(const char **pp, compound_t *out) {
+  const char *p = *pp;
+  out->n_parts = 0;
+  while (*p && *p != ' ' && *p != '\t' && *p != ',' && *p != '>' &&
+         *p != '+' && *p != '~') {
+    if (out->n_parts >= SEL_MAX_SIMPLE) return -1;
+    sim_t *s = &out->parts[out->n_parts];
+    s->a[0] = 0; s->b[0] = 0;
+    if (*p == '#' || *p == '.') {
+      s->kind = (*p == '#') ? SIM_ID : SIM_CLASS;
+      p++;
+      int i = 0;
+      while (*p && *p != ' ' && *p != '.' && *p != '#' && *p != '[' &&
+             *p != ',' && i < 63) s->a[i++] = *p++;
+      s->a[i] = 0;
+      if (i == 0) return -1;
+    } else if (*p == '[') {
+      p++;
+      int i = 0;
+      while (*p && *p != '=' && *p != ']' && *p != '^' && *p != '$' &&
+             *p != '*' && *p != '~' && *p != '|' && i < 63)
+        s->a[i++] = *p++;
+      s->a[i] = 0;
+      if (i == 0) return -1;
+      s->kind = SIM_ATTR_HAS;
+      if (*p == '^' || *p == '$' || *p == '*') {
+        char op = *p++;
+        if (op == '^') s->kind = SIM_ATTR_PREFIX;
+        else if (op == '$') s->kind = SIM_ATTR_SUFFIX;
+        else s->kind = SIM_ATTR_CONTAINS;
+      }
+      if (*p == '=') {
+        if (s->kind == SIM_ATTR_HAS) s->kind = SIM_ATTR_EQ;
+        p++;
+        char q = 0;
+        if (*p == '"' || *p == '\'') { q = *p++; }
+        int j = 0;
+        while (*p && *p != ']' && (q ? *p != q : (*p != ' ' && *p != ']'))
+               && j < 63)
+          s->b[j++] = *p++;
+        s->b[j] = 0;
+        if (q && *p == q) p++;
+      }
+      if (*p == ']') p++;
+    } else {
+      /* bare tag */
+      s->kind = SIM_TAG;
+      int i = 0;
+      while (*p && *p != ' ' && *p != '.' && *p != '#' && *p != '[' &&
+             *p != ',' && i < 63) {
+        char c = *p++;
+        s->a[i++] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+      }
+      s->a[i] = 0;
+      if (i == 0) return -1;
+    }
+    out->n_parts++;
+  }
+  *pp = p;
+  return out->n_parts > 0 ? 0 : -1;
+}
+
+static void sel_parse(const char *src, sel_t *out) {
+  out->n_comps = 0; out->ok = 0;
+  if (!src) return;
+  const char *p = src;
+  sel_skip_ws(&p);
+  while (*p && out->n_comps < SEL_MAX_COMPOUND) {
+    /* stop at "," — we don't support selector lists; treat as
+     * end-of-selector so callers can extend later if needed. */
+    if (*p == ',') break;
+    if (sel_parse_compound(&p, &out->comps[out->n_comps]) != 0) return;
+    out->n_comps++;
+    sel_skip_ws(&p);
+  }
+  out->ok = (out->n_comps > 0);
+}
+
+static int classlist_has_token(const char *list, const char *tok) {
+  if (!list || !*list || !tok || !*tok) return 0;
+  int tlen = 0; while (tok[tlen]) tlen++;
+  const char *p = list;
+  while (*p) {
+    while (*p == ' ' || *p == '\t') p++;
+    const char *s = p;
+    while (*p && *p != ' ' && *p != '\t') p++;
+    int len = (int)(p - s);
+    if (len == tlen) {
+      int eq = 1;
+      for (int i = 0; i < tlen; i++) if (s[i] != tok[i]) { eq = 0; break; }
+      if (eq) return 1;
+    }
+  }
+  return 0;
+}
+
+static int str_starts(const char *s, const char *pre) {
+  while (*pre) { if (*s++ != *pre++) return 0; } return 1;
+}
+static int str_ends(const char *s, const char *suf) {
+  int ls = 0, lp = 0;
+  while (s[ls]) ls++;
+  while (suf[lp]) lp++;
+  if (lp > ls) return 0;
+  for (int i = 0; i < lp; i++) if (s[ls - lp + i] != suf[i]) return 0;
+  return 1;
+}
+static int str_contains(const char *s, const char *needle) {
+  if (!*needle) return 1;
+  for (; *s; s++) if (str_starts(s, needle)) return 1;
+  return 0;
+}
+
+static int match_simple(dom_node_t *n, const sim_t *s) {
+  if (!n || n->type != DOM_NODE_ELEMENT) return 0;
+  switch (s->kind) {
+    case SIM_TAG: {
+      if (!n->tag_name) return 0;
+      const char *a = s->a; const char *b = n->tag_name;
+      while (*a && *b && *a == *b) { a++; b++; }
+      return *a == 0 && *b == 0;
+    }
+    case SIM_ID: {
+      const char *v = dom_get_attr(n, "id");
+      if (!v) return 0;
+      const char *a = s->a;
+      while (*a && *v && *a == *v) { a++; v++; }
+      return *a == 0 && *v == 0;
+    }
+    case SIM_CLASS: {
+      const char *cls = dom_get_attr(n, "class");
+      return classlist_has_token(cls, s->a);
+    }
+    case SIM_ATTR_HAS: {
+      return dom_get_attr(n, s->a) != NULL;
+    }
+    case SIM_ATTR_EQ: {
+      const char *v = dom_get_attr(n, s->a);
+      if (!v) return 0;
+      const char *b = s->b;
+      while (*b && *v && *b == *v) { b++; v++; }
+      return *b == 0 && *v == 0;
+    }
+    case SIM_ATTR_PREFIX: {
+      const char *v = dom_get_attr(n, s->a);
+      return v ? str_starts(v, s->b) : 0;
+    }
+    case SIM_ATTR_SUFFIX: {
+      const char *v = dom_get_attr(n, s->a);
+      return v ? str_ends(v, s->b) : 0;
+    }
+    case SIM_ATTR_CONTAINS: {
+      const char *v = dom_get_attr(n, s->a);
+      return v ? str_contains(v, s->b) : 0;
+    }
+  }
+  return 0;
+}
+
+static int match_compound(dom_node_t *n, const compound_t *c) {
+  for (int i = 0; i < c->n_parts; i++)
+    if (!match_simple(n, &c->parts[i])) return 0;
+  return 1;
+}
+
+/* Does `n` match the full selector? The last compound must match n
+ * itself; each previous compound (in order) must match SOME ancestor
+ * such that the ancestor chain runs in selector order top→down. */
+static int match_full(dom_node_t *n, const sel_t *sel) {
+  if (!sel->ok || sel->n_comps == 0) return 0;
+  int last = sel->n_comps - 1;
+  if (!match_compound(n, &sel->comps[last])) return 0;
+  /* Walk up; for each remaining compound try to find an ancestor. */
+  dom_node_t *anc = n->parent;
+  for (int i = last - 1; i >= 0; i--) {
+    while (anc && !match_compound(anc, &sel->comps[i])) anc = anc->parent;
+    if (!anc) return 0;
+    anc = anc->parent;
+  }
+  return 1;
+}
+
+static void qsa_collect(JSContext *ctx, dom_node_t *root, const sel_t *sel,
+                        JSValue arr, uint32_t *i) {
+  if (!root) return;
+  if (root->type == DOM_NODE_ELEMENT && match_full(root, sel))
+    JS_SetPropertyUint32(ctx, arr, (*i)++, wrap_element(ctx, root));
+  for (dom_node_t *c = root->first_child; c; c = c->next_sibling)
+    qsa_collect(ctx, c, sel, arr, i);
+}
+
+static dom_node_t *qsa_first(dom_node_t *root, const sel_t *sel) {
+  if (!root) return NULL;
+  if (root->type == DOM_NODE_ELEMENT && match_full(root, sel)) return root;
+  for (dom_node_t *c = root->first_child; c; c = c->next_sibling) {
+    dom_node_t *r = qsa_first(c, sel);
+    if (r) return r;
+  }
+  return NULL;
+}
+
+static JSValue qsa_generic(JSContext *ctx, JSValueConst this_val,
+                           int argc, JSValueConst *argv, int find_all) {
+  (void)argc;
+  dom_node_t *root = unwrap_element(this_val);
+  if (!root) return find_all ? JS_NewArray(ctx) : JS_NULL;
+  const char *sel_src = JS_ToCString(ctx, argv[0]);
+  if (!sel_src) return JS_EXCEPTION;
+  sel_t sel;
+  sel_parse(sel_src, &sel);
+  JS_FreeCString(ctx, sel_src);
+  if (!sel.ok) return find_all ? JS_NewArray(ctx) : JS_NULL;
+
+  /* Search descendants only — exclude `this` so callers like
+   * node.querySelectorAll('a') don't match the node itself. */
+  if (find_all) {
+    JSValue arr = JS_NewArray(ctx);
+    uint32_t i = 0;
+    for (dom_node_t *c = root->first_child; c; c = c->next_sibling)
+      qsa_collect(ctx, c, &sel, arr, &i);
+    return arr;
+  } else {
+    for (dom_node_t *c = root->first_child; c; c = c->next_sibling) {
+      dom_node_t *r = qsa_first(c, &sel);
+      if (r) return wrap_element(ctx, r);
+    }
+    return JS_NULL;
+  }
+}
+
+static JSValue dom_el_querySelectorAll(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv) {
+  return qsa_generic(ctx, this_val, argc, argv, 1);
+}
+
+static JSValue dom_el_querySelector(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv) {
+  return qsa_generic(ctx, this_val, argc, argv, 0);
+}
+
+/* ====================================================================
+ * R6/B3: classList
+ * ================================================================== */
+
+static dom_node_t *classlist_node(JSValueConst this_val) {
+  /* The classList object stashes the underlying element pointer on
+   * its own opaque field via an unused property; instead we reuse the
+   * Element class id so JS_GetOpaque returns the element directly. */
+  return (dom_node_t *)JS_GetOpaque(this_val, dom_element_class_id);
+}
+
+static void classlist_write(dom_node_t *n, const char *list) {
+  /* Collapse leading/trailing spaces and write back. */
+  while (*list == ' ') list++;
+  char buf[1024]; int w = 0;
+  bool prev_ws = false;
+  while (*list && w < (int)sizeof(buf) - 1) {
+    char c = *list++;
+    if (c == ' ' || c == '\t') {
+      if (!prev_ws) { buf[w++] = ' '; prev_ws = true; }
+    } else { buf[w++] = c; prev_ws = false; }
+  }
+  while (w > 0 && buf[w-1] == ' ') w--;
+  buf[w] = 0;
+  dom_set_attr(n, "class", buf);
+  dom_mark_dirty();
+}
+
+static JSValue cl_add(JSContext *ctx, JSValueConst this_val,
+                      int argc, JSValueConst *argv) {
+  dom_node_t *n = classlist_node(this_val);
+  if (!n) return JS_UNDEFINED;
+  for (int i = 0; i < argc; i++) {
+    const char *tok = JS_ToCString(ctx, argv[i]);
+    if (!tok) continue;
+    const char *cur = dom_get_attr(n, "class");
+    if (!classlist_has_token(cur, tok)) {
+      char buf[1024];
+      if (cur && *cur)
+        snprintf(buf, sizeof(buf), "%s %s", cur, tok);
+      else
+        snprintf(buf, sizeof(buf), "%s", tok);
+      classlist_write(n, buf);
+    }
+    JS_FreeCString(ctx, tok);
+  }
+  return JS_UNDEFINED;
+}
+
+/* Build a new class string with `tok` removed (all occurrences). */
+static void classlist_remove_one(dom_node_t *n, const char *tok) {
+  const char *cur = dom_get_attr(n, "class");
+  if (!cur || !*cur) return;
+  int tlen = 0; while (tok[tlen]) tlen++;
+  char out[1024]; int w = 0;
+  const char *p = cur;
+  while (*p) {
+    while (*p == ' ') p++;
+    const char *s = p;
+    while (*p && *p != ' ') p++;
+    int len = (int)(p - s);
+    int match = (len == tlen);
+    if (match) for (int i = 0; i < tlen; i++) if (s[i] != tok[i]) { match = 0; break; }
+    if (!match && len > 0) {
+      if (w > 0 && w < (int)sizeof(out)-1) out[w++] = ' ';
+      for (int i = 0; i < len && w < (int)sizeof(out)-1; i++) out[w++] = s[i];
+    }
+  }
+  out[w] = 0;
+  dom_set_attr(n, "class", out);
+  dom_mark_dirty();
+}
+
+static JSValue cl_remove(JSContext *ctx, JSValueConst this_val,
+                         int argc, JSValueConst *argv) {
+  dom_node_t *n = classlist_node(this_val);
+  if (!n) return JS_UNDEFINED;
+  for (int i = 0; i < argc; i++) {
+    const char *tok = JS_ToCString(ctx, argv[i]);
+    if (!tok) continue;
+    classlist_remove_one(n, tok);
+    JS_FreeCString(ctx, tok);
+  }
+  return JS_UNDEFINED;
+}
+
+static JSValue cl_contains(JSContext *ctx, JSValueConst this_val,
+                           int argc, JSValueConst *argv) {
+  (void)argc;
+  dom_node_t *n = classlist_node(this_val);
+  if (!n) return JS_FALSE;
+  const char *tok = JS_ToCString(ctx, argv[0]);
+  if (!tok) return JS_FALSE;
+  int has = classlist_has_token(dom_get_attr(n, "class"), tok);
+  JS_FreeCString(ctx, tok);
+  return JS_NewBool(ctx, has);
+}
+
+static JSValue cl_toggle(JSContext *ctx, JSValueConst this_val,
+                         int argc, JSValueConst *argv) {
+  dom_node_t *n = classlist_node(this_val);
+  if (!n) return JS_FALSE;
+  const char *tok = JS_ToCString(ctx, argv[0]);
+  if (!tok) return JS_FALSE;
+  int has = classlist_has_token(dom_get_attr(n, "class"), tok);
+  int force_given = (argc >= 2);
+  int force = force_given ? JS_ToBool(ctx, argv[1]) : 0;
+  int want = force_given ? force : !has;
+  if (want && !has) {
+    const char *cur = dom_get_attr(n, "class");
+    char buf[1024];
+    if (cur && *cur) snprintf(buf, sizeof(buf), "%s %s", cur, tok);
+    else             snprintf(buf, sizeof(buf), "%s", tok);
+    classlist_write(n, buf);
+  } else if (!want && has) {
+    classlist_remove_one(n, tok);
+  }
+  JS_FreeCString(ctx, tok);
+  return JS_NewBool(ctx, want);
+}
+
+static JSValue cl_replace(JSContext *ctx, JSValueConst this_val,
+                          int argc, JSValueConst *argv) {
+  (void)argc;
+  dom_node_t *n = classlist_node(this_val);
+  if (!n) return JS_FALSE;
+  const char *a = JS_ToCString(ctx, argv[0]);
+  const char *b = JS_ToCString(ctx, argv[1]);
+  if (!a || !b) {
+    if (a) JS_FreeCString(ctx, a);
+    if (b) JS_FreeCString(ctx, b);
+    return JS_FALSE;
+  }
+  int has = classlist_has_token(dom_get_attr(n, "class"), a);
+  if (has) {
+    classlist_remove_one(n, a);
+    const char *cur = dom_get_attr(n, "class");
+    char buf[1024];
+    if (cur && *cur) snprintf(buf, sizeof(buf), "%s %s", cur, b);
+    else             snprintf(buf, sizeof(buf), "%s", b);
+    classlist_write(n, buf);
+  }
+  JS_FreeCString(ctx, a);
+  JS_FreeCString(ctx, b);
+  return JS_NewBool(ctx, has);
+}
+
+/* getter for element.classList. We build a fresh wrapper each time,
+ * stashing the element pointer on it via the Element class id so the
+ * helper methods can recover it without a separate class. */
+static JSValue dom_el_get_classList(JSContext *ctx, JSValueConst this_val) {
+  dom_node_t *n = unwrap_element(this_val);
+  if (!n) return JS_NULL;
+  JSValue obj = JS_NewObjectClass(ctx, dom_element_class_id);
+  JS_SetOpaque(obj, n);
+  JS_SetPropertyStr(ctx, obj, "add",
+      JS_NewCFunction(ctx, cl_add,      "add",      1));
+  JS_SetPropertyStr(ctx, obj, "remove",
+      JS_NewCFunction(ctx, cl_remove,   "remove",   1));
+  JS_SetPropertyStr(ctx, obj, "contains",
+      JS_NewCFunction(ctx, cl_contains, "contains", 1));
+  JS_SetPropertyStr(ctx, obj, "toggle",
+      JS_NewCFunction(ctx, cl_toggle,   "toggle",   1));
+  JS_SetPropertyStr(ctx, obj, "replace",
+      JS_NewCFunction(ctx, cl_replace,  "replace",  2));
+  return obj;
+}
+
+/* ====================================================================
+ * R6/B3: dataset
+ *
+ * Build a snapshot object of every `data-*` attribute, exposed as
+ * `dataset.foo` for an attribute called `data-foo`. Writes via
+ * `el.dataset.foo = "x"` propagate back to the element attribute via
+ * a per-key setter (rare in practice, but the site uses
+ * `ul.dataset.loaded = '1'`).
+ * ================================================================== */
+
+/* dataset proxy: a fresh object built on each access, with one entry
+ * per `data-*` attribute. Writes go through a (somewhat hacky) closure
+ * — to keep things simple we just provide a setter via Proxy-less
+ * Object.defineProperty stamping the value back onto the underlying
+ * element on every write. */
+
+/* For writes, we stash the element node on the dataset object itself
+ * (via Element class id opaque), then convert key→data-key on
+ * defineProperty('set'). To stay small we install a generic proxy:
+ * the dataset object IS the element wrapper plus we expose camelCase
+ * properties whose getter reads attribute and setter writes it. */
+
+typedef struct { char a[64]; } ds_key_ctx_t;  /* unused — we keep keys
+                                                 in the JS property name
+                                                 directly */
+
+/* Convert "fooBar" → "data-foo-bar" into out (lowercased). */
+static void ds_camel_to_attr(const char *in, char *out, size_t cap) {
+  size_t w = 0;
+  const char *p0 = "data-";
+  for (int i = 0; p0[i] && w < cap-1; i++) out[w++] = p0[i];
+  for (; *in && w < cap-1; in++) {
+    char c = *in;
+    if (c >= 'A' && c <= 'Z') {
+      if (w < cap-1) out[w++] = '-';
+      if (w < cap-1) out[w++] = (char)(c + 32);
+    } else out[w++] = c;
+  }
+  out[w] = 0;
+}
+
+/* Convert "data-foo-bar" → "fooBar". Returns 1 if input is data-*. */
+static int ds_attr_to_camel(const char *in, char *out, size_t cap) {
+  if (in[0] != 'd' || in[1] != 'a' || in[2] != 't' || in[3] != 'a' ||
+      in[4] != '-')
+    return 0;
+  const char *p = in + 5;
+  size_t w = 0;
+  int up = 0;
+  while (*p && w < cap-1) {
+    char c = *p++;
+    if (c == '-') { up = 1; continue; }
+    if (up) { c = (c >= 'a' && c <= 'z') ? (char)(c - 32) : c; up = 0; }
+    out[w++] = c;
+  }
+  out[w] = 0;
+  return 1;
+}
+
+/* The dataset object is created via a JS Proxy emulated by getters
+ * and setters per key. Since we don't know the keys up-front for
+ * writes that introduce new ones, we fall back to "snapshot of
+ * existing data-* attributes" with stamped setters; new writes are
+ * also caught by adding a JS Proxy with get/set handlers. Implement
+ * via Proxy. */
+
+static JSValue ds_proxy_get(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv) {
+  (void)argc; (void)this_val;
+  /* argv: target, key, receiver */
+  dom_node_t *n = unwrap_element(argv[0]);
+  if (!n) return JS_UNDEFINED;
+  if (JS_IsSymbol(argv[1])) return JS_UNDEFINED;
+  const char *key = JS_ToCString(ctx, argv[1]);
+  if (!key) return JS_UNDEFINED;
+  char attr[80];
+  ds_camel_to_attr(key, attr, sizeof(attr));
+  JS_FreeCString(ctx, key);
+  const char *v = dom_get_attr(n, attr);
+  return v ? JS_NewString(ctx, v) : JS_UNDEFINED;
+}
+
+static JSValue ds_proxy_set(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv) {
+  (void)argc; (void)this_val;
+  dom_node_t *n = unwrap_element(argv[0]);
+  if (!n) return JS_TRUE;
+  if (JS_IsSymbol(argv[1])) return JS_TRUE;
+  const char *key = JS_ToCString(ctx, argv[1]);
+  if (!key) return JS_TRUE;
+  char attr[80];
+  ds_camel_to_attr(key, attr, sizeof(attr));
+  JS_FreeCString(ctx, key);
+  const char *val = JS_ToCString(ctx, argv[2]);
+  dom_set_attr(n, attr, val ? val : "");
+  dom_mark_dirty();
+  if (val) JS_FreeCString(ctx, val);
+  return JS_TRUE;
+}
+
+static JSValue ds_proxy_has(JSContext *ctx, JSValueConst this_val,
+                            int argc, JSValueConst *argv) {
+  (void)ctx; (void)this_val; (void)argc;
+  dom_node_t *n = unwrap_element(argv[0]);
+  if (!n) return JS_FALSE;
+  if (JS_IsSymbol(argv[1])) return JS_FALSE;
+  const char *key = JS_ToCString(ctx, argv[1]);
+  if (!key) return JS_FALSE;
+  char attr[80];
+  ds_camel_to_attr(key, attr, sizeof(attr));
+  JS_FreeCString(ctx, key);
+  return JS_NewBool(ctx, dom_get_attr(n, attr) != NULL);
+}
+
+static JSValue dom_el_get_dataset(JSContext *ctx, JSValueConst this_val) {
+  dom_node_t *n = unwrap_element(this_val);
+  if (!n) return JS_NULL;
+  /* Build a target object holding the element pointer and pre-populate
+   * with snapshot keys (useful for `for (const k of Object.keys(ds))`). */
+  JSValue target = JS_NewObjectClass(ctx, dom_element_class_id);
+  JS_SetOpaque(target, n);
+  for (dom_attr_t *a = n->attrs; a; a = a->next) {
+    char camel[80];
+    if (ds_attr_to_camel(a->name, camel, sizeof(camel)))
+      JS_SetPropertyStr(ctx, target, camel,
+                        JS_NewString(ctx, a->value ? a->value : ""));
+  }
+
+  /* Wrap with a Proxy so writes/reads of unknown keys also flow
+   * through to the underlying element. */
+  JSValue global = JS_GetGlobalObject(ctx);
+  JSValue ProxyCtor = JS_GetPropertyStr(ctx, global, "Proxy");
+  JS_FreeValue(ctx, global);
+  if (!JS_IsConstructor(ctx, ProxyCtor)) {
+    JS_FreeValue(ctx, ProxyCtor);
+    return target;
+  }
+  JSValue handler = JS_NewObject(ctx);
+  JS_SetPropertyStr(ctx, handler, "get",
+      JS_NewCFunction(ctx, ds_proxy_get, "get", 3));
+  JS_SetPropertyStr(ctx, handler, "set",
+      JS_NewCFunction(ctx, ds_proxy_set, "set", 4));
+  JS_SetPropertyStr(ctx, handler, "has",
+      JS_NewCFunction(ctx, ds_proxy_has, "has", 2));
+  JSValue args[2] = { target, handler };
+  JSValue proxy = JS_CallConstructor(ctx, ProxyCtor, 2, args);
+  JS_FreeValue(ctx, target);
+  JS_FreeValue(ctx, handler);
+  JS_FreeValue(ctx, ProxyCtor);
+  if (JS_IsException(proxy)) {
+    qjs_dump_exception(ctx);
+    return JS_NULL;
+  }
+  return proxy;
+}
+
+/* ====================================================================
+ * R6/B3: getBoundingClientRect + offsetWidth/Height
+ *
+ * We don't have a real layout engine to produce true rects, so we
+ * return a benign placeholder. Pages use this primarily for two
+ * patterns:
+ *   - element.getBoundingClientRect().top  (for in-page scroll math)
+ *   - element.offsetWidth                  (for forced reflow tricks)
+ * Both still "work" with a zero-rect: scroll math becomes scrollY-80,
+ * which our scrollTo just clamps to >=0.
+ * ================================================================== */
+
+static JSValue dom_el_getBoundingClientRect(JSContext *ctx,
+                                            JSValueConst this_val,
+                                            int argc, JSValueConst *argv) {
+  (void)this_val; (void)argc; (void)argv;
+  JSValue r = JS_NewObject(ctx);
+  JS_SetPropertyStr(ctx, r, "x",      JS_NewInt32(ctx, 0));
+  JS_SetPropertyStr(ctx, r, "y",      JS_NewInt32(ctx, 0));
+  JS_SetPropertyStr(ctx, r, "top",    JS_NewInt32(ctx, 0));
+  JS_SetPropertyStr(ctx, r, "left",   JS_NewInt32(ctx, 0));
+  JS_SetPropertyStr(ctx, r, "right",  JS_NewInt32(ctx, 0));
+  JS_SetPropertyStr(ctx, r, "bottom", JS_NewInt32(ctx, 0));
+  JS_SetPropertyStr(ctx, r, "width",  JS_NewInt32(ctx, 0));
+  JS_SetPropertyStr(ctx, r, "height", JS_NewInt32(ctx, 0));
+  return r;
+}
+
+static JSValue dom_el_get_offsetWidth(JSContext *ctx, JSValueConst this_val) {
+  (void)ctx; (void)this_val;
+  return JS_NewInt32(ctx, 0);
+}
+static JSValue dom_el_get_offsetHeight(JSContext *ctx, JSValueConst this_val) {
+  (void)ctx; (void)this_val;
+  return JS_NewInt32(ctx, 0);
+}
+static JSValue dom_el_get_clientWidth(JSContext *ctx, JSValueConst this_val) {
+  (void)ctx; (void)this_val;
+  return JS_NewInt32(ctx, 0);
+}
+static JSValue dom_el_get_clientHeight(JSContext *ctx, JSValueConst this_val) {
+  (void)ctx; (void)this_val;
+  return JS_NewInt32(ctx, 0);
+}
+
+/* ====================================================================
+ * R6/B3: style stub
+ *
+ * Pages often do `el.style.transform = 'foo'`. We don't actually
+ * support arbitrary CSS, but JS shouldn't crash when poking style —
+ * return a plain object that accepts any property assignment.
+ * ================================================================== */
+
+static JSValue dom_el_get_style(JSContext *ctx, JSValueConst this_val) {
+  (void)this_val;
+  /* A bare object — assignments to .transform/.opacity/etc. are
+   * accepted but have no visual effect. */
+  return JS_NewObject(ctx);
+}
+
 static const JSCFunctionListEntry dom_element_proto[] = {
   JS_CGETSET_DEF("tagName",      dom_el_get_tagName,     NULL),
   JS_CGETSET_DEF("id",           dom_el_get_id,          NULL),
@@ -505,9 +1193,19 @@ static const JSCFunctionListEntry dom_element_proto[] = {
   JS_CGETSET_DEF("value",        dom_el_get_value,       dom_el_set_value),
   JS_CGETSET_DEF("children",     dom_el_get_children,    NULL),
   JS_CGETSET_DEF("parentNode",   dom_el_get_parentNode,  NULL),
+  JS_CGETSET_DEF("classList",    dom_el_get_classList,   NULL),
+  JS_CGETSET_DEF("dataset",      dom_el_get_dataset,     NULL),
+  JS_CGETSET_DEF("style",        dom_el_get_style,       NULL),
+  JS_CGETSET_DEF("offsetWidth",  dom_el_get_offsetWidth,  NULL),
+  JS_CGETSET_DEF("offsetHeight", dom_el_get_offsetHeight, NULL),
+  JS_CGETSET_DEF("clientWidth",  dom_el_get_clientWidth,  NULL),
+  JS_CGETSET_DEF("clientHeight", dom_el_get_clientHeight, NULL),
   JS_CFUNC_DEF("getAttribute",            1, dom_el_getAttribute),
   JS_CFUNC_DEF("hasAttribute",            1, dom_el_hasAttribute),
   JS_CFUNC_DEF("getElementsByTagName",    1, dom_el_getElementsByTagName),
+  JS_CFUNC_DEF("querySelector",           1, dom_el_querySelector),
+  JS_CFUNC_DEF("querySelectorAll",        1, dom_el_querySelectorAll),
+  JS_CFUNC_DEF("getBoundingClientRect",   0, dom_el_getBoundingClientRect),
   JS_CFUNC_DEF("setAttribute",            2, dom_el_setAttribute),
   JS_CFUNC_DEF("removeAttribute",         1, dom_el_removeAttribute),
   JS_CFUNC_DEF("appendChild",             1, dom_el_appendChild),
@@ -581,24 +1279,9 @@ static JSValue doc_createTextNode(JSContext *ctx, JSValueConst this_val,
   return wrap_element(ctx, n);
 }
 
-/* Minimal querySelector: only `#id` and bare `tag` selectors (good
- * enough for early scripts; full selector engine waits). */
-static JSValue doc_querySelector(JSContext *ctx, JSValueConst this_val,
-                                 int argc, JSValueConst *argv) {
-  (void)argc;
-  dom_node_t *root = unwrap_element(this_val);
-  if (!root) return JS_NULL;
-  const char *sel = JS_ToCString(ctx, argv[0]);
-  if (!sel) return JS_EXCEPTION;
-  dom_node_t *r = NULL;
-  if (sel[0] == '#') {
-    r = dom_get_element_by_id(root, sel + 1);
-  } else {
-    r = dom_get_first_element_by_tag(root, sel);
-  }
-  JS_FreeCString(ctx, sel);
-  return r ? wrap_element(ctx, r) : JS_NULL;
-}
+/* Legacy minimal doc_querySelector removed in R6/B3 — see the
+ * selector engine above; document now binds dom_el_querySelector
+ * directly. */
 
 /* ------------------------------------------------------------------ */
 /* installation                                                        */
@@ -638,8 +1321,13 @@ void qjs_install_dom(JSContext *ctx, dom_node_t *doc) {
   JS_SetPropertyStr(ctx, document, "getElementsByTagName",
       JS_NewCFunction(ctx, doc_getElementsByTagName,
                       "getElementsByTagName", 1));
+  /* R6/B3: document.querySelector/All use the selector engine; the
+   * Element prototype's matching helpers work on the document since
+   * we wrap it with the same class id. */
   JS_SetPropertyStr(ctx, document, "querySelector",
-      JS_NewCFunction(ctx, doc_querySelector, "querySelector", 1));
+      JS_NewCFunction(ctx, dom_el_querySelector,    "querySelector",    1));
+  JS_SetPropertyStr(ctx, document, "querySelectorAll",
+      JS_NewCFunction(ctx, dom_el_querySelectorAll, "querySelectorAll", 1));
   JS_SetPropertyStr(ctx, document, "createElement",
       JS_NewCFunction(ctx, doc_createElement, "createElement", 1));
   JS_SetPropertyStr(ctx, document, "createTextNode",

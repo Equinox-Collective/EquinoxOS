@@ -139,6 +139,8 @@ void qjs_run_page_scripts(dom_node_t *doc,
   qjs_install_console(ctx);
   qjs_install_dom(ctx, doc);
   qjs_install_window(ctx, page_url);
+  qjs_install_navigator(ctx, "en");
+  qjs_install_scroll(ctx);
   qjs_install_fetch(ctx, tas, tas_num);
   qjs_install_storage(ctx);
   qjs_install_timers(ctx);
@@ -199,6 +201,8 @@ qjs_page_t *qjs_page_create(dom_node_t *doc,
   qjs_install_console(p->ctx);
   qjs_install_dom    (p->ctx, doc);
   qjs_install_window (p->ctx, page_url);
+  qjs_install_navigator(p->ctx, "en");
+  qjs_install_scroll (p->ctx);
   if (page_url) {
     strncpy(p->url, page_url, sizeof(p->url) - 1);
     p->url[sizeof(p->url) - 1] = 0;
