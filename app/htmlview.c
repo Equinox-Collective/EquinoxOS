@@ -1338,7 +1338,7 @@ static void parse_html(const char *html, uint32_t size) {
    * tags run before render. Mutations from JS are not yet honored
    * (J6b), so the render below reflects the post-parse tree as-is —
    * scripts can still observe the DOM and produce console output. */
-  qjs_run_page_scripts(doc, TAs_MOZ, TAs_MOZ_NUM);
+  qjs_run_page_scripts(doc, current_url, TAs_MOZ, TAs_MOZ_NUM);
 #endif
 
   walk_ctx_t w;

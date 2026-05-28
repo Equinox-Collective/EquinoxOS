@@ -46,7 +46,7 @@ int main(int argc, char **argv) {
   /* No TAs — fetch from JS can still hit local files; http(s) calls
    * will fail with EQ_HTTP_ERR_NO_ANCHORS, which is what we want here
    * to keep the test offline. */
-  qjs_run_page_scripts(doc, NULL, 0);
+  qjs_run_page_scripts(doc, path, NULL, 0);
 
   if (print_after) {
     printf("--- DOM after scripts ---\n");
