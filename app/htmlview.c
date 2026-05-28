@@ -2472,9 +2472,13 @@ static void render(const char *filename) {
       bool checked  = dom_get_attr(n, "checked") != NULL;
       bool prev     = checked;
 
-      char id_label[24];
-      sprintf(id_label, "tog@%p", (void *)n);
-      eid_checkbox(&ui, id_label, cur_x, cur_y - 2, &checked);
+      /* eid_checkbox renders `label` as visible text next to the
+       * box. We want the surrounding HTML text (typically a sibling
+       * <label> or trailing text node) to provide the visible
+       * caption, so pass an empty string here. The id is derived
+       * from (label, x, y) — different checkboxes naturally get
+       * different ids via their y coordinate. */
+      eid_checkbox(&ui, "", cur_x, cur_y - 2, &checked);
 
       if (checked != prev) {
         bool fire_change = true;
