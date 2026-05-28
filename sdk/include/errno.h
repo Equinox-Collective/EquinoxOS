@@ -14,5 +14,6 @@ extern int errno;
 #define ENOSPC  28  // No space left on device
 #define EDOM 33     // Domain error (аргумент вне области определения)
 #define ERANGE 34
+#define ETIMEDOUT 110  // Connection / wait timed out (used by QuickJS)
 
 #endif
