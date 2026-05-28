@@ -557,6 +557,21 @@ static void push_style_state(void) {
   if (style_depth < MAX_STYLE_STACK - 1) {
     style_stack[style_depth + 1] = style_stack[style_depth];
     style_depth++;
+    /* Container-layout CSS (display, flex-*, grid-*, gap) is NOT
+     * inherited — it describes how *this* element lays out its
+     * own children. Reset on the new frame so a grid/flex parent
+     * doesn't accidentally re-fire emit_grid_container /
+     * emit_flex_container for every nested descendant. The
+     * descendant's own CSS rule (if any) will reinstate these
+     * fields via apply_css_to_current_state. */
+    style_stack[style_depth].display     = 0;
+    style_stack[style_depth].flex_dir    = 0;
+    style_stack[style_depth].gap_px      = 0;
+    style_stack[style_depth].justify     = 0;
+    style_stack[style_depth].align_items = 0;
+    style_stack[style_depth].flex_grow   = 0;
+    style_stack[style_depth].flex_basis  = 0;
+    style_stack[style_depth].grid_cols[0] = '\0';
   }
 }
 
@@ -1049,9 +1064,9 @@ static void parse_css_block(const char *css, int css_len) {
     sel[si] = '\0';
     if (p >= end) break;
     if (*p != '{') {
-      /* Selector buffer overflowed (super-long list). Skip over this
-       * rule's body so we can keep parsing the rest of the stylesheet
-       * instead of bailing out entirely. */
+      /* Selector buffer overflowed even at SEL_BUF (super-long list).
+       * Skip over this rule's body so we can keep parsing the rest of
+       * the stylesheet instead of bailing out entirely. */
       while (p < end && *p != '{') p++;
       if (p >= end) break;
       p++; /* skip { */
@@ -1122,12 +1137,6 @@ static void parse_css_block(const char *css, int css_len) {
 
 /* ── CSS: extract all <style> blocks from HTML ───────────────── */
 static void extract_css(const char *html, uint32_t size) {
-  {
-    char dbg[96];
-    sprintf(dbg, "[CSS] extract_css(html=%p, size=%u) prev_rules=%d\n",
-            (void *)html, size, css_rule_count);
-    print(dbg);
-  }
   css_rule_count = 0;
 
   for (uint32_t i = 0; i + 6 < size; i++) {
@@ -2322,21 +2331,10 @@ static void emit_grid_container(walk_ctx_t *w, dom_node_t *n) {
   int align       = style_stack[style_depth].align_items;
   const char *spec = style_stack[style_depth].grid_cols;
 
-  /* DEBUG L5: log entry conditions so we can see why grid degrades. */
-  {
-    char dbg[256];
-    sprintf(dbg, "[GRID] tag=%s cls=%s w=%d gap=%d spec='%s'\n",
-            n->tag_name,
-            dom_get_attr(n, "class") ? dom_get_attr(n, "class") : "",
-            container_w, gap, spec);
-    print(dbg);
-  }
-
   w_flush(w);
 
   /* No template → fall back to plain block recursion. */
   if (!spec[0]) {
-    print("[GRID]   -> no spec, fallback to block\n");
     for (dom_node_t *c = n->first_child; c; c = c->next_sibling)
       w_emit_node(w, c);
     return;
@@ -2999,12 +2997,6 @@ static void rebuild_lines_from_dom(void) {
 }
 
 static void parse_html(const char *html, uint32_t size) {
-  {
-    char dbg[96];
-    sprintf(dbg, "[PARSE] parse_html(size=%u) legacy=%d\n",
-            size, (int)g_use_legacy_parser);
-    print(dbg);
-  }
   if (g_use_legacy_parser) { parse_html_legacy(html, size); return; }
 
   /* Drop the previous page's runtime + tree before we leak. The free
@@ -3025,20 +3017,6 @@ static void parse_html(const char *html, uint32_t size) {
 
   copy_title_from_html(html, size);
   extract_css(html, size);
-
-  /* DEBUG: dump CSS rule count + all selectors so we can see exactly
-   * where parse_css_block gives up. */
-  {
-    char dbg[128];
-    sprintf(dbg, "[CSS] BROWSER_BUILD: %d rules\n", css_rule_count);
-    print(dbg);
-    for (int d = 0; d < css_rule_count; d++) {
-      sprintf(dbg, "  [%03d] '%s' disp=%d gc='%.32s'\n", d,
-              css_rules[d].selector, css_rules[d].display,
-              css_rules[d].grid_cols);
-      print(dbg);
-    }
-  }
 
   g_doc = dom_parse(html, size);
   if (!g_doc) {
