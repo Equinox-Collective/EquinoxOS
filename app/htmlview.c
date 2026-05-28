@@ -2863,12 +2863,21 @@ static void render(const char *filename) {
         if (lines[idx].css_align == ALIGN_CENTER &&
             im->w < CONTENT_W)
           draw_x = CONTENT_X + (CONTENT_W - im->w) / 2;
-        /* Source-over blit with the alpha channel collapsed to a
-         * binary mask — page backgrounds in our window are white,
-         * which matches the predominant transparent-PNG use case
-         * (logos with antialiased edges). For full alpha
-         * compositing we'd need to read the framebuffer pixel,
-         * blend, and write back; keep that for later. */
+
+        /* R6/B4 follow-up: paint a soft-grey "card" behind the
+         * image first, then alpha-composite the pixels on top.
+         * Without this a transparent PNG logo whose foreground is
+         * pure white (very common — site logos targeting dark
+         * headers) disappears completely on our white page
+         * background. The card gives those white pixels something
+         * to contrast against, and the proper alpha blend keeps
+         * antialiased edges smooth instead of speckled. */
+        const uint32_t CLR_IMG_CARD = 0xF1F3F4;  /* Google grey 50 */
+        const int      PAD          = 6;
+        eid_draw_rect(fb, WIN_W, WIN_H,
+                      draw_x - PAD, draw_y - PAD,
+                      im->w + PAD * 2, im->h + PAD * 2, CLR_IMG_CARD);
+
         for (int py = 0; py < im->h; py++) {
           int fy = draw_y + py;
           if (fy < 0 || fy >= WIN_H - 18) continue; /* clip status bar */
@@ -2877,16 +2886,27 @@ static void render(const char *filename) {
           for (int px = 0; px < im->w; px++) {
             int fx = draw_x + px;
             if (fx < 0 || fx >= WIN_W) { dst++; src += 4; continue; }
-            uint8_t a = src[3];
-            if (a >= 128) {
+            uint32_t a = src[3];
+            if (a == 0) { dst++; src += 4; continue; }
+            if (a == 255) {
               *dst = ((uint32_t)src[0] << 16) |
                      ((uint32_t)src[1] <<  8) |
                      ((uint32_t)src[2]);
+            } else {
+              /* source-over over the already-drawn card pixel */
+              uint32_t bg = *dst;
+              uint32_t br = (bg >> 16) & 0xFF;
+              uint32_t bgc= (bg >>  8) & 0xFF;
+              uint32_t bb = (bg      ) & 0xFF;
+              uint32_t r  = (src[0] * a + br * (255 - a)) / 255;
+              uint32_t g  = (src[1] * a + bgc* (255 - a)) / 255;
+              uint32_t b  = (src[2] * a + bb * (255 - a)) / 255;
+              *dst = (r << 16) | (g << 8) | b;
             }
             dst++; src += 4;
           }
         }
-        cur_y += im->h + 6;
+        cur_y += im->h + PAD * 2 + 6;
       } else {
         cur_y += LINE_H;
       }
