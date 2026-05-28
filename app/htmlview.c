@@ -2562,6 +2562,20 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
     style_stack[style_depth].color = CLR_MUTED;
   } else if (tag_eq(tag, "u")) {
     style_stack[style_depth].underline = true;
+  } else if (tag_eq(tag, "span")) {
+    /* R6/L5+ chip separator: a `<span>` with its own CSS background
+     * (the typical `.badge` / chip pattern) is always meant to read
+     * as a discrete pill. We don't render an inline-block box, but
+     * we *do* break the word boundary so consecutive badges with
+     * no whitespace between tags ("</span><span>") don't glue into
+     * one giant word like "Limine boot4-level paging".
+     * append_word's own separator logic then inserts a space the
+     * next time a word is pushed. */
+    if (style_stack[style_depth].bg && w->word_len > 0) {
+      append_word(w->current, &w->current_len, w->word, w->word_len,
+                  w->style, w->in_list);
+      w->word_len = 0;
+    }
   } else if (tag_eq(tag, "a")) {
     /* R6: force a word boundary on link open so consecutive inline
      * <a>…</a><a>…</a> pairs without surrounding whitespace
@@ -2790,6 +2804,15 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
     }
     w->style = w->in_list ? STYLE_BULLET : STYLE_NORMAL;
     tag_context[0] = 0;
+  } else if (tag_eq(tag, "span")) {
+    /* Symmetric postlude: flush the badge's word buffer so a
+     * trailing chip ends cleanly and the next inline run begins
+     * with a fresh separator. */
+    if (style_stack[style_depth].bg && w->word_len > 0) {
+      append_word(w->current, &w->current_len, w->word, w->word_len,
+                  w->style, w->in_list);
+      w->word_len = 0;
+    }
   } else if (tag_eq(tag, "code") || tag_eq(tag, "pre")) {
     w_flush(w);
     w->style = w->in_list ? STYLE_BULLET : STYLE_NORMAL;
