@@ -331,9 +331,10 @@ typedef struct {
    * checkbox/select) take LINE_H+6, and STYLE_IMAGE takes
    * image_h + 2*PAD + 6.
    *
-   * Default behaviour: push_line() fills these from g_layout_y as
-   * a cumulative cursor, so the existing one-line-per-row pipeline
-   * is preserved bit-for-bit. Flex/grid containers (L4+L5) will
+   * Default behaviour: push_line() fills these from the current
+   * layout frame (see layout_stack), so the existing
+   * one-line-per-row pipeline is preserved bit-for-bit when the
+   * root frame is the only one on the stack. Flex/grid containers (L4+L5) will
    * overwrite box_x/box_y/box_w on direct children to splice them
    * into columns. */
   int box_x;
@@ -376,11 +377,85 @@ static line_t lines[MAX_LINES];
 static int line_count = 0;
 static int scroll_line = 0;
 
-/* Phase R6/L1: cumulative document Y (in pixels) used by push_line()
- * to assign box_y to each new line. Reset to 0 at the top of every
- * rebuild_lines_from_dom(). Once L4 (flex) and L5 (grid) land, the
- * layout context stack will save/restore this around sub-renders. */
-static int g_layout_y = 0;
+/* Phase R6/L2: layout context stack.
+ *
+ * Each frame describes a rectangular sub-area of the document into
+ * which subsequent push_line() calls write. The bottom-most frame
+ * covers the full content area; nested frames (created by flex/grid
+ * containers in L4+L5) carve out narrower sub-rectangles whose
+ * children's box_x/box_y are anchored against the frame, not the
+ * page root.
+ *
+ * Fields:
+ *   x       — left offset (px) where the next line's box_x starts,
+ *             relative to the content area (CONTENT_X anchors at
+ *             render time).
+ *   y       — current Y cursor (px) within the frame; advanced by
+ *             push_line and layout_extend_last/layout_set_last_height.
+ *             Each frame's y starts at the parent's y at push time
+ *             and advances independently — when we pop, the parent
+ *             absorbs (y - start_y) so its own cursor catches up.
+ *   w       — content width available for children (px).
+ *   start_y — y at which this frame was pushed (in document space).
+ *             Used so pop can report frame height to the parent.
+ *   flow    — reserved for L4/L5: 0=block stream (current), 1=flex-row,
+ *             2=flex-col, 3=grid. L2 only emits flow=0.
+ *
+ * L2 keeps everything visually a no-op: a single root frame with
+ * x=0, y=0, w=CONTENT_W is pushed at the start of every parse
+ * pass, and push_line still produces a vertical text stream. The
+ * push/pop machinery is in place but unused until L3+. */
+typedef struct {
+  int x;
+  int y;
+  int w;
+  int start_y;
+  int flow;
+} layout_frame_t;
+
+#define LAYOUT_MAX_DEPTH 16
+static layout_frame_t layout_stack[LAYOUT_MAX_DEPTH];
+static int layout_depth = 0;
+
+static inline layout_frame_t *layout_top(void) {
+  return &layout_stack[layout_depth];
+}
+
+/* Reset to a single root frame covering the content area.
+ * Called at the top of every parse pass. */
+static void layout_reset(void) {
+  layout_depth = 0;
+  layout_stack[0].x       = 0;
+  layout_stack[0].y       = 0;
+  layout_stack[0].w       = CONTENT_W;
+  layout_stack[0].start_y = 0;
+  layout_stack[0].flow    = 0;
+}
+
+/* Push a sub-frame. Reserved for L3+ (render_subtree, flex/grid).
+ * Returns NULL on overflow without disturbing the stack. */
+static layout_frame_t *layout_push(int x, int y, int w, int flow) {
+  if (layout_depth + 1 >= LAYOUT_MAX_DEPTH) return NULL;
+  layout_depth++;
+  layout_frame_t *f = &layout_stack[layout_depth];
+  f->x       = x;
+  f->y       = y;
+  f->w       = w;
+  f->start_y = y;
+  f->flow    = flow;
+  return f;
+}
+
+/* Pop the current frame, returning its consumed height (y - start_y).
+ * Does *not* propagate height up; callers (L4/L5 containers) decide
+ * how to splice the popped height into the parent cursor. */
+static int layout_pop(void) {
+  if (layout_depth == 0) return 0;
+  int h = layout_stack[layout_depth].y - layout_stack[layout_depth].start_y;
+  layout_depth--;
+  return h;
+}
+
 /* Default horizontal box for a normal stream line. Indented bullets
  * shrink the available width by 18 px (matching the legacy indent
  * offset in render()). */
@@ -1263,38 +1338,41 @@ static void push_line(const char *text, int len, line_style_t style,
    * <img> handler overwrites this immediately after we return. */
   lines[line_count].image_idx = -1;
 
-  /* R6/L1: pixel-positioned box. By default we lay out as a
-   * single stream of full-width LINE_H rows starting at
-   * (CONTENT_X, CONTENT_Y+14). Widget callers post-adjust box_h
-   * (and bump g_layout_y) below. */
+  /* R6/L1+L2: pixel-positioned box, anchored against the current
+   * layout frame. The root frame covers (0, 0, CONTENT_W) so this
+   * reproduces the legacy vertical-stream geometry bit-for-bit;
+   * a nested frame (L3+) would shift these into a sub-rectangle. */
+  layout_frame_t *f = layout_top();
   int bx = indent ? LAYOUT_DEFAULT_INDENT : 0;
-  lines[line_count].box_x = bx;
-  lines[line_count].box_y = g_layout_y;
-  lines[line_count].box_w = CONTENT_W - bx;
+  if (bx > f->w) bx = f->w; /* defensive: never go negative-width */
+  lines[line_count].box_x = f->x + bx;
+  lines[line_count].box_y = f->y;
+  lines[line_count].box_w = f->w - bx;
   lines[line_count].box_h = LINE_H;
-  g_layout_y += LINE_H;
+  f->y += LINE_H;
 
   line_count++;
 }
 
-/* R6/L1: post-adjust the last-pushed line's vertical advance.
+/* R6/L1+L2: post-adjust the last-pushed line's vertical advance.
  * `extra` is added on top of the LINE_H already consumed by
  * push_line(). Used by widget/image emitters to model their
- * heavier visual height (button + padding, image + card, …). */
+ * heavier visual height (button + padding, image + card, …).
+ * Advances the *current* frame's cursor, not the global one. */
 static void layout_extend_last(int extra) {
   if (line_count == 0 || extra <= 0) return;
   lines[line_count - 1].box_h += extra;
-  g_layout_y += extra;
+  layout_top()->y += extra;
 }
 
-/* R6/L1: replace the last-pushed line's vertical advance with
+/* R6/L1+L2: replace the last-pushed line's vertical advance with
  * an absolute pixel height. Used by the <img> emitter once the
  * image dimensions are known. */
 static void layout_set_last_height(int h) {
   if (line_count == 0 || h <= 0) return;
   int delta = h - lines[line_count - 1].box_h;
   lines[line_count - 1].box_h = h;
-  g_layout_y += delta;
+  layout_top()->y += delta;
 }
 
 static void blank_line(void) {
@@ -2019,7 +2097,7 @@ static void rebuild_lines_from_dom(void) {
    * reset scroll_line explicitly. */
   int saved_scroll = scroll_line;
   line_count  = 0;
-  g_layout_y  = 0;
+  layout_reset();
   reset_style_stack();
   body_bg = CLR_BG;
   tag_context[0] = 0;
@@ -2318,7 +2396,7 @@ static bool is_submit_widget(dom_node_t *n) {
 
 static void parse_html_legacy(const char *html, uint32_t size) {
   line_count = 0;
-  g_layout_y = 0;
+  layout_reset();
   scroll_line = 0;
   line_style_t style = STYLE_NORMAL;
   bool in_body = false;
