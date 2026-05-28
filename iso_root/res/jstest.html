@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+<head>
+  <title>J6a Script Smoke</title>
+</head>
+<body>
+  <h1 id="hdr">Before JS</h1>
+  <p>Static paragraph — JS will not yet mutate this in J6a.</p>
+  <ul>
+    <li>alpha</li>
+    <li>beta</li>
+    <li>gamma</li>
+  </ul>
+
+  <script>
+    console.log("[s1] hello from inline script");
+    console.log("[s1] document.title =", JSON.stringify(document.title));
+    var h = document.getElementById("hdr");
+    console.log("[s1] #hdr.tagName =", h && h.tagName);
+    console.log("[s1] #hdr.textContent =", JSON.stringify(h && h.textContent));
+    console.log("[s1] li count =", document.getElementsByTagName("li").length);
+  </script>
+
+  <script>
+    console.log("[s2] running after s1");
+    fetch("res/jstest.html").then(r => r.text()).then(t => {
+      console.log("[s2] fetched self, length =", t.length);
+    }).catch(e => console.error("[s2] fetch err:", e && e.message));
+  </script>
+
+  <script type="application/json">
+    { "this": "should be ignored — non-js type" }
+  </script>
+</body>
+</html>
