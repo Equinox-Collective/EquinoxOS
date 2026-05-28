@@ -102,7 +102,7 @@ static line_t lines[MAX_LINES];
 static int line_count = 0;
 static int scroll_line = 0;
 static char page_title[64] = "index.html";
-static char current_url[128] = "index.html";
+static char current_url[128] = "res/index.html";
 static char history[16][128];
 static int history_ptr = -1;
 static bool is_navigating_history = false;
