@@ -6,7 +6,7 @@
 
 **A hobby monolithic kernel for x86_64 — with a real GUI, preemptive multitasking, networking, and audio.**
 
-[![License: GPL-3.0](https://img.shields.io/github/license/ewasion137/EquinoxOS?style=for-the-badge&color=ff6b35&logo=gnu)](LICENSE)
+[![License: GPL-3.0](https://img.shields.io/github/license/Equinox-Collective/EquinoxOS?style=for-the-badge&color=ff6b35&logo=gnu)](LICENSE)
 [![Kernel](https://img.shields.io/badge/Kernel-Monolithic-crimson?style=for-the-badge)]()
 [![Arch](https://img.shields.io/badge/Arch-x86__64-5c6bc0?style=for-the-badge)]()
 [![Boot](https://img.shields.io/badge/Bootloader-Limine-1a1a2e?style=for-the-badge)]()
