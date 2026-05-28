@@ -1948,7 +1948,12 @@ static void load_page(const char *url) {
   char *html = NULL;
   uint32_t size = 0;
 
-  if (strstr(url, "http://") || strchr(url, '.')) {
+  /* Treat as URL only if there's an explicit scheme — the old
+   * heuristic ("contains a dot") fired on "index.html" and other
+   * local files, sending them through DNS. Pure-local htmlview.elf
+   * never has a use for implicit HTTP, so require "://". */
+  bool is_url = (strstr(url, "://") != NULL);
+  if (is_url) {
     const char *host = url;
     if (strncmp(url, "http://", 7) == 0)
       host += 7;
