@@ -42,6 +42,14 @@ int  qjs_dom_dispatch_event(JSContext *ctx, dom_node_t *target,
  * called before JS_FreeContext on the same ctx. */
 void qjs_dom_teardown(JSContext *ctx);
 
+/* R5/N5: dispatch a key event ('keydown' / 'keyup') with extra
+ * `key` (string) and `keyCode` (number) fields populated on the
+ * synthetic event. Returns 1 if any handler called
+ * event.preventDefault(). */
+int  qjs_dom_dispatch_key_event(JSContext *ctx, dom_node_t *target,
+                                const char *name,
+                                const char *keystr, int keycode);
+
 /* DOM has been mutated by JS since the last consume? Returns 1 and
  * clears the flag if so. Set by every mutation binding (setAttribute,
  * textContent, appendChild, innerHTML, …). */

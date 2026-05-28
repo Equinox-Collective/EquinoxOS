@@ -456,6 +456,48 @@ void qjs_drain_timers(JSContext *ctx) {
   timers_reset(ctx);
 }
 
+/* R5/N5: tick variant. Run all timers due by `now_ms`, reschedule
+ * intervals, leave the remaining list intact. Used by the browser
+ * once per frame so setInterval can drive animations and live UI. */
+void qjs_window_tick_timers(JSContext *ctx, uint64_t now_ms) {
+  /* Move virtual clock forward (but never backward — host clock can
+   * stall briefly across long script runs). */
+  if (now_ms > g_vclock) g_vclock = now_ms;
+
+  /* Per-frame fairness cap — never run more than 64 callbacks per
+   * tick so a runaway setInterval can't starve the render loop. */
+  for (int iter = 0; iter < 64; iter++) {
+    timer_t *min = NULL;
+    for (timer_t *t = g_timers; t; t = t->next) {
+      if (t->due > g_vclock) continue;
+      if (!min || t->due < min->due) min = t;
+    }
+    if (!min) break;
+
+    JSValue ret = JS_Call(ctx, min->fn, JS_UNDEFINED, 0, NULL);
+    if (JS_IsException(ret)) qjs_dump_exception(ctx);
+    JS_FreeValue(ctx, ret);
+    qjs_run_microtasks(ctx);
+
+    if (min->interval) {
+      min->due += min->interval;
+      /* If we're way behind (paused tab equivalent), don't fire the
+       * same interval more than once per tick — push due past now. */
+      if (min->due <= g_vclock) min->due = g_vclock + min->interval;
+    } else {
+      timer_t *prev = NULL;
+      for (timer_t *t = g_timers; t; prev = t, t = t->next) {
+        if (t == min) {
+          if (prev) prev->next = t->next; else g_timers = t->next;
+          break;
+        }
+      }
+      JS_FreeValue(ctx, min->fn);
+      free(min);
+    }
+  }
+}
+
 /* ====================================================================
  * 4. addEventListener for DOMContentLoaded / load
  * ================================================================== */

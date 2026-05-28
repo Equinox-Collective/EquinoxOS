@@ -2894,6 +2894,47 @@ int main(int argc, char **argv) {
     if (max_scroll < 0)
       max_scroll = 0;
 
+#ifdef BROWSER_BUILD
+    /* R5/N5: per-frame timer tick. setInterval / setTimeout drive UI
+     * animation now that the host clock is plumbed in. Any DOM
+     * mutations from a timer callback get picked up immediately. */
+    if (g_page) {
+      uint64_t now_ms = _syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
+      qjs_page_tick(g_page, now_ms);
+      if (drain_pending_nav()) return 0;
+      if (qjs_page_consume_dirty(g_page)) {
+        rebuild_lines_from_dom();
+        max_scroll = line_count - visible_lines();
+        if (max_scroll < 0) max_scroll = 0;
+      }
+    }
+
+    /* R5/N5: dispatch keydown / keyup to a focused <input>. PS/2
+     * make codes are 0x01..0x80, break codes are 0x80+make. We
+     * report keyCode = scancode and key = scancode_to_ascii(make).
+     * If a handler preventDefault()'s, swallow the key so the
+     * default input widget doesn't also consume it. */
+    if (g_page && focus_input_node && key != 0 &&
+        key != 0x2A && key != 0x36 && key != 0xAA && key != 0xB6) {
+      bool is_break = (key & 0x80) != 0;
+      uint8_t make  = (uint8_t)(key & 0x7F);
+      char ascii    = scancode_to_ascii(make);
+      char keystr[2] = { ascii ? ascii : ' ', 0 };
+      const char *evname = is_break ? "keyup" : "keydown";
+      int prevented = qjs_page_dispatch_key(g_page, focus_input_node,
+                                            evname, keystr, (int)make);
+      if (drain_pending_nav()) return 0;
+      if (qjs_page_consume_dirty(g_page)) {
+        rebuild_lines_from_dom();
+      }
+      if (prevented) {
+        /* Hide the key from every widget this frame. */
+        ui.last_key = 0;
+        key = 0;
+      }
+    }
+#endif
+
     /* Track Shift across frames so typing ':', '/', '?', '#', etc. in the
      * URL bar works. The PS/2 driver delivers both make and break codes
      * via the ring buffer; we just watch for 0x2A/0x36 (Shift down) and
