@@ -246,7 +246,7 @@ APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_RO
 # explicit rules below because they need (a) BearSSL public headers in the
 # include path and (b) libbearssl.a appended at link time.
 APP_ELFS_TLS    = $(ISO_ROOT)/bin/tlsboot.elf $(ISO_ROOT)/bin/tlstest.elf $(ISO_ROOT)/bin/catest.elf $(ISO_ROOT)/bin/httpsget.elf $(ISO_ROOT)/bin/urlget.elf $(ISO_ROOT)/bin/browser.elf
-APP_ELFS_QJS    = $(ISO_ROOT)/bin/jstest.elf
+APP_ELFS_QJS    = $(ISO_ROOT)/bin/jstest.elf $(ISO_ROOT)/bin/domtest.elf
 
 # Phase 5: HTTP/HTTPS client library. Lives in its own directory so it
 # isn't auto-folded into $(SDK_OBJS) — apps that need it append
@@ -332,6 +332,20 @@ app/jstest.o: app/jstest.c sdk/include/qjs_helpers.h
 
 $(ISO_ROOT)/bin/jstest.elf: app/jstest.o $(QJS_HELPERS_OBJ) $(SDK_OBJS) $(QUICKJS_LIB)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(QJS_HELPERS_OBJ) $(QUICKJS_LIB) -o $@
+
+# DOM tree library — used by domtest, htmlview, and (later) the JS DOM
+# bindings. Lives in its own directory so it isn't auto-folded into
+# $(SDK_OBJS); apps opt in by linking $(DOM_OBJ).
+DOM_OBJ := sdk/lib_dom/dom.o
+
+sdk/lib_dom/dom.o: sdk/lib_dom/dom.c sdk/include/dom.h
+	$(CC) $(USER_CFLAGS) -c $< -o $@
+
+app/domtest.o: app/domtest.c sdk/include/dom.h
+	$(CC) $(USER_CFLAGS) -c $< -o $@
+
+$(ISO_ROOT)/bin/domtest.elf: app/domtest.o $(DOM_OBJ) $(SDK_OBJS)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(DOM_OBJ) -o $@
 
 # enGUI's app/sysgui/Makefile links sysgui.elf via `$(wildcard ../../sdk/lib/*.o)`,
 # so under parallel make (`make -j` on Linux CI) sysgui_app would race against the
