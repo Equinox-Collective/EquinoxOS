@@ -248,6 +248,13 @@ APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_RO
 APP_ELFS_TLS    = $(ISO_ROOT)/bin/tlsboot.elf $(ISO_ROOT)/bin/tlstest.elf $(ISO_ROOT)/bin/catest.elf $(ISO_ROOT)/bin/httpsget.elf $(ISO_ROOT)/bin/urlget.elf $(ISO_ROOT)/bin/browser.elf
 APP_ELFS_QJS    = $(ISO_ROOT)/bin/jstest.elf $(ISO_ROOT)/bin/domtest.elf
 
+# DOM tree library — used by domtest, htmlview, browser, and (later) the
+# JS DOM bindings. Lives in its own directory so it isn't auto-folded
+# into $(SDK_OBJS); apps opt in by linking $(DOM_OBJ). Defined here
+# (above the htmlview/browser rules) so make can see it during rule
+# expansion.
+DOM_OBJ := sdk/lib_dom/dom.o
+
 # Phase 5: HTTP/HTTPS client library. Lives in its own directory so it
 # isn't auto-folded into $(SDK_OBJS) — apps that need it append
 # $(HTTP_CLIENT_OBJ) explicitly. Built with bearssl includes because
@@ -310,11 +317,19 @@ $(ISO_ROOT)/bin/urlget.elf: app/urlget.o $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(BEARSS
 # variant (full HTTP/HTTPS via the phase-5 client). htmlview.elf is built
 # from the same source without the define and keeps its original local-file
 # loading path, so both binaries coexist.
-app/htmlview_browser.o: app/htmlview.c sdk/include/http_client.h sdk/include/url.h third_party/ca_bundle/ca_bundle.h
+app/htmlview_browser.o: app/htmlview.c sdk/include/http_client.h sdk/include/url.h sdk/include/dom.h third_party/ca_bundle/ca_bundle.h
 	$(CC) $(USER_CFLAGS) -DBROWSER_BUILD -I./third_party/bearssl/inc -c $< -o $@
 
-$(ISO_ROOT)/bin/browser.elf: app/htmlview_browser.o $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(HTTP_CLIENT_OBJ) $(BEARSSL_LIB) -o $@
+$(ISO_ROOT)/bin/browser.elf: app/htmlview_browser.o $(HTTP_CLIENT_OBJ) $(DOM_OBJ) $(SDK_OBJS) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(HTTP_CLIENT_OBJ) $(DOM_OBJ) $(BEARSSL_LIB) -o $@
+
+# htmlview.elf — explicit rule (overrides the generic %.elf one) so we
+# can link the DOM library. The compile rule for app/htmlview.o still
+# comes from the generic app/%.o pattern.
+app/htmlview.o: app/htmlview.c sdk/include/dom.h
+
+$(ISO_ROOT)/bin/htmlview.elf: app/htmlview.o $(DOM_OBJ) $(SDK_OBJS)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(DOM_OBJ) -o $@
 
 # jstest — smoke test for the vendored QuickJS engine. Covers phases
 # J1 (bytecode + string allocator) and J2 (console.log + Math/Date/JSON).
@@ -332,11 +347,6 @@ app/jstest.o: app/jstest.c sdk/include/qjs_helpers.h
 
 $(ISO_ROOT)/bin/jstest.elf: app/jstest.o $(QJS_HELPERS_OBJ) $(SDK_OBJS) $(QUICKJS_LIB)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(QJS_HELPERS_OBJ) $(QUICKJS_LIB) -o $@
-
-# DOM tree library — used by domtest, htmlview, and (later) the JS DOM
-# bindings. Lives in its own directory so it isn't auto-folded into
-# $(SDK_OBJS); apps opt in by linking $(DOM_OBJ).
-DOM_OBJ := sdk/lib_dom/dom.o
 
 sdk/lib_dom/dom.o: sdk/lib_dom/dom.c sdk/include/dom.h
 	$(CC) $(USER_CFLAGS) -c $< -o $@
