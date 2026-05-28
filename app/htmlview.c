@@ -2117,6 +2117,289 @@ static void emit_flex_container(walk_ctx_t *w, dom_node_t *n) {
   w_flush(w);
 }
 
+/* ─────────────────────────────────────────────────────────────────
+ * R6/L5: display:grid container layout.
+ *
+ * Supports the grid-template-columns vocabulary the real
+ * EquinoxOS landing page (equinoxos.duckdns.org) uses:
+ *
+ *   grid-template-columns: 1fr 1fr
+ *   grid-template-columns: 1.05fr .95fr
+ *   grid-template-columns: 200px 1fr
+ *   grid-template-columns: repeat(3, 1fr)
+ *   grid-template-columns: repeat(2, 1fr)
+ *   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr))
+ *
+ * Flow is row-major: child i lands in column (i % n_cols), row
+ * (i / n_cols). Row height is max of its cells' heights. After a
+ * row finishes, y advances by row_h + gap (per-row gap; we don't
+ * yet split row-gap vs column-gap).
+ *
+ * Track distribution:
+ *   - parse the template into a list of tracks; each track is
+ *     either a fixed px (rule_kind=PX) or a fractional fr
+ *     (rule_kind=FR, with a "fr count" — 1, 1.05, .95 etc. scaled
+ *     by 100 to stay integer).
+ *   - For auto-fit / auto-fill minmax(min,1fr) we compute
+ *     n_cols = max(1, container_w / min_px) and synthesise N
+ *     equal 1fr tracks.
+ *   - widths: sum_px = Σ PX tracks; remaining = container_w
+ *     − sum_px − (n_cols−1) * col_gap; sum_fr = Σ fr counts;
+ *     each FR track gets remaining * fr_count / sum_fr. Final
+ *     widths clamped to at least MIN_COL_W = 50px so single-char
+ *     columns aren't created at narrow widths.
+ *
+ * Like flex, grid degrades to vertical stacking when the
+ * container is too narrow for the requested number of columns.
+ * ────────────────────────────────────────────────────────────── */
+
+typedef struct { int kind; int px; int fr_x100; } grid_track_t;
+
+/* Parse a single track token (e.g. "1fr", "1.05fr", "200px",
+ * "auto", "minmax(160px,1fr)"). For minmax we keep the *fr*
+ * side as the track but remember the min-px in `min_px_out` —
+ * the caller uses that for auto-fit column-count math. */
+static bool grid_parse_track(const char *p, const char *end,
+                             grid_track_t *out, int *min_px_out) {
+  while (p < end && (*p == ' ' || *p == ',')) p++;
+  if (p >= end) return false;
+
+  /* minmax(...) — read the second argument and keep the inner
+   * track; the first arg (min) feeds auto-fit column count. */
+  if (strncmp(p, "minmax(", 7) == 0) {
+    const char *open = p + 7;
+    const char *comma = strchr(open, ',');
+    const char *close = strchr(open, ')');
+    if (!comma || !close || comma >= close) return false;
+    /* min part */
+    int mn = 0; const char *q = open;
+    while (q < comma && *q == ' ') q++;
+    while (q < comma && *q >= '0' && *q <= '9') { mn = mn*10 + (*q-'0'); q++; }
+    if (min_px_out) *min_px_out = mn > 0 ? mn : 0;
+    /* recurse on the second part */
+    return grid_parse_track(comma + 1, close, out, NULL);
+  }
+  /* "Xfr" or "X.Yfr" */
+  /* digits, optional dot, optional digits */
+  int int_part = 0, frac_part = 0, frac_div = 1;
+  const char *q = p;
+  bool had_digit = false;
+  while (q < end && *q >= '0' && *q <= '9') {
+    int_part = int_part * 10 + (*q - '0'); q++; had_digit = true;
+  }
+  if (q < end && *q == '.') {
+    q++;
+    while (q < end && *q >= '0' && *q <= '9') {
+      frac_part = frac_part * 10 + (*q - '0');
+      frac_div  = frac_div  * 10;
+      q++; had_digit = true;
+    }
+  }
+  /* skip whitespace */
+  while (q < end && *q == ' ') q++;
+  if (q + 2 <= end && strncmp(q, "fr", 2) == 0) {
+    int x100 = int_part * 100 + (frac_part * 100) / frac_div;
+    if (x100 <= 0) x100 = 100;
+    out->kind = 1; /* FR */
+    out->fr_x100 = x100;
+    out->px = 0;
+    return true;
+  }
+  if (q + 2 <= end && strncmp(q, "px", 2) == 0) {
+    out->kind = 0; /* PX */
+    out->px = int_part;
+    out->fr_x100 = 0;
+    return true;
+  }
+  /* "auto" or anything else → treat as 1fr */
+  if (!had_digit && q + 4 <= end && strncmp(q, "auto", 4) == 0) {
+    out->kind = 1; out->fr_x100 = 100; out->px = 0;
+    return true;
+  }
+  return false;
+}
+
+/* Parse grid-template-columns string. Fills `tracks[]` with
+ * decoded tracks, returns track count. Handles repeat(N, X)
+ * and repeat(auto-fit/auto-fill, minmax(Y, 1fr)). */
+static int grid_parse_template(const char *spec, int container_w, int gap,
+                               grid_track_t *tracks, int max_tracks) {
+  int n = 0;
+  const char *p = spec;
+  while (*p && n < max_tracks) {
+    while (*p == ' ' || *p == ',') p++;
+    if (!*p) break;
+    /* repeat(...) */
+    if (strncmp(p, "repeat(", 7) == 0) {
+      const char *open  = p + 7;
+      const char *comma = strchr(open, ',');
+      const char *close = strchr(open, ')');
+      if (!comma || !close) break;
+      /* Count token */
+      char count_tok[16] = {0};
+      int cl = (int)(comma - open);
+      if (cl > 15) cl = 15;
+      memcpy(count_tok, open, cl);
+      /* trim */
+      char *ct = count_tok;
+      while (*ct == ' ') ct++;
+      int reps = 0;
+      bool auto_fit = false;
+      if (strncmp(ct, "auto-fit", 8) == 0 ||
+          strncmp(ct, "auto-fill", 9) == 0) {
+        auto_fit = true;
+      } else {
+        while (*ct >= '0' && *ct <= '9') { reps = reps*10 + (*ct-'0'); ct++; }
+      }
+      grid_track_t inner;
+      int min_px = 0;
+      if (!grid_parse_track(comma + 1, close, &inner, &min_px)) break;
+      if (auto_fit) {
+        int mp = min_px > 0 ? min_px : 100;
+        /* how many fit: (W + gap) / (mp + gap)  (since N tracks
+         * need (N-1) gaps between them: total = N*mp + (N-1)*gap
+         * ≤ W → N ≤ (W + gap)/(mp + gap)) */
+        reps = (container_w + gap) / (mp + gap);
+        if (reps < 1) reps = 1;
+        if (reps > max_tracks - n) reps = max_tracks - n;
+      }
+      for (int i = 0; i < reps && n < max_tracks; i++) tracks[n++] = inner;
+      p = close + 1;
+      continue;
+    }
+    /* single track */
+    const char *q = p;
+    while (*q && *q != ' ' && *q != ',') q++;
+    grid_track_t one;
+    if (!grid_parse_track(p, q, &one, NULL)) break;
+    tracks[n++] = one;
+    p = q;
+  }
+  return n;
+}
+
+static void emit_grid_container(walk_ctx_t *w, dom_node_t *n) {
+  layout_frame_t *parent = layout_top();
+  int container_x = parent->x;
+  int container_y = parent->y;
+  int container_w = parent->w;
+  int gap         = style_stack[style_depth].gap_px;
+  int align       = style_stack[style_depth].align_items;
+  const char *spec = style_stack[style_depth].grid_cols;
+
+  w_flush(w);
+
+  /* No template → fall back to plain block recursion. */
+  if (!spec[0]) {
+    for (dom_node_t *c = n->first_child; c; c = c->next_sibling)
+      w_emit_node(w, c);
+    return;
+  }
+
+  grid_track_t tracks[8];
+  int n_cols = grid_parse_template(spec, container_w, gap, tracks, 8);
+  if (n_cols <= 0) {
+    /* Unparseable template → treat as block. */
+    for (dom_node_t *c = n->first_child; c; c = c->next_sibling)
+      w_emit_node(w, c);
+    return;
+  }
+
+  /* Compute track widths. */
+  int widths[8] = {0};
+  int starts[8] = {0};
+  const int MIN_COL_W = 50;
+  int sum_px = 0;
+  int sum_fr = 0;
+  for (int i = 0; i < n_cols; i++) {
+    if (tracks[i].kind == 0) sum_px += tracks[i].px;
+    else                      sum_fr += tracks[i].fr_x100;
+  }
+  int remaining = container_w - sum_px - (n_cols - 1) * gap;
+  if (remaining < 0) remaining = 0;
+
+  /* If even one column would be < MIN_COL_W, degrade to vertical
+   * stack of element children with `gap` between rows. */
+  bool too_narrow = false;
+  for (int i = 0; i < n_cols; i++) {
+    if (tracks[i].kind == 0) widths[i] = tracks[i].px;
+    else if (sum_fr > 0)     widths[i] = (remaining * tracks[i].fr_x100) / sum_fr;
+    else                      widths[i] = remaining / n_cols;
+    if (widths[i] < MIN_COL_W) too_narrow = true;
+  }
+
+  if (too_narrow) {
+    int first = 1;
+    for (dom_node_t *c = n->first_child; c; c = c->next_sibling) {
+      if (c->type != DOM_NODE_ELEMENT) { w_emit_node(w, c); continue; }
+      if (!first && gap > 0) layout_top()->y += gap;
+      w_emit_node(w, c);
+      first = 0;
+    }
+    w_flush(w);
+    return;
+  }
+
+  /* x positions: simple left-to-right, no justify-content
+   * (grid centring is rare on the target page). */
+  int x_cursor = container_x;
+  for (int i = 0; i < n_cols; i++) {
+    starts[i] = x_cursor;
+    x_cursor += widths[i] + gap;
+  }
+
+  /* Collect element children (text/comment children inside a
+   * grid container are uncommon — we just skip them in the
+   * cell-layout pass; the existing block recursion already
+   * absorbs them through render_subtree per cell). */
+  dom_node_t *kids[32];
+  int n_kids = 0;
+  for (dom_node_t *c = n->first_child; c && n_kids < 32;
+       c = c->next_sibling) {
+    if (c->type == DOM_NODE_ELEMENT) kids[n_kids++] = c;
+  }
+  if (n_kids == 0) {
+    /* Fall through: render any text children. */
+    for (dom_node_t *c = n->first_child; c; c = c->next_sibling)
+      w_emit_node(w, c);
+    return;
+  }
+
+  int n_rows = (n_kids + n_cols - 1) / n_cols;
+  int row_y  = container_y;
+  for (int r = 0; r < n_rows; r++) {
+    int row_first[8];
+    int row_count[8];
+    int row_h    [8] = {0};
+    int max_h = 0;
+    for (int c = 0; c < n_cols; c++) {
+      int idx = r * n_cols + c;
+      if (idx >= n_kids) { row_first[c] = -1; row_count[c] = 0; continue; }
+      int first = -1, count = 0, h = 0;
+      render_subtree(w, kids[idx], starts[c], row_y, widths[c],
+                     &first, &count, &h);
+      row_first[c] = first;
+      row_count[c] = count;
+      row_h[c]     = h;
+      if (h > max_h) max_h = h;
+    }
+    /* align-items inside the row (mirrors flex). */
+    if (align != 0) {
+      for (int c = 0; c < n_cols; c++) {
+        if (row_count[c] <= 0) continue;
+        int dy = 0;
+        if      (align == 3 /*center*/) dy = (max_h - row_h[c]) / 2;
+        else if (align == 2 /*end*/)    dy = (max_h - row_h[c]);
+        if (dy > 0) layout_translate_range(row_first[c], row_count[c], 0, dy);
+      }
+    }
+    row_y += max_h;
+    if (r < n_rows - 1) row_y += gap;
+  }
+  parent->y = row_y;
+  w_flush(w);
+}
+
 static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
   if (!n) return;
 
@@ -2405,6 +2688,8 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
   int disp = style_stack[style_depth].display;
   if (disp == 1) {
     emit_flex_container(w, n);
+  } else if (disp == 2) {
+    emit_grid_container(w, n);
   } else {
     for (dom_node_t *c = n->first_child; c; c = c->next_sibling) {
       w_emit_node(w, c);
