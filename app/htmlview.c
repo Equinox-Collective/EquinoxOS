@@ -2288,6 +2288,14 @@ static void draw_text_line(int x, int y, const line_t *ln) {
 }
 
 static void render(const char *filename) {
+  /* Immediate-mode focus reset: any fresh click clears focus_id at
+   * the top of the frame. Per-widget eid_process_interaction then
+   * re-sets focus_id for whichever widget the click landed on, if
+   * any. As a result, clicking on plain page text drops focus from
+   * a previously-focused <input> (and our STYLE_INPUT branch sees
+   * !focused → dispatches the synthetic `change` event). */
+  if (ui.m_clicked) ui.focus_id = 0;
+
   /* Main background (page) */
   eid_draw_rect(fb, WIN_W, WIN_H, 0, 0, WIN_W, WIN_H, body_bg);
 
