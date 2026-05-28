@@ -1,0 +1,48 @@
+<html>
+<head><title>N3 fetch()</title></head>
+<body>
+<h1>N3 fetch()</h1>
+
+<p>1. local file (sync-resolved Promise)</p>
+<p>local: <span id="loc">(idle)</span></p>
+
+<p>2. click to refetch</p>
+<button id="b">Refetch local</button>
+<p>clicks: <span id="cn">0</span></p>
+
+<p>3. last error: <span id="er">(none)</span></p>
+
+<script>
+var loc = document.getElementById('loc');
+var cn  = document.getElementById('cn');
+var er  = document.getElementById('er');
+var b   = document.getElementById('b');
+
+var clicks = 0;
+
+function load(){
+  fetch('res/data.txt').then(function(r){
+    if(!r.ok){ er.textContent = 'status='+r.status; return null; }
+    return r.text();
+  }).then(function(t){
+    if(t === null) return;
+    // strip newlines for one-line display
+    var s = '';
+    for(var i=0;i<t.length;i++){
+      var c = t.charAt(i);
+      s += (c=='\n' ? ' / ' : c);
+    }
+    loc.textContent = s;
+  });
+}
+
+load();
+
+b.addEventListener('click', function(){
+  clicks++;
+  cn.textContent = ''+clicks;
+  load();
+});
+</script>
+</body>
+</html>
