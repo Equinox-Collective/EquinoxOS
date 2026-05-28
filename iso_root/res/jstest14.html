@@ -12,10 +12,10 @@
 <p>3. clock since load (ms)</p>
 <p>clock: <span id="c">0</span></p>
 
-<p>4. keydown on input (preventDefault on Esc)</p>
+<p>4. keydown on input (preventDefault on 'q', Esc reserved as exit)</p>
 <input id="i" type="text"/>
 <p>last: <span id="k">-</span> code=<span id="kc">-</span></p>
-<p>swallowed-esc count: <span id="esc">0</span></p>
+<p>swallowed-q count: <span id="esc">0</span></p>
 
 <script>
 var t = document.getElementById('t');
@@ -41,14 +41,15 @@ setInterval(function(){
   c.textContent = '' + (Date.now() - start);
 }, 100);
 
-var escCount = 0;
+var qCount = 0;
 i.addEventListener('keydown', function(e){
   k.textContent  = e.key;
   kc.textContent = '' + e.keyCode;
-  /* PS/2 scancode 0x01 = Esc — swallow it as a demo of preventDefault */
-  if(e.keyCode === 1){
-    escCount++;
-    esc.textContent = '' + escCount;
+  /* PS/2 scancode 0x10 = 'q' — swallow it to demonstrate preventDefault.
+   * Esc (0x01) is reserved by the host as the universal exit hotkey. */
+  if(e.keyCode === 16){
+    qCount++;
+    esc.textContent = '' + qCount;
     e.preventDefault();
   }
 });
