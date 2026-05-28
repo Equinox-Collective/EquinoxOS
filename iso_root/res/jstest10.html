@@ -1,0 +1,67 @@
+<!doctype html>
+<html>
+<head><title>N2 change + checkbox/radio/select</title></head>
+<body>
+<h2>R5/N2: change event, checkbox / radio / select</h2>
+
+<p>Last event: <span id="last">(none)</span></p>
+
+<h3>Checkbox</h3>
+<input type="checkbox" id="cb" name="cb"> agree
+<p>cb checked: <span id="cbs">no</span></p>
+
+<h3>Radio</h3>
+<input type="radio" name="color" value="red"> red
+<input type="radio" name="color" value="green" checked> green
+<input type="radio" name="color" value="blue"> blue
+<p>color: <span id="rs">green</span></p>
+
+<h3>Select</h3>
+<select id="sel" name="size">
+  <option value="s">Small</option>
+  <option value="m" selected>Medium</option>
+  <option value="l">Large</option>
+</select>
+<p>size: <span id="ss">m</span></p>
+
+<h3>Text input change-on-blur</h3>
+<input id="t" type="text" value="hello">
+<p>last text change: <span id="ts">(none)</span></p>
+
+<script>
+  var last = document.getElementById('last');
+  var cb   = document.getElementById('cb');
+  var cbs  = document.getElementById('cbs');
+  var rs   = document.getElementById('rs');
+  var sel  = document.getElementById('sel');
+  var ss   = document.getElementById('ss');
+  var t    = document.getElementById('t');
+  var ts   = document.getElementById('ts');
+
+  cb.addEventListener('change', function(){
+    last.textContent = 'cb change';
+    cbs.textContent = cb.getAttribute('checked') !== null ? 'yes' : 'no';
+  });
+
+  var radios = document.getElementsByTagName('input');
+  for (var i = 0; i < radios.length; i++) {
+    if (radios[i].getAttribute('type') === 'radio') {
+      radios[i].addEventListener('change', function(e){
+        last.textContent = 'radio change';
+        rs.textContent = e.target.getAttribute('value');
+      });
+    }
+  }
+
+  sel.addEventListener('change', function(){
+    last.textContent = 'select change';
+    ss.textContent = sel.getAttribute('value');
+  });
+
+  t.addEventListener('change', function(){
+    last.textContent = 'text change';
+    ts.textContent = t.getAttribute('value');
+  });
+</script>
+</body>
+</html>

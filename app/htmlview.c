@@ -96,6 +96,13 @@ typedef enum {
    * `value` attribute and read/written per frame by the renderer
    * (it round-trips through eid_text_input's caller-owned buffer). */
   STYLE_INPUT,
+  /* Phase R5/N2: toggle widget for <input type=checkbox> and
+   * <input type=radio>. widget_node points at the input. The
+   * "checked" DOM attribute carries the on/off state. */
+  STYLE_CHECKBOX,
+  /* Phase R5/N2: <select>. widget_node points at the select node;
+   * its "value" attribute holds the selected <option>'s value. */
+  STYLE_SELECT,
 } line_style_t;
 
 typedef struct {
@@ -1345,8 +1352,17 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
                        strcasecmp(type, "email")  == 0 ||
                        strcasecmp(type, "tel")    == 0 ||
                        strcasecmp(type, "password") == 0);
-    bool is_submit  = type && strcasecmp(type, "submit") == 0;
-    if (is_textish) {
+    bool is_submit   = type && strcasecmp(type, "submit") == 0;
+    bool is_checkbox = type && strcasecmp(type, "checkbox") == 0;
+    bool is_radio    = type && strcasecmp(type, "radio") == 0;
+    if (is_checkbox || is_radio) {
+      w_flush(w);
+      /* The toggle box itself has no inline text; the surrounding
+       * <label>/text flows naturally on its own line. */
+      blank_line();
+      push_line("", 0, STYLE_CHECKBOX, false);
+      lines[line_count - 1].widget_node = n;
+    } else if (is_textish) {
       w_flush(w);
       const char *val = dom_get_attr(n, "value");
       char vbuf[LINE_CHARS + 1]; int vlen = 0;
@@ -1369,6 +1385,62 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
       push_line(lbuf, li, STYLE_BUTTON, false);
       lines[line_count - 1].widget_node = n;
     }
+    pop_style_state();
+    w->style = save.style;
+    w->in_pre = save.in_pre;
+    return;
+  } else if (tag_eq(tag, "select")) {
+    /* R5/N2: emit a STYLE_SELECT widget showing the currently-
+     * selected <option>'s visible text. Initialise the select's
+     * `value` attr from the first <option selected> (or the first
+     * option) if it isn't set yet. Don't descend — option children
+     * would otherwise render as plain text. */
+    w_flush(w);
+
+    /* Locate the currently-selected option. */
+    dom_node_t *selected = NULL;
+    dom_node_t *first    = NULL;
+    for (dom_node_t *c = n->first_child; c; c = c->next_sibling) {
+      if (c->type == DOM_NODE_ELEMENT && c->tag_name &&
+          strcmp(c->tag_name, "option") == 0) {
+        if (!first) first = c;
+        if (dom_get_attr(c, "selected") && !selected) selected = c;
+      }
+    }
+    if (!selected) selected = first;
+
+    /* Sync select's `value` if it's not set yet. */
+    const char *cur_v = dom_get_attr(n, "value");
+    if ((!cur_v || !cur_v[0]) && selected) {
+      const char *ov = dom_get_attr(selected, "value");
+      /* If <option> has no value attribute, the option text is the
+       * value. Collect option text below into a buffer either way. */
+      char otxt[64]; int ol = 0;
+      for (dom_node_t *c = selected->first_child; c && ol < (int)sizeof(otxt) - 1; c = c->next_sibling) {
+        if (c->type == DOM_NODE_TEXT && c->text) {
+          for (const char *t = c->text; *t && ol < (int)sizeof(otxt) - 1; t++) otxt[ol++] = *t;
+        }
+      }
+      otxt[ol] = 0;
+      dom_set_attr(n, "value", (ov && ov[0]) ? ov : otxt);
+    }
+
+    /* Build the display label: the selected option's text. */
+    char label[LINE_CHARS + 1]; int li = 0;
+    if (selected) {
+      for (dom_node_t *c = selected->first_child; c && li < LINE_CHARS; c = c->next_sibling) {
+        if (c->type == DOM_NODE_TEXT && c->text) {
+          for (const char *t = c->text; *t && li < LINE_CHARS; t++) label[li++] = *t;
+        }
+      }
+    }
+    if (li == 0) { strcpy(label, "(select)"); li = 8; }
+    label[li] = 0;
+
+    blank_line();
+    push_line(label, li, STYLE_SELECT, false);
+    lines[line_count - 1].widget_node = n;
+
     pop_style_state();
     w->style = save.style;
     w->in_pre = save.in_pre;
@@ -1446,6 +1518,13 @@ static bool g_use_legacy_parser = false;
 static dom_node_t *g_doc;
 #ifdef BROWSER_BUILD
 static qjs_page_t *g_page;
+
+/* R5/N2: track which text <input> is currently focused so we can fire
+ * a `change` event when the user navigates away with a different
+ * value. Cleared whenever a new page is parsed (since the old node
+ * pointer goes away with dom_free). */
+static dom_node_t *focus_input_node = NULL;
+static char        focus_input_snapshot[64] = {0};
 
 /* R5/N1: act on a navigation request the page's JS produced via
  * location.assign/replace/reload or history.back/forward/go.
@@ -1539,6 +1618,11 @@ static void parse_html(const char *html, uint32_t size) {
   if (g_page) { qjs_page_free(g_page); g_page = NULL; }
 #endif
   if (g_doc)  { dom_free(g_doc); g_doc = NULL; }
+#ifdef BROWSER_BUILD
+  /* R5/N2: focus tracker pointed at the now-freed tree — reset. */
+  focus_input_node = NULL;
+  focus_input_snapshot[0] = 0;
+#endif
 
   copy_title_from_html(html, size);
   extract_css(html, size);
@@ -1625,15 +1709,36 @@ static void form_collect(dom_node_t *node, char *qbuf, int *jp, int cap, int *fi
           strcasecmp(type, "reset")  == 0 ||
           strcasecmp(type, "image")  == 0 ||
           strcasecmp(type, "file")   == 0) skip = true;
+      /* R5/N2: unchecked checkbox/radio are not submitted. */
+      if ((strcasecmp(type, "checkbox") == 0 || strcasecmp(type, "radio") == 0) &&
+          !dom_get_attr(node, "checked")) skip = true;
     }
     if (name && name[0] && !skip) {
       const char *val = dom_get_attr(node, "value");
+      /* Checkbox/radio with no value attribute defaults to "on" — the
+       * HTML standard. */
+      if (type && (strcasecmp(type, "checkbox") == 0 || strcasecmp(type, "radio") == 0) &&
+          (!val || !val[0])) val = "on";
       if (!*first && *jp < cap - 1) qbuf[(*jp)++] = '&';
       *first = 0;
       *jp = url_encode_into(name, qbuf, *jp, cap);
       if (*jp < cap - 1) qbuf[(*jp)++] = '=';
       *jp = url_encode_into(val ? val : "", qbuf, *jp, cap);
     }
+  } else if (node->type == DOM_NODE_ELEMENT && node->tag_name &&
+             strcmp(node->tag_name, "select") == 0) {
+    /* R5/N2: submit the select's current value attribute. */
+    const char *name = dom_get_attr(node, "name");
+    const char *val  = dom_get_attr(node, "value");
+    if (name && name[0]) {
+      if (!*first && *jp < cap - 1) qbuf[(*jp)++] = '&';
+      *first = 0;
+      *jp = url_encode_into(name, qbuf, *jp, cap);
+      if (*jp < cap - 1) qbuf[(*jp)++] = '=';
+      *jp = url_encode_into(val ? val : "", qbuf, *jp, cap);
+    }
+    /* Don't descend into <option> — they aren't form controls. */
+    return;
   }
   for (dom_node_t *c = node->first_child; c; c = c->next_sibling)
     form_collect(c, qbuf, jp, cap, first);
@@ -1673,6 +1778,79 @@ static void submit_form_for(dom_node_t *trigger) {
 
   strcpy(current_url, resolved);
   load_page(current_url);
+}
+
+/* R5/N2: walk the form (or document if no enclosing form) and clear
+ * the "checked" attribute on every other radio that shares `name`
+ * with `chosen`. Mirrors the HTML radio-group behaviour. */
+static void uncheck_radio_siblings(dom_node_t *chosen) {
+  if (!chosen || !chosen->tag_name) return;
+  const char *grp = dom_get_attr(chosen, "name");
+  if (!grp || !*grp) return;
+
+  dom_node_t *root = find_form_ancestor(chosen);
+  if (!root) root = g_doc;
+  if (!root) return;
+
+  /* Iterative DFS. */
+  dom_node_t *stack[64]; int sp = 0;
+  stack[sp++] = root;
+  while (sp > 0) {
+    dom_node_t *cur = stack[--sp];
+    if (!cur) continue;
+    if (cur != chosen && cur->type == DOM_NODE_ELEMENT && cur->tag_name &&
+        strcmp(cur->tag_name, "input") == 0) {
+      const char *t = dom_get_attr(cur, "type");
+      const char *m = dom_get_attr(cur, "name");
+      if (t && strcasecmp(t, "radio") == 0 && m && strcmp(m, grp) == 0) {
+        dom_remove_attr(cur, "checked");
+      }
+    }
+    for (dom_node_t *c = cur->first_child; c && sp < 64; c = c->next_sibling)
+      stack[sp++] = c;
+  }
+}
+
+/* R5/N2: pick the next <option> after `cur` in `select`, wrapping
+ * around to the first one. Returns NULL if `select` has no options. */
+static dom_node_t *next_option(dom_node_t *select, dom_node_t *cur) {
+  dom_node_t *first = NULL;
+  dom_node_t *after = NULL;
+  bool seen = false;
+  for (dom_node_t *c = select->first_child; c; c = c->next_sibling) {
+    if (c->type == DOM_NODE_ELEMENT && c->tag_name &&
+        strcmp(c->tag_name, "option") == 0) {
+      if (!first) first = c;
+      if (seen && !after) { after = c; break; }
+      if (c == cur) seen = true;
+    }
+  }
+  return after ? after : first;
+}
+
+/* R5/N2: find the <option> whose value (or text if no value attr)
+ * matches `v` inside `select`. NULL if not found. */
+static dom_node_t *find_option_by_value(dom_node_t *select, const char *v) {
+  if (!v) return NULL;
+  for (dom_node_t *c = select->first_child; c; c = c->next_sibling) {
+    if (c->type == DOM_NODE_ELEMENT && c->tag_name &&
+        strcmp(c->tag_name, "option") == 0) {
+      const char *ov = dom_get_attr(c, "value");
+      if (ov && strcmp(ov, v) == 0) return c;
+      if (!ov || !ov[0]) {
+        /* No value attr — use option text. */
+        char otxt[64]; int ol = 0;
+        for (dom_node_t *t = c->first_child; t && ol < (int)sizeof(otxt) - 1; t = t->next_sibling) {
+          if (t->type == DOM_NODE_TEXT && t->text) {
+            for (const char *s = t->text; *s && ol < (int)sizeof(otxt) - 1; s++) otxt[ol++] = *s;
+          }
+        }
+        otxt[ol] = 0;
+        if (strcmp(otxt, v) == 0) return c;
+      }
+    }
+  }
+  return NULL;
 }
 
 /* True iff `node` is `<input type="submit">` or `<button type="submit">`.
@@ -2259,6 +2437,124 @@ static void render(const char *filename) {
         /* Enter while focused → submit enclosing form (if any). */
         submit_form_for(n);
         return;
+      }
+
+      /* R5/N2: emit a `change` event when focus leaves the input
+       * and the value differs from the snapshot taken at focus-in. */
+      bool now_focused = (in_state & EID_STATE_FOCUSED) != 0;
+      if (now_focused && focus_input_node != n) {
+        focus_input_node = n;
+        strncpy(focus_input_snapshot, buf, sizeof(focus_input_snapshot) - 1);
+        focus_input_snapshot[sizeof(focus_input_snapshot) - 1] = 0;
+      } else if (!now_focused && focus_input_node == n) {
+        if (strcmp(buf, focus_input_snapshot) != 0 && g_page) {
+          qjs_page_dispatch_event(g_page, n, "change");
+          focus_input_node = NULL;
+          focus_input_snapshot[0] = 0;
+          if (drain_pending_nav()) return;
+          if (qjs_page_consume_dirty(g_page)) {
+            rebuild_lines_from_dom();
+            return;
+          }
+        } else {
+          focus_input_node = NULL;
+          focus_input_snapshot[0] = 0;
+        }
+      }
+      cur_y += LINE_H + 6;
+      continue;
+    }
+    /* R5/N2: checkbox / radio toggle. */
+    if (lines[idx].style == STYLE_CHECKBOX && lines[idx].widget_node) {
+      dom_node_t *n = (dom_node_t *)lines[idx].widget_node;
+      const char *type = dom_get_attr(n, "type");
+      bool is_radio = type && strcasecmp(type, "radio") == 0;
+      bool checked  = dom_get_attr(n, "checked") != NULL;
+      bool prev     = checked;
+
+      char id_label[24];
+      sprintf(id_label, "tog@%p", (void *)n);
+      eid_checkbox(&ui, id_label, cur_x, cur_y - 2, &checked);
+
+      if (checked != prev) {
+        bool fire_change = true;
+        if (is_radio) {
+          if (checked) {
+            /* Newly selected radio: uncheck siblings, persist. */
+            uncheck_radio_siblings(n);
+            dom_set_attr(n, "checked", "");
+          } else {
+            /* Radio can't be untoggled by a second click — restore
+             * and suppress the synthetic change. */
+            dom_set_attr(n, "checked", "");
+            fire_change = false;
+          }
+        } else {
+          if (checked) dom_set_attr(n, "checked", "");
+          else         dom_remove_attr(n, "checked");
+        }
+        if (fire_change && g_page) {
+          qjs_page_dispatch_event(g_page, n, "click");
+          qjs_page_dispatch_event(g_page, n, "change");
+          if (drain_pending_nav()) return;
+          if (qjs_page_consume_dirty(g_page)) {
+            rebuild_lines_from_dom();
+            return;
+          }
+        }
+      }
+      cur_y += LINE_H + 6;
+      continue;
+    }
+    /* R5/N2: <select> — click cycles to the next option. */
+    if (lines[idx].style == STYLE_SELECT && lines[idx].widget_node) {
+      dom_node_t *n = (dom_node_t *)lines[idx].widget_node;
+      char btn_label[LINE_CHARS + 4];
+      int  ll = (int)strlen(lines[idx].text);
+      if (ll > LINE_CHARS) ll = LINE_CHARS;
+      memcpy(btn_label, lines[idx].text, ll);
+      /* Append " v" so it visually reads as a dropdown. */
+      btn_label[ll++] = ' ';
+      btn_label[ll++] = 'v';
+      btn_label[ll]   = 0;
+
+      int btn_w = ll * 8 + 24;
+      if (btn_w < 100) btn_w = 100;
+      if (btn_w > CONTENT_W) btn_w = CONTENT_W;
+      int btn_h = LINE_H + 4;
+      uint32_t state = eid_button(&ui, btn_label, cur_x, cur_y - 2, btn_w, btn_h);
+      if (state & EID_STATE_CLICKED) {
+        const char *cur_v = dom_get_attr(n, "value");
+        dom_node_t *cur_opt = find_option_by_value(n, cur_v);
+        dom_node_t *nxt = next_option(n, cur_opt);
+        if (nxt && nxt != cur_opt) {
+          const char *nv = dom_get_attr(nxt, "value");
+          char otxt[64]; int ol = 0;
+          for (dom_node_t *t = nxt->first_child; t && ol < (int)sizeof(otxt) - 1; t = t->next_sibling) {
+            if (t->type == DOM_NODE_TEXT && t->text) {
+              for (const char *s = t->text; *s && ol < (int)sizeof(otxt) - 1; s++) otxt[ol++] = *s;
+            }
+          }
+          otxt[ol] = 0;
+          dom_set_attr(n, "value", (nv && nv[0]) ? nv : otxt);
+          /* Keep DOM in sync for scripts that inspect option.selected. */
+          for (dom_node_t *c = n->first_child; c; c = c->next_sibling) {
+            if (c->type == DOM_NODE_ELEMENT && c->tag_name &&
+                strcmp(c->tag_name, "option") == 0) dom_remove_attr(c, "selected");
+          }
+          dom_set_attr(nxt, "selected", "");
+          /* Rebuild lines so the visible label reflects the new
+           * selection right away. */
+          rebuild_lines_from_dom();
+          if (g_page) {
+            qjs_page_dispatch_event(g_page, n, "change");
+            if (drain_pending_nav()) return;
+            if (qjs_page_consume_dirty(g_page)) {
+              rebuild_lines_from_dom();
+            }
+          }
+          return;
+        }
       }
       cur_y += LINE_H + 6;
       continue;
