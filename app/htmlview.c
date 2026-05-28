@@ -2294,10 +2294,21 @@ static void emit_grid_container(walk_ctx_t *w, dom_node_t *n) {
   int align       = style_stack[style_depth].align_items;
   const char *spec = style_stack[style_depth].grid_cols;
 
+  /* DEBUG L5: log entry conditions so we can see why grid degrades. */
+  {
+    char dbg[256];
+    sprintf(dbg, "[GRID] tag=%s cls=%s w=%d gap=%d spec='%s'\n",
+            n->tag_name,
+            dom_get_attr(n, "class") ? dom_get_attr(n, "class") : "",
+            container_w, gap, spec);
+    print(dbg);
+  }
+
   w_flush(w);
 
   /* No template → fall back to plain block recursion. */
   if (!spec[0]) {
+    print("[GRID]   -> no spec, fallback to block\n");
     for (dom_node_t *c = n->first_child; c; c = c->next_sibling)
       w_emit_node(w, c);
     return;
@@ -2980,6 +2991,14 @@ static void parse_html(const char *html, uint32_t size) {
 
   copy_title_from_html(html, size);
   extract_css(html, size);
+
+  /* DEBUG: dump CSS rule count after extraction so we can see whether
+   * MAX_CSS_RULES is overflowing on this page. */
+  {
+    char dbg[64];
+    sprintf(dbg, "[CSS] BROWSER_BUILD: %d rules\n", css_rule_count);
+    print(dbg);
+  }
 
   g_doc = dom_parse(html, size);
   if (!g_doc) {
