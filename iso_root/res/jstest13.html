@@ -1,0 +1,74 @@
+<html>
+<head><title>N4 DOM mutation</title></head>
+<body>
+<h1>N4: createElement / appendChild / innerHTML</h1>
+
+<p>1. createElement + appendChild</p>
+<div id="list"></div>
+
+<p>2. add / remove buttons</p>
+<button id="add">Add row</button>
+<button id="del">Remove last</button>
+<p>rows: <span id="cn">0</span></p>
+
+<p>3. innerHTML replacement</p>
+<div id="ih">(idle)</div>
+<button id="hb">Set innerHTML</button>
+
+<p>4. fetch JSON + render list</p>
+<div id="js">(loading...)</div>
+<p>by: <span id="by">-</span></p>
+
+<script>
+var list = document.getElementById('list');
+var cn   = document.getElementById('cn');
+var ih   = document.getElementById('ih');
+var js   = document.getElementById('js');
+var by   = document.getElementById('by');
+
+var n = 0;
+
+function addRow(label){
+  var p = document.createElement('p');
+  p.textContent = '- ' + label;
+  list.appendChild(p);
+  n++;
+  cn.textContent = '' + n;
+}
+
+addRow('seed');
+
+document.getElementById('add').addEventListener('click', function(){
+  addRow('row ' + (n+1));
+});
+
+document.getElementById('del').addEventListener('click', function(){
+  var kids = list.getElementsByTagName('p');
+  if(kids.length > 0){
+    list.removeChild(kids[kids.length - 1]);
+    n--;
+    cn.textContent = '' + n;
+  }
+});
+
+document.getElementById('hb').addEventListener('click', function(){
+  ih.innerHTML = '<b>bold</b> + plain';
+});
+
+fetch('res/data.json').then(function(r){
+  return r.text();
+}).then(function(t){
+  var obj = JSON.parse(t);
+  by.textContent = obj.by;
+  var holder = document.createElement('div');
+  for(var i = 0; i < obj.items.length; i++){
+    var row = document.createElement('p');
+    row.textContent = (i+1) + '. ' + obj.items[i];
+    holder.appendChild(row);
+  }
+  js.innerHTML = '';
+  js.appendChild(holder);
+});
+</script>
+</body>
+</html>
