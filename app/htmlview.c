@@ -7,6 +7,7 @@
 #include <string.h>
 #ifdef BROWSER_BUILD
 #include "qjs_window.h"   /* qjs_window_set_history_length proto */
+#include <image_decode.h> /* eq_image_decode for <img> rendering    */
 #endif
 
 /* Defined in sdk/lib/string.c but not declared in sdk/include/string.h yet.
@@ -238,6 +239,10 @@ typedef enum {
   /* Phase R5/N2: <select>. widget_node points at the select node;
    * its "value" attribute holds the selected <option>'s value. */
   STYLE_SELECT,
+  /* Phase R6/B4: image line. The line itself takes up a vertical
+   * slot wider than LINE_H; the renderer reads the image dimensions
+   * from g_images[image_idx] and advances cur_y by image_h + pad. */
+  STYLE_IMAGE,
 } line_style_t;
 
 typedef struct {
@@ -258,10 +263,41 @@ typedef struct {
   /* Phase R4/F0: widget hookup. NULL for plain text lines.
    * Stored as void* to avoid a forward decl above dom.h's include. */
   void *widget_node;
+  /* Phase R6/B4: index into g_images[] for STYLE_IMAGE lines, -1
+   * for everything else. */
+  int image_idx;
 } line_t;
 
 static uint32_t fb[WIN_W * WIN_H];
 static eid_ctx_t ui;
+
+#ifdef BROWSER_BUILD
+/* ── Phase R6/B4: in-document image cache ────────────────────────────
+ * <img> tags get fetched and decoded into a fixed-size table. The
+ * line stream stores indices into this table via line_t::image_idx;
+ * render() reads dimensions from here to advance cur_y by the right
+ * amount and to blit the pixels.
+ *
+ * The table is owned by the htmlview instance and cleared at the
+ * start of every parse_html() so we don't leak across navigations.
+ * Cap is intentionally small — a hobby browser doesn't need to
+ * juggle hundreds of images. */
+#define MAX_DOC_IMAGES 8
+static eq_image_t g_images[MAX_DOC_IMAGES];
+static int        g_image_count;
+
+static void images_reset(void) {
+  for (int i = 0; i < g_image_count; i++) eq_image_free(&g_images[i]);
+  g_image_count = 0;
+}
+
+/* Forward declared so w_emit_node's <img> handler (defined well above
+ * the BROWSER_BUILD section) can call it. Real implementation lives
+ * down with load_page() because it needs eq_http_get / resolve_url. */
+static int load_image_for_src(const char *src);
+#else
+static int load_image_for_src(const char *src) { (void)src; return -1; }
+#endif
 static line_t lines[MAX_LINES];
 static int line_count = 0;
 static int scroll_line = 0;
@@ -1130,6 +1166,9 @@ static void push_line(const char *text, int len, line_style_t style,
   } else {
     lines[line_count].link_url[0] = '\0';
   }
+  /* Default for everything that isn't an <img> placeholder; the
+   * <img> handler overwrites this immediately after we return. */
+  lines[line_count].image_idx = -1;
 
   line_count++;
 }
@@ -1459,7 +1498,17 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
     push_line("", 0, STYLE_HR, false);
   } else if (tag_eq(tag, "img")) {
     w_flush(w);
-    push_line("[ IMAGE ]", 9, STYLE_MUTED, w->in_list);
+    /* R6/B4: try to fetch + decode. On success push a STYLE_IMAGE
+     * line carrying the image index; on failure fall back to the
+     * old text placeholder so the slot is still visible. */
+    const char *src = dom_get_attr(n, "src");
+    int idx = src ? load_image_for_src(src) : -1;
+    if (idx >= 0) {
+      push_line("", 0, STYLE_IMAGE, w->in_list);
+      lines[line_count - 1].image_idx = idx;
+    } else {
+      push_line("[ IMAGE ]", 9, STYLE_MUTED, w->in_list);
+    }
   } else if (tag_eq(tag, "ul") || tag_eq(tag, "ol")) {
     w_flush(w);
     w->in_list = true;
@@ -1835,6 +1884,9 @@ static void parse_html(const char *html, uint32_t size) {
   /* R5/N2: focus tracker pointed at the now-freed tree — reset. */
   focus_input_node = NULL;
   focus_input_snapshot[0] = 0;
+  /* R6/B4: drop the previous page's decoded image buffers before
+   * the upcoming walk re-fetches and re-decodes for the new page. */
+  images_reset();
 #endif
 
   copy_title_from_html(html, size);
@@ -2796,6 +2848,52 @@ static void render(const char *filename) {
     }
 #endif
 
+    /* R6/B4: image lines take their natural height from the decoded
+     * image rather than the fixed LINE_H. Blit directly into the
+     * framebuffer and skip the rest of the per-line tail. */
+#ifdef BROWSER_BUILD
+    if (lines[idx].style == STYLE_IMAGE) {
+      int ii = lines[idx].image_idx;
+      if (ii >= 0 && ii < g_image_count && g_images[ii].rgba) {
+        const eq_image_t *im = &g_images[ii];
+        int draw_x = CONTENT_X;
+        int draw_y = cur_y;
+        /* Honour center alignment if the parent set it (e.g. an
+         * <img> inside a <center> or text-align:center container). */
+        if (lines[idx].css_align == ALIGN_CENTER &&
+            im->w < CONTENT_W)
+          draw_x = CONTENT_X + (CONTENT_W - im->w) / 2;
+        /* Source-over blit with the alpha channel collapsed to a
+         * binary mask — page backgrounds in our window are white,
+         * which matches the predominant transparent-PNG use case
+         * (logos with antialiased edges). For full alpha
+         * compositing we'd need to read the framebuffer pixel,
+         * blend, and write back; keep that for later. */
+        for (int py = 0; py < im->h; py++) {
+          int fy = draw_y + py;
+          if (fy < 0 || fy >= WIN_H - 18) continue; /* clip status bar */
+          const uint8_t *src = im->rgba + (size_t)py * im->w * 4;
+          uint32_t      *dst = fb + (size_t)fy * WIN_W + draw_x;
+          for (int px = 0; px < im->w; px++) {
+            int fx = draw_x + px;
+            if (fx < 0 || fx >= WIN_W) { dst++; src += 4; continue; }
+            uint8_t a = src[3];
+            if (a >= 128) {
+              *dst = ((uint32_t)src[0] << 16) |
+                     ((uint32_t)src[1] <<  8) |
+                     ((uint32_t)src[2]);
+            }
+            dst++; src += 4;
+          }
+        }
+        cur_y += im->h + 6;
+      } else {
+        cur_y += LINE_H;
+      }
+      continue;
+    }
+#endif
+
     draw_text_line(cur_x, cur_y, &lines[idx]);
 
     /* Handle link interaction */
@@ -2887,6 +2985,100 @@ static void render(const char *filename) {
  *
  * Stored in network byte order, zero = unused. */
 static uint32_t g_first_load_ip_override_be = 0;
+
+/* ── Phase R6/B4: <img> fetch + decode ───────────────────────────────
+ * Called from w_emit_node() while the DOM is being walked into the
+ * line stream. We block here on the network for the duration of one
+ * GET — that's OK for the kind of toy pages this browser is meant
+ * to render and keeps the renderer single-threaded. */
+static int load_image_for_src(const char *src) {
+  if (!src || !src[0]) return -1;
+  if (g_image_count >= MAX_DOC_IMAGES) return -1;
+
+  /* Resolve against current_url so site-relative paths like
+   * "/static/logo.png" become absolute. Local file:// style paths
+   * (anything that isn't http(s)://) fall back to SYS_READ_FILE. */
+  char resolved[256];
+  resolve_url(current_url, src, resolved);
+
+  uint8_t  *bytes  = NULL;
+  size_t    nbytes = 0;
+  eq_http_response_t resp;
+  memset(&resp, 0, sizeof resp);
+
+  if (strncasecmp(resolved, "http://",  7) == 0 ||
+      strncasecmp(resolved, "https://", 8) == 0) {
+    eq_http_options_t opts;
+    memset(&opts, 0, sizeof opts);
+    opts.trust_anchors     = TAs_MOZ;
+    opts.trust_anchors_num = TAs_MOZ_NUM;
+    opts.follow_redirects  = 3;
+    opts.recv_timeout_ms   = 10000;
+    opts.body_limit_bytes  = 1u * 1024u * 1024u;   /* 1 MiB cap */
+    opts.verbose           = 0;
+    int rc = eq_http_get(resolved, &opts, &resp);
+    if (rc != EQ_HTTP_OK || resp.status_code / 100 != 2 ||
+        !resp.body || resp.body_len == 0) {
+      eq_http_response_free(&resp);
+      return -1;
+    }
+    bytes  = (uint8_t *)resp.body;
+    nbytes = resp.body_len;
+  } else {
+    /* Local resource (iso_root/res/foo.png or similar). Strip any
+     * accidental query string. */
+    char fpath[128];
+    int fl = 0;
+    for (const char *t = resolved; *t && *t != '?' &&
+                                   fl < (int)sizeof fpath - 1; t++)
+      fpath[fl++] = *t;
+    fpath[fl] = 0;
+    uint32_t fsize = 0;
+    void *data = (void *)_syscall(SYS_READ_FILE, (uint64_t)fpath,
+                                  (uint64_t)&fsize, 0, 0, 0);
+    if (!data || fsize == 0) return -1;
+    bytes  = (uint8_t *)data;
+    nbytes = fsize;
+  }
+
+  eq_image_t img = {0};
+  int rc = eq_image_decode(bytes, nbytes, &img);
+  /* Drop the original encoded bytes immediately — the decoder
+   * already produced an owned RGBA copy. */
+  eq_http_response_free(&resp);
+  if (rc != 0 || !img.rgba) return -1;
+
+  /* Downscale by 2x repeatedly until it fits the content area. We
+   * cap the on-screen height at 320 px so a single hero image
+   * doesn't push the entire page below the fold. Nearest-neighbour
+   * halving in-place — sufficient for line art and screenshots and
+   * keeps the code one tight loop. */
+  const int max_w = CONTENT_W;
+  const int max_h = 320;
+  while ((img.w > max_w || img.h > max_h) && img.w > 1 && img.h > 1) {
+    int nw = img.w / 2; if (nw < 1) nw = 1;
+    int nh = img.h / 2; if (nh < 1) nh = 1;
+    uint8_t *dst = (uint8_t *)malloc((size_t)nw * nh * 4);
+    if (!dst) break;
+    for (int y = 0; y < nh; y++) {
+      const uint8_t *srow = img.rgba + (size_t)(y * 2) * img.w * 4;
+      uint8_t       *drow = dst       + (size_t) y      * nw   * 4;
+      for (int x = 0; x < nw; x++) {
+        const uint8_t *sp = srow + (size_t)(x * 2) * 4;
+        drow[x * 4 + 0] = sp[0];
+        drow[x * 4 + 1] = sp[1];
+        drow[x * 4 + 2] = sp[2];
+        drow[x * 4 + 3] = sp[3];
+      }
+    }
+    eq_image_free(&img);
+    img.rgba = dst; img.w = nw; img.h = nh;
+  }
+
+  int idx = g_image_count++;
+  g_images[idx] = img;
+  return idx;
+}
 
 static void load_page(const char *url) {
   print("[BROWSER] Navigating to: ");
