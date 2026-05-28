@@ -136,6 +136,45 @@ $(BEARSSL_LIB): $(BEARSSL_OBJS)
 
 libbearssl: $(BEARSSL_LIB)
 
+# --- QUICKJS (vendored under third_party/quickjs) -----------------------------
+# Built once as a static library; userspace apps link against it to execute
+# JavaScript. Sources are NEVER patched — all EquinoxOS adaptation happens
+# through SDK headers (sdk/include/pthread.h, alloca.h, sys/time.h),
+# sdk/lib/qjs_time.c (gettimeofday + clock_gettime + gmtime_r), and the
+# -D defines below. See third_party/quickjs/README.equos.md.
+QUICKJS_DIR     := third_party/quickjs
+QUICKJS_INC     := -I./$(QUICKJS_DIR)
+QUICKJS_C_SRCS  := $(QUICKJS_DIR)/quickjs.c \
+                   $(QUICKJS_DIR)/dtoa.c \
+                   $(QUICKJS_DIR)/libregexp.c \
+                   $(QUICKJS_DIR)/libunicode.c
+QUICKJS_OBJS    := $(QUICKJS_C_SRCS:.c=.o)
+QUICKJS_LIB     := $(QUICKJS_DIR)/libquickjs.a
+
+# NO_TM_GMTOFF      : our struct tm has no tm_gmtoff field — fall back to
+#                     the mktime(gmtime_r) - mktime(localtime_r) path
+#                     (both return UTC on EquinoxOS, so offset = 0).
+# _GNU_SOURCE       : enables a few GNU-isms QuickJS' cutils.h expects.
+# -Wno-*            : QuickJS upstream is warning-clean on its own
+#                     toolchain but not against -Wall -Wextra of our
+#                     freestanding cross; silence the noise without
+#                     patching sources.
+QUICKJS_CFLAGS  := $(USER_CFLAGS) $(QUICKJS_INC) \
+                   -DNO_TM_GMTOFF -D_GNU_SOURCE \
+                   -Wno-unused -Wno-sign-compare -Wno-pointer-sign \
+                   -Wno-implicit-fallthrough -Wno-unused-parameter \
+                   -Wno-format -Wno-format-extra-args -Wno-cast-function-type \
+                   -Os
+
+$(QUICKJS_DIR)/%.o: $(QUICKJS_DIR)/%.c
+	$(CC) $(QUICKJS_CFLAGS) -c $< -o $@
+
+$(QUICKJS_LIB): $(QUICKJS_OBJS)
+	@echo === Building libquickjs.a ===
+	$(AR) -rcs $@ $(QUICKJS_OBJS)
+
+libquickjs: $(QUICKJS_LIB)
+
 # --- DOOM ---
 DOOM_DIR = app/doom
 DOOM_SRCS = $(wildcard $(DOOM_DIR)/*.c)
