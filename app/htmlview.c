@@ -321,6 +321,25 @@ typedef struct {
   /* Phase R6/B4: index into g_images[] for STYLE_IMAGE lines, -1
    * for everything else. */
   int image_idx;
+  /* Phase R6/L1: pixel-positioned line box.
+   * box_x is relative to CONTENT_X (so a normal full-width line has
+   * box_x=0). box_y is the cumulative document Y of this line's top,
+   * relative to CONTENT_Y+14 (i.e. before the scroll offset is
+   * subtracted). box_w is the content area available for this line
+   * (CONTENT_W - box_x by default). box_h is the line's full
+   * vertical advance — usually LINE_H, but widgets (button/input/
+   * checkbox/select) take LINE_H+6, and STYLE_IMAGE takes
+   * image_h + 2*PAD + 6.
+   *
+   * Default behaviour: push_line() fills these from g_layout_y as
+   * a cumulative cursor, so the existing one-line-per-row pipeline
+   * is preserved bit-for-bit. Flex/grid containers (L4+L5) will
+   * overwrite box_x/box_y/box_w on direct children to splice them
+   * into columns. */
+  int box_x;
+  int box_y;
+  int box_w;
+  int box_h;
 } line_t;
 
 static uint32_t fb[WIN_W * WIN_H];
@@ -356,6 +375,16 @@ static int load_image_for_src(const char *src) { (void)src; return -1; }
 static line_t lines[MAX_LINES];
 static int line_count = 0;
 static int scroll_line = 0;
+
+/* Phase R6/L1: cumulative document Y (in pixels) used by push_line()
+ * to assign box_y to each new line. Reset to 0 at the top of every
+ * rebuild_lines_from_dom(). Once L4 (flex) and L5 (grid) land, the
+ * layout context stack will save/restore this around sub-renders. */
+static int g_layout_y = 0;
+/* Default horizontal box for a normal stream line. Indented bullets
+ * shrink the available width by 18 px (matching the legacy indent
+ * offset in render()). */
+#define LAYOUT_DEFAULT_INDENT 18
 static char page_title[64] = "index.html";
 static char current_url[128] = "res/index.html";
 static char history[16][128];
@@ -1234,7 +1263,38 @@ static void push_line(const char *text, int len, line_style_t style,
    * <img> handler overwrites this immediately after we return. */
   lines[line_count].image_idx = -1;
 
+  /* R6/L1: pixel-positioned box. By default we lay out as a
+   * single stream of full-width LINE_H rows starting at
+   * (CONTENT_X, CONTENT_Y+14). Widget callers post-adjust box_h
+   * (and bump g_layout_y) below. */
+  int bx = indent ? LAYOUT_DEFAULT_INDENT : 0;
+  lines[line_count].box_x = bx;
+  lines[line_count].box_y = g_layout_y;
+  lines[line_count].box_w = CONTENT_W - bx;
+  lines[line_count].box_h = LINE_H;
+  g_layout_y += LINE_H;
+
   line_count++;
+}
+
+/* R6/L1: post-adjust the last-pushed line's vertical advance.
+ * `extra` is added on top of the LINE_H already consumed by
+ * push_line(). Used by widget/image emitters to model their
+ * heavier visual height (button + padding, image + card, …). */
+static void layout_extend_last(int extra) {
+  if (line_count == 0 || extra <= 0) return;
+  lines[line_count - 1].box_h += extra;
+  g_layout_y += extra;
+}
+
+/* R6/L1: replace the last-pushed line's vertical advance with
+ * an absolute pixel height. Used by the <img> emitter once the
+ * image dimensions are known. */
+static void layout_set_last_height(int h) {
+  if (line_count == 0 || h <= 0) return;
+  int delta = h - lines[line_count - 1].box_h;
+  lines[line_count - 1].box_h = h;
+  g_layout_y += delta;
 }
 
 static void blank_line(void) {
@@ -1609,6 +1669,14 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
     if (idx >= 0) {
       push_line("", 0, STYLE_IMAGE, w->in_list);
       lines[line_count - 1].image_idx = idx;
+#ifdef BROWSER_BUILD
+      /* L1: replace the default LINE_H placeholder with the
+       * image's real on-screen advance — image + 2*PAD card + 6
+       * px gap, matching render()'s tail bump. */
+      const int IMG_PAD = 6;
+      int img_h = g_images[idx].h + IMG_PAD * 2 + 6;
+      layout_set_last_height(img_h);
+#endif
     } else {
       push_line("[ IMAGE ]", 9, STYLE_MUTED, w->in_list);
     }
@@ -1677,6 +1745,7 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
     blank_line();
     push_line(label, li, STYLE_BUTTON, false);
     lines[line_count - 1].widget_node = n;
+    layout_extend_last(6);  /* L1: render() advances by LINE_H+6 */
     /* Don't descend — the label is already captured. */
     pop_style_state();
     w->style = save.style;
@@ -1708,6 +1777,7 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
       blank_line();
       push_line("", 0, STYLE_CHECKBOX, false);
       lines[line_count - 1].widget_node = n;
+      layout_extend_last(6);  /* L1: render() advances by LINE_H+6 */
     } else if (is_textish) {
       w_flush(w);
       const char *val = dom_get_attr(n, "value");
@@ -1719,6 +1789,7 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
       blank_line();
       push_line(vbuf, vlen, STYLE_INPUT, false);
       lines[line_count - 1].widget_node = n;
+      layout_extend_last(6);  /* L1: render() advances by LINE_H+6 */
     } else if (is_submit) {
       w_flush(w);
       const char *val = dom_get_attr(n, "value");
@@ -1730,6 +1801,7 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
       blank_line();
       push_line(lbuf, li, STYLE_BUTTON, false);
       lines[line_count - 1].widget_node = n;
+      layout_extend_last(6);  /* L1: render() advances by LINE_H+6 */
     }
     pop_style_state();
     w->style = save.style;
@@ -1786,6 +1858,7 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
     blank_line();
     push_line(label, li, STYLE_SELECT, false);
     lines[line_count - 1].widget_node = n;
+    layout_extend_last(6);  /* L1: render() advances by LINE_H+6 */
 
     pop_style_state();
     w->style = save.style;
@@ -1946,6 +2019,7 @@ static void rebuild_lines_from_dom(void) {
    * reset scroll_line explicitly. */
   int saved_scroll = scroll_line;
   line_count  = 0;
+  g_layout_y  = 0;
   reset_style_stack();
   body_bg = CLR_BG;
   tag_context[0] = 0;
@@ -2244,6 +2318,7 @@ static bool is_submit_widget(dom_node_t *n) {
 
 static void parse_html_legacy(const char *html, uint32_t size) {
   line_count = 0;
+  g_layout_y = 0;
   scroll_line = 0;
   line_style_t style = STYLE_NORMAL;
   bool in_body = false;
@@ -2717,18 +2792,41 @@ static void render(const char *filename) {
   if (scroll_line > max_scroll)
     scroll_line = max_scroll;
 
-  int cur_y = CONTENT_Y + 14; /* Offset for the page title bar */
-  /* Bottom of usable content (above the 18-px status bar). Lines
-   * that don't fully fit are skipped so glyphs aren't truncated. */
+  /* R6/L1: pixel-anchored render. Each line carries its own
+   * (box_x, box_y, box_h) so we no longer accumulate cur_y per
+   * style; instead we project box_y onto the screen via a single
+   * scroll offset.
+   *
+   * scroll_line is still in line units (it indexes the first
+   * visible line); we translate it to pixels by reading that
+   * line's box_y. Lines with box_y < scroll_y_px are clipped
+   * out (above the fold); lines whose top is past content_bottom
+   * are clipped out (below the fold). */
+  const int content_top    = CONTENT_Y + 14;
   const int content_bottom = WIN_H - 18;
+  int scroll_y_px = 0;
+  if (scroll_line > 0 && scroll_line < line_count)
+    scroll_y_px = lines[scroll_line].box_y;
+  /* Compatibility alias for branches further down that still
+   * advance a `cur_y` of their own (notably the link
+   * eid_process_interaction rect below). */
+  int cur_y = content_top;
+  (void)cur_y;
   for (int i = 0; i < v_lines; i++) {
     int idx = scroll_line + i;
     if (idx >= line_count)
       break;
-    if (cur_y + LINE_H > content_bottom)
+    /* cur_y for this line, derived from box_y rather than a
+     * running accumulator. */
+    int line_y = content_top + lines[idx].box_y - scroll_y_px;
+    cur_y = line_y;
+    int line_h = lines[idx].box_h > 0 ? lines[idx].box_h : LINE_H;
+    if (line_y + line_h > content_bottom)
       break;
 
-    int cur_x = CONTENT_X + (lines[idx].indent ? 18 : 0);
+    /* box_x already includes the LAYOUT_DEFAULT_INDENT offset for
+     * indented lines (see push_line). Don't add it again. */
+    int cur_x = CONTENT_X + lines[idx].box_x;
 
 #ifdef BROWSER_BUILD
     /* R4/F0: <button> widgets render as eid buttons and dispatch a
