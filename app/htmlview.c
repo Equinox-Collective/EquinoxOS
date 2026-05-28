@@ -1587,8 +1587,12 @@ static int drain_pending_nav(void) {
 #endif
 
 static void rebuild_lines_from_dom(void) {
+  /* Preserve scroll across in-page rebuilds (e.g. when a click on a
+   * checkbox / radio / <select> mutates the DOM). Callers that want
+   * to jump to the top — load_page / parse_html OOM, history nav —
+   * reset scroll_line explicitly. */
+  int saved_scroll = scroll_line;
   line_count  = 0;
-  scroll_line = 0;
   reset_style_stack();
   body_bg = CLR_BG;
   tag_context[0] = 0;
@@ -1606,6 +1610,14 @@ static void rebuild_lines_from_dom(void) {
 
   if (line_count == 0)
     push_line("(empty HTML document)", 21, STYLE_MUTED, false);
+
+  /* Clamp restored scroll to the new content height. */
+  int v = visible_lines();
+  int max_scroll = line_count - v;
+  if (max_scroll < 0) max_scroll = 0;
+  if (saved_scroll > max_scroll) saved_scroll = max_scroll;
+  if (saved_scroll < 0)          saved_scroll = 0;
+  scroll_line = saved_scroll;
 }
 
 static void parse_html(const char *html, uint32_t size) {
@@ -2908,21 +2920,30 @@ int main(int argc, char **argv) {
         }
       }
     } else {
-      if (key == 0x26) {
+      /* R5/N2: if a text <input> currently has focus, drop the global
+       * shortcuts — the input widget will consume the keystroke this
+       * frame. Otherwise typing 'l' / 'j' / 'k' inside an input would
+       * fire L=Edit URL / J=ScrollDown / K=ScrollUp first. */
+#ifdef BROWSER_BUILD
+      bool input_focused = (focus_input_node != NULL);
+#else
+      bool input_focused = false;
+#endif
+      if (!input_focused && key == 0x26) {
         is_typing_url = true;
         url_cursor = 0;
         current_url[0] = '\0';
       }
-      if ((key == 0x50 || key == 0x1F) && scroll_line < max_scroll)
+      if (!input_focused && (key == 0x50 || key == 0x1F) && scroll_line < max_scroll)
         scroll_line++;
-      if ((key == 0x48 || key == 0x11) && scroll_line > 0)
+      if (!input_focused && (key == 0x48 || key == 0x11) && scroll_line > 0)
         scroll_line--;
-      if (key == 0x51) {
+      if (!input_focused && key == 0x51) {
         scroll_line += visible_lines();
         if (scroll_line > max_scroll)
           scroll_line = max_scroll;
       }
-      if (key == 0x49) {
+      if (!input_focused && key == 0x49) {
         scroll_line -= visible_lines();
         if (scroll_line < 0)
           scroll_line = 0;
