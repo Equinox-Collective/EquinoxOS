@@ -1022,16 +1022,24 @@ static void parse_css_block(const char *css, int css_len) {
       continue;
     }
 
-    /* Read selector (preserve spaces for compound selector splitting) */
-    char sel[MAX_SELECTOR];
+    /* Read selector (preserve spaces for compound selector splitting).
+     *
+     * The collection buffer must hold the *full comma-separated* list
+     * before we split it, so it has to be much larger than the size of
+     * a single selector. Real-world pages routinely have rules like
+     * "[data-i18n], #lang-top, #status-line, #updated, #s-commits-last,
+     *  #s-engui-last, #s-prs-sub, #s-stars-sub, #lang-total, ..."
+     * which run 150-200 chars before the '{'. */
+    enum { SEL_BUF = 1024 };
+    char sel[SEL_BUF];
     int si = 0;
     bool prev_space = false;
-    while (p < end && *p != '{' && si < MAX_SELECTOR - 1) {
+    while (p < end && *p != '{' && si < SEL_BUF - 1) {
       if (ascii_isspace(*p)) {
         if (si > 0)
           prev_space = true;
       } else {
-        if (prev_space && si > 0 && si < MAX_SELECTOR - 1)
+        if (prev_space && si > 0 && si < SEL_BUF - 1)
           sel[si++] = ' ';
         prev_space = false;
         sel[si++] = ascii_lower(*p);
@@ -1039,12 +1047,21 @@ static void parse_css_block(const char *css, int css_len) {
       p++;
     }
     sel[si] = '\0';
-    if (p >= end || *p != '{') {
-      char dbgsel[96];
-      sprintf(dbgsel, "[CSS] parse stop: sel='%.60s' p_at='%c' rules=%d\n",
-              sel, (p < end ? *p : '?'), css_rule_count);
-      print(dbgsel);
-      break;
+    if (p >= end) break;
+    if (*p != '{') {
+      /* Selector buffer overflowed (super-long list). Skip over this
+       * rule's body so we can keep parsing the rest of the stylesheet
+       * instead of bailing out entirely. */
+      while (p < end && *p != '{') p++;
+      if (p >= end) break;
+      p++; /* skip { */
+      int depth = 1;
+      while (p < end && depth > 0) {
+        if (*p == '{') depth++;
+        else if (*p == '}') depth--;
+        p++;
+      }
+      continue;
     }
     p++; /* skip { */
 
