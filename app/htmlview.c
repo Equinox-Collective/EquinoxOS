@@ -3837,6 +3837,13 @@ static void draw_text_line(int x, int y, const line_t *ln) {
     if (n > max_chars) {
       int copy = max_chars;
       if (copy >= (int)sizeof clip_buf) copy = (int)sizeof clip_buf - 1;
+      /* Try to cut at the last space within the budget so we
+       * don't slice a word in half ("compositing windo"). */
+      int word_end = -1;
+      for (int i = 0; i < copy; i++) {
+        if (text[i] == ' ') word_end = i;
+      }
+      if (word_end > copy / 2) copy = word_end;
       memcpy(clip_buf, text, (size_t)copy);
       clip_buf[copy] = '\0';
       text = clip_buf;
