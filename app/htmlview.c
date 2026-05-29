@@ -1718,7 +1718,20 @@ static void layout_set_last_height(int h) {
 static void blank_line(void) {
   if (line_count == 0)
     return;
-  if (line_count > 0 && lines[line_count - 1].text[0] == '\0')
+  /* L5 fix: don't emit a leading blank at the top of a fresh layout
+   * frame (e.g. a flex/grid column that just pushed its own
+   * private frame via render_subtree). The frame's start_y already
+   * encodes the desired vertical anchor; an unconditional blank
+   * here would shift the *second-and-later* column's contents
+   * down by LINE_H because `blank_line()` looks at the global
+   * lines[] tail and the previous column's last emitted line is
+   * always non-blank. That caused row-flex children (e.g. EN / RU
+   * buttons inside .lang-switch) to render diagonally instead of
+   * side-by-side at the same y.  */
+  layout_frame_t *f = layout_top();
+  if (f && f->y == f->start_y)
+    return;
+  if (lines[line_count - 1].text[0] == '\0')
     return;
   push_line("", 0, STYLE_NORMAL, false);
 }
