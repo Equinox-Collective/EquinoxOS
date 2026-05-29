@@ -242,7 +242,11 @@ static int utf8_visible_cols(const char *s) {
  * 512 leaves comfortable headroom for the bigger sites we
  * actually try to render. */
 #define MAX_CSS_RULES 512
-#define MAX_SELECTOR 64
+/* R6/L5+ descendant selectors: keep the full selector including
+ * spaces between simple parts (e.g. ".bar .wrap", ".lang-switch
+ * button"). The matcher walks the DOM ancestor chain. Width
+ * bumped from 64 → 128 to fit real-world chains comfortably. */
+#define MAX_SELECTOR 128
 #define MAX_CSS_CLASS 128
 
 typedef enum { ALIGN_LEFT, ALIGN_CENTER, ALIGN_RIGHT } text_align_t;
@@ -1126,17 +1130,38 @@ static void parse_css_block(const char *css, int css_len) {
       if (qi == 0)
         continue;
 
-      /* For compound selectors like '.header h1', use last segment */
-      char *last_space = NULL;
-      for (int s = 0; single[s]; s++) {
-        if (single[s] == ' ')
-          last_space = &single[s];
-      }
-      char *final_sel = last_space ? (last_space + 1) : single;
-
+      /* R6/L5+: keep the FULL selector verbatim, including any
+       * descendant whitespace (`.bar .wrap`, `.lang-switch
+       * button`). The matcher (match_selector_node) splits on
+       * spaces at match time and walks the DOM ancestor chain.
+       * Previously this dropped everything but the rightmost
+       * simple selector, which made `.bar .wrap{display:flex}`
+       * apply to *every* `.wrap` on the page — including hero,
+       * sections, and footer — and turned every content block
+       * into a horizontally-laid-out flex container. */
       css_rule_t *r = &css_rules[css_rule_count];
       memset(r, 0, sizeof(css_rule_t));
-      strncpy(r->selector, final_sel, MAX_SELECTOR - 1);
+      /* Collapse internal whitespace runs to a single space so
+       * `.a  .b` and `.a .b` store identically. */
+      {
+        int dst = 0;
+        bool in_space = false;
+        for (int s = 0; single[s] && dst < MAX_SELECTOR - 1; s++) {
+          char c = single[s];
+          if (c == '\t' || c == '\n' || c == '\r') c = ' ';
+          if (c == ' ') {
+            if (!in_space && dst > 0) {
+              r->selector[dst++] = ' ';
+              in_space = true;
+            }
+          } else {
+            r->selector[dst++] = c;
+            in_space = false;
+          }
+        }
+        while (dst > 0 && r->selector[dst - 1] == ' ') dst--;
+        r->selector[dst] = '\0';
+      }
 
       parse_css_declarations(r, p, decl_len);
       css_rule_count++;
@@ -1276,59 +1301,161 @@ static void extract_attr(const char *tag, const char *attr, char *out,
   }
 }
 
+/* ── CSS selector matching helpers ────────────────────────────── */
+
+/* Match a single simple selector ("h1", ".intro", "#nav",
+ * "tag.class", "tag#id") against an element's resolved
+ * tag/class/id triple. Pseudo-classes / pseudo-elements (`:hover`,
+ * `::after`, `:not(.x)` …) are not honoured: we treat the first
+ * `:` we see as end-of-selector, which means the rule applies
+ * unconditionally instead of never — the lesser evil for a
+ * static renderer with no interaction state. */
+static bool match_simple_sel(const char *sel, const char *tag,
+                             const char *cls, const char *id) {
+  if (!sel || !*sel) return false;
+  /* Effective length: stop at first ':' to gracefully drop
+   * pseudo-class suffixes from the comparison. */
+  int slen = 0;
+  while (sel[slen] && sel[slen] != ':') slen++;
+  if (slen == 0) return false;
+
+  /* Universal selector `*` matches anything. */
+  if (slen == 1 && sel[0] == '*') return true;
+
+  if (sel[0] == '.') {
+    if (!cls || !cls[0]) return false;
+    char buf[MAX_SELECTOR];
+    int cn = slen - 1;
+    if (cn >= MAX_SELECTOR) cn = MAX_SELECTOR - 1;
+    memcpy(buf, sel + 1, cn);
+    buf[cn] = 0;
+    return has_class(cls, buf);
+  }
+  if (sel[0] == '#') {
+    if (!id || !id[0]) return false;
+    char buf[MAX_SELECTOR];
+    int cn = slen - 1;
+    if (cn >= MAX_SELECTOR) cn = MAX_SELECTOR - 1;
+    memcpy(buf, sel + 1, cn);
+    buf[cn] = 0;
+    return strcmp(buf, id) == 0;
+  }
+
+  /* tag, tag.class, tag#id */
+  int split = -1;
+  for (int k = 0; k < slen; k++) {
+    if (sel[k] == '.' || sel[k] == '#') { split = k; break; }
+  }
+  char tag_part[MAX_SELECTOR];
+  int tn = (split >= 0) ? split : slen;
+  if (tn >= MAX_SELECTOR) tn = MAX_SELECTOR - 1;
+  memcpy(tag_part, sel, tn);
+  tag_part[tn] = 0;
+  if (!tag || strcmp(tag_part, tag) != 0) return false;
+  if (split < 0) return true;
+  if (sel[split] == '.') {
+    if (!cls || !cls[0]) return false;
+    char buf[MAX_SELECTOR];
+    int cn = slen - split - 1;
+    if (cn >= MAX_SELECTOR) cn = MAX_SELECTOR - 1;
+    memcpy(buf, sel + split + 1, cn);
+    buf[cn] = 0;
+    return has_class(cls, buf);
+  }
+  /* '#' */
+  if (!id || !id[0]) return false;
+  char buf[MAX_SELECTOR];
+  int cn = slen - split - 1;
+  if (cn >= MAX_SELECTOR) cn = MAX_SELECTOR - 1;
+  memcpy(buf, sel + split + 1, cn);
+  buf[cn] = 0;
+  return strcmp(buf, id) == 0;
+}
+
+/* Node-aware wrapper. */
+static bool match_simple_node(const char *sel, dom_node_t *n) {
+  if (!n || n->type != DOM_NODE_ELEMENT) return false;
+  const char *cls = dom_get_attr(n, "class");
+  const char *id  = dom_get_attr(n, "id");
+  return match_simple_sel(sel, n->tag_name, cls, id);
+}
+
+/* Full descendant selector match: tokenises `full_sel` on spaces
+ * right-to-left. The rightmost simple selector must match `n`;
+ * each preceding simple selector must match SOME ancestor (any
+ * depth) found above the previous match, in order. This is the
+ * standard CSS descendant-combinator semantics. Child (`>`),
+ * sibling (`+` / `~`), attribute (`[…]`) and pseudo-element
+ * combinators are not handled. */
+static bool match_selector_node(const char *full_sel, dom_node_t *n) {
+  if (!full_sel || !*full_sel) return false;
+  int len = 0;
+  while (full_sel[len]) len++;
+
+  /* Find rightmost simple selector. */
+  int end = len;
+  while (end > 0 && full_sel[end - 1] == ' ') end--;
+  int start = end;
+  while (start > 0 && full_sel[start - 1] != ' ') start--;
+
+  char buf[MAX_SELECTOR];
+  int sl = end - start;
+  if (sl >= MAX_SELECTOR) sl = MAX_SELECTOR - 1;
+  memcpy(buf, full_sel + start, sl);
+  buf[sl] = 0;
+  if (!match_simple_node(buf, n)) return false;
+
+  /* Walk leftwards over the remaining tokens. */
+  end = start;
+  while (end > 0 && full_sel[end - 1] == ' ') end--;
+  dom_node_t *anc = n->parent;
+  while (end > 0) {
+    int s = end;
+    while (s > 0 && full_sel[s - 1] != ' ') s--;
+    int al = end - s;
+    if (al >= MAX_SELECTOR) al = MAX_SELECTOR - 1;
+    memcpy(buf, full_sel + s, al);
+    buf[al] = 0;
+
+    bool found = false;
+    while (anc) {
+      if (match_simple_node(buf, anc)) { found = true; break; }
+      anc = anc->parent;
+    }
+    if (!found) return false;
+    anc = anc->parent;  /* continue strictly above this match */
+
+    end = s;
+    while (end > 0 && full_sel[end - 1] == ' ') end--;
+  }
+  return true;
+}
+
+/* Legacy: string-only matcher used by apply_css_with_attrs when
+ * the caller has no DOM node in hand. Treats any selector that
+ * contains a space as a non-match — safer than over-applying. */
+static bool match_selector_attrs(const char *full_sel, const char *tag,
+                                 const char *cls, const char *id) {
+  if (!full_sel || !*full_sel) return false;
+  for (int k = 0; full_sel[k]; k++) {
+    if (full_sel[k] == ' ') return false; /* descendant: need DOM */
+  }
+  return match_simple_sel(full_sel, tag, cls, id);
+}
+
 /* ── Apply CSS overrides for the current element ─────────────── */
 static void apply_css_with_attrs(const char *elem, const char *cls,
                                  const char *id, const char *inline_style) {
-  /* 1. Stylesheet rules (element, .class, #id, element.class selectors) */
+  /* 1. Stylesheet rules (element / .class / #id / tag.class /
+   * tag#id selectors). Descendant selectors that need DOM
+   * context are skipped here; the DOM-aware entry point
+   * apply_css_for_node handles them. */
   for (int i = 0; i < css_rule_count; i++) {
     const css_rule_t *r = &css_rules[i];
-    bool match = false;
-
-    if (r->selector[0] == '.') {
-      if (cls[0] && has_class(cls, r->selector + 1))
-        match = true;
-    } else if (r->selector[0] == '#') {
-      if (id[0] && strcmp(r->selector + 1, id) == 0)
-        match = true;
-    } else {
-      /* Element or Element.class or Element#id */
-      char sel_elem[MAX_SELECTOR];
-      int dot_idx = -1;
-      int hash_idx = -1;
-      for (int k = 0; r->selector[k]; k++) {
-        if (r->selector[k] == '.') {
-          dot_idx = k;
-          break;
-        }
-        if (r->selector[k] == '#') {
-          hash_idx = k;
-          break;
-        }
-      }
-
-      if (dot_idx != -1) {
-        strncpy(sel_elem, r->selector, dot_idx);
-        sel_elem[dot_idx] = '\0';
-        if (strcmp(sel_elem, elem) == 0 &&
-            has_class(cls, r->selector + dot_idx + 1))
-          match = true;
-      } else if (hash_idx != -1) {
-        strncpy(sel_elem, r->selector, hash_idx);
-        sel_elem[hash_idx] = '\0';
-        if (strcmp(sel_elem, elem) == 0 &&
-            strcmp(id, r->selector + hash_idx + 1) == 0)
-          match = true;
-      } else {
-        if (elem[0] && strcmp(r->selector, elem) == 0)
-          match = true;
-      }
-    }
-
-    if (match) {
-      apply_css_to_current_state(r);
-      if (r->margin_top > 0)
-        blank_line();
-    }
+    if (!match_selector_attrs(r->selector, elem, cls, id)) continue;
+    apply_css_to_current_state(r);
+    if (r->margin_top > 0)
+      blank_line();
   }
 
   /* 2. Inline style attribute */
@@ -1362,11 +1489,26 @@ static void apply_css_for_element(const char *tag) {
  * w_emit_node pass). */
 static void apply_css_for_node(dom_node_t *n) {
   if (!n || !n->tag_name) return;
-  const char *cls = dom_get_attr(n, "class");
-  const char *id  = dom_get_attr(n, "id");
   const char *st  = dom_get_attr(n, "style");
-  apply_css_with_attrs(n->tag_name, cls ? cls : "", id ? id : "",
-                       st ? st : "");
+
+  /* R6/L5+: descendant selector support. Walk rules in source
+   * order so later rules override earlier ones; for each rule
+   * use match_selector_node so `.bar .wrap{display:flex}` only
+   * matches a `.wrap` whose ancestor chain contains `.bar`.
+   * Plain rules (`.brand`, `h1`, …) still work — the matcher
+   * collapses to match_simple_node when there's no space. */
+  for (int i = 0; i < css_rule_count; i++) {
+    const css_rule_t *r = &css_rules[i];
+    if (!match_selector_node(r->selector, n)) continue;
+    apply_css_to_current_state(r);
+    if (r->margin_top > 0)
+      blank_line();
+  }
+
+  /* Inline style attribute */
+  if (st && st[0]) {
+    parse_css_declarations_to_state(st);
+  }
 }
 
 static void parse_css_declarations_to_state(const char *decl) {
@@ -1931,45 +2073,18 @@ static void lookup_flex_item_props(dom_node_t *n, flex_item_props_t *out) {
   out->basis = 0; out->grow = 0;
   out->has_basis = false; out->has_grow = false;
   if (!n || !n->tag_name) return;
-  const char *cls = dom_get_attr(n, "class");
-  const char *id  = dom_get_attr(n, "id");
   const char *st  = dom_get_attr(n, "style");
 
   /* Walk the global stylesheet rules and accumulate any flex-grow
-   * / flex-basis that matches this element. Mirrors apply_css's
-   * matching but doesn't touch style_stack. */
+   * / flex-basis that matches this element. Uses the same
+   * descendant-aware matcher as apply_css_for_node so per-item
+   * rules like `.hero-grid > div{flex:1}` resolve correctly
+   * (well, modulo `>`, which we treat as descendant). */
   for (int i = 0; i < css_rule_count; i++) {
     const css_rule_t *r = &css_rules[i];
-    bool match = false;
-    if (r->selector[0] == '.') {
-      if (cls && has_class(cls, r->selector + 1)) match = true;
-    } else if (r->selector[0] == '#') {
-      if (id && strcmp(r->selector + 1, id) == 0) match = true;
-    } else {
-      char sel_elem[MAX_SELECTOR];
-      int dot_idx = -1, hash_idx = -1;
-      for (int k = 0; r->selector[k]; k++) {
-        if (r->selector[k] == '.') { dot_idx = k; break; }
-        if (r->selector[k] == '#') { hash_idx = k; break; }
-      }
-      if (dot_idx != -1) {
-        strncpy(sel_elem, r->selector, dot_idx);
-        sel_elem[dot_idx] = 0;
-        if (strcmp(sel_elem, n->tag_name) == 0 &&
-            cls && has_class(cls, r->selector + dot_idx + 1)) match = true;
-      } else if (hash_idx != -1) {
-        strncpy(sel_elem, r->selector, hash_idx);
-        sel_elem[hash_idx] = 0;
-        if (strcmp(sel_elem, n->tag_name) == 0 &&
-            id && strcmp(r->selector + hash_idx + 1, id) == 0) match = true;
-      } else {
-        if (strcmp(r->selector, n->tag_name) == 0) match = true;
-      }
-    }
-    if (match) {
-      if (r->flex_grow  > 0) { out->grow  = r->flex_grow;  out->has_grow  = true; }
-      if (r->flex_basis > 0) { out->basis = r->flex_basis; out->has_basis = true; }
-    }
+    if (!match_selector_node(r->selector, n)) continue;
+    if (r->flex_grow  > 0) { out->grow  = r->flex_grow;  out->has_grow  = true; }
+    if (r->flex_basis > 0) { out->basis = r->flex_basis; out->has_basis = true; }
   }
   /* Inline style overrides stylesheet matches. */
   if (st && st[0]) {
