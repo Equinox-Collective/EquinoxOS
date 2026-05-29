@@ -2117,6 +2117,17 @@ static void emit_flex_container(walk_ctx_t *w, dom_node_t *n) {
   int justify     = style_stack[style_depth].justify;
   int align       = style_stack[style_depth].align_items;
 
+  /* TEMP DEBUG: dump container info to serial */
+  {
+    const char *cls = dom_get_attr(n, "class");
+    char d[160];
+    sprintf(d, "[FLEX] <%s class=\"%s\"> x=%d y=%d w=%d dir=%d gap=%d jus=%d aln=%d\n",
+            n->tag_name ? n->tag_name : "?",
+            cls ? cls : "",
+            container_x, container_y, container_w, flex_dir, gap, justify, align);
+    print(d);
+  }
+
   /* Flush any pending inline text from the parent first; we
    * don't want the container's children to inherit a half-built
    * word run from before. */
@@ -2170,6 +2181,14 @@ static void emit_flex_container(walk_ctx_t *w, dom_node_t *n) {
   const int MIN_COL_W = 80;
   int gross_w = container_w - (nchildren - 1) * gap;
   if (gross_w / nchildren < MIN_COL_W) {
+    {
+      const char *cls = dom_get_attr(n, "class");
+      char d[160];
+      sprintf(d, "[FLEX] DEGRADE <%s class=\"%s\"> n=%d gross=%d per=%d\n",
+              n->tag_name ? n->tag_name : "?", cls ? cls : "",
+              nchildren, gross_w, gross_w / nchildren);
+      print(d);
+    }
     int first = 1;
     for (dom_node_t *c = n->first_child; c; c = c->next_sibling) {
       if (c->type != DOM_NODE_ELEMENT) { w_emit_node(w, c); continue; }
@@ -2247,6 +2266,17 @@ static void emit_flex_container(walk_ctx_t *w, dom_node_t *n) {
   for (int i = 0; i < nchildren; i++) {
     starts[i] = x_cursor;
     x_cursor += widths[i] + extra_gap;
+  }
+
+  /* TEMP DEBUG: dump per-column starts/widths */
+  {
+    const char *cls = dom_get_attr(n, "class");
+    char d[200];
+    sprintf(d, "[FLEX] LAY <%s class=\"%s\"> n=%d w[0..3]=%d,%d,%d,%d s[0..3]=%d,%d,%d,%d\n",
+            n->tag_name ? n->tag_name : "?", cls ? cls : "",
+            nchildren, widths[0], widths[1], widths[2], widths[3],
+            starts[0], starts[1], starts[2], starts[3]);
+    print(d);
   }
 
   /* Pass 3: render each child into its column. We anchor each
