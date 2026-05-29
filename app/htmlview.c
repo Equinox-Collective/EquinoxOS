@@ -947,10 +947,13 @@ static void apply_css_property(css_rule_t *rule, const char *prop,
     if (strstr(val, "uppercase"))
       rule->uppercase = true;
   } else if (strncmp(prop, "margin", 6) == 0 && prop[6] == '\0') {
-    if (strstr(val, "auto")) {
-      rule->align = ALIGN_CENTER;
-      rule->has_align = true;
-    }
+    /* L5+: don't conflate `margin:0 auto` with `text-align:center`.
+     * margin:auto centers the block itself in its parent; it does
+     * NOT make text inside the block centered. The old mapping
+     * inherited ALIGN_CENTER down through every descendant text
+     * line — e.g. `.wrap{margin:0 auto}` made the entire bar's
+     * brand/nav/cta text render center-aligned across the window.
+     */
     rule->margin_top = 1;
     rule->margin_bottom = 1;
   } else if (strncmp(prop, "margin-top", 10) == 0) {
