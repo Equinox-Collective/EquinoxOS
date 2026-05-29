@@ -2178,18 +2178,10 @@ static void emit_flex_container(walk_ctx_t *w, dom_node_t *n) {
   }
 
   /* If the container is too narrow to give every child at least
-   * MIN_COL_W pixels, degrade to vertical stacking.
-   *
-   * Lowered from 80 → 28: a header nav like
-   *   `.nav{display:flex;gap:24}` with 4 <a> children inside a
-   *   189-px column would otherwise turn into a 4-row vertical
-   *   stack (≈ 162 px tall). That blew the .bar's outer
-   *   align-items:center cross-axis sizing up to 162 and pushed
-   *   the brand img / span into the same y band as the nav
-   *   links and the cta button. 28 keeps such short-label rows
-   *   horizontal — text clipping in draw_text_line then trims
-   *   each label so it can't bleed into a neighbour column. */
-  const int MIN_COL_W = 28;
+   * MIN_COL_W pixels, degrade to vertical stacking. This is
+   * critical at our 604-px content width: 6+ columns just turn
+   * into chopped text. */
+  const int MIN_COL_W = 80;
   int gross_w = container_w - (nchildren - 1) * gap;
   if (gross_w / nchildren < MIN_COL_W) {
     int first = 1;
@@ -2292,12 +2284,33 @@ static void emit_flex_container(walk_ctx_t *w, dom_node_t *n) {
     }
   }
 
-  /* Pass 4: align-items vertical fixup. */
+  /* Pass 4: align-items vertical fixup.
+   *
+   * L5+: when one flex child degraded to a vertical stack
+   * (e.g. .nav with 4 links → ~162 px tall) and the others are
+   * single-line (~18 px), `align-items:center` against the
+   * raw max_h would shove the short children halfway down the
+   * tall column and they'd visually collide with the tall
+   * column's later lines. Cap the centering reference to a
+   * "typical" height: if max_h is more than 2× the second-
+   * largest child, center against that smaller height instead.
+   * Tall column keeps dy=0, others get a small shift, no
+   * collision. */
+  int ref_h = max_h;
+  if (align == 3 /*center*/ && nchildren > 1) {
+    int top1 = 0, top2 = 0;
+    for (int i = 0; i < nchildren; i++) {
+      int h = heights[i];
+      if (h > top1) { top2 = top1; top1 = h; }
+      else if (h > top2) { top2 = h; }
+    }
+    if (top2 > 0 && top1 > 2 * top2) ref_h = top2;
+  }
   if (align != 0) {
     for (int i = 0; i < nchildren; i++) {
       if (counts[i] <= 0) continue;
       int dy = 0;
-      if      (align == 3 /*center*/) dy = (max_h - heights[i]) / 2;
+      if      (align == 3 /*center*/) dy = (ref_h - heights[i]) / 2;
       else if (align == 2 /*end*/)    dy = (max_h - heights[i]);
       /* align == 1 (start): dy = 0 */
       if (dy > 0) layout_translate_range(first_idx[i], counts[i], 0, dy);
