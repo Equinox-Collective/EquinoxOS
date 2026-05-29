@@ -3785,6 +3785,33 @@ static void draw_text_line(int x, int y, const line_t *ln) {
   line_style_t style = ln->style;
   const char *text = ln->text;
 
+  /* L5+: if the line lives inside a flex/grid column narrower than
+   * the content area, clip the text so it can't bleed into the
+   * neighbour column. We truncate to the column's pixel width
+   * (approx via 8 px/cell for bitmap, 9-11 px/char for TTF) — good
+   * enough to stop "Features Repos Roadmap" turning into a single
+   * smeared line. The truncated copy lives in a local buffer so we
+   * don't mutate the cached line text. */
+  char clip_buf[LINE_BYTES];
+  if (ln->box_w > 0 && ln->box_w < CONTENT_W) {
+    int max_px = ln->box_w;
+    int est_cell = 8;  /* default bitmap cell */
+    if (style == STYLE_H1) est_cell = 11;
+    else if (style == STYLE_H2) est_cell = 9;
+    else if (ln->font_size >= 2) est_cell = 11;
+    else if (ln->font_size >= 1) est_cell = 9;
+    int max_chars = max_px / est_cell;
+    if (max_chars < 1) max_chars = 1;
+    int n = (int)strlen(text);
+    if (n > max_chars) {
+      int copy = max_chars;
+      if (copy >= (int)sizeof clip_buf) copy = (int)sizeof clip_buf - 1;
+      memcpy(clip_buf, text, (size_t)copy);
+      clip_buf[copy] = '\0';
+      text = clip_buf;
+    }
+  }
+
   /* R6/B2c: width in pixels = visible cells × 8 (Cyrillic is 1 cell
    * per codepoint but 2 bytes per codepoint, so strlen overcounts). */
   int w = eid_text_width_utf8(text);
@@ -3819,9 +3846,23 @@ static void draw_text_line(int x, int y, const line_t *ln) {
 
   /* CSS background override */
   if (ln->css_bg) {
-    if (ln->full_width_bg) {
-      /* Fill the entire window width for block-level backgrounds */
+    /* L5+: a "full-width" CSS bg only paints the window edge-to-edge
+     * when the line actually occupies the whole content area. Inside
+     * a flex/grid column (box_x > 0 or box_w < CONTENT_W) we paint
+     * only the column rectangle — otherwise an inline <span> with a
+     * dark .badge background turns into a giant black bar across the
+     * page. */
+    bool is_full = ln->full_width_bg &&
+                   ln->box_x == 0 &&
+                   ln->box_w >= CONTENT_W;
+    if (is_full) {
       eid_draw_rect(fb, WIN_W, WIN_H, 0, y - 2, WIN_W, LINE_H, ln->css_bg);
+    } else if (ln->full_width_bg) {
+      /* Box-confined fill: paint the column rectangle. */
+      int bg_x = CONTENT_X + ln->box_x - 2;
+      int bg_w = ln->box_w + 4;
+      if (bg_w < 24) bg_w = 24;
+      eid_draw_rect(fb, WIN_W, WIN_H, bg_x, y - 2, bg_w, LINE_H, ln->css_bg);
     } else {
       int bg_w = w + 12;
       if (bg_w < 24)
