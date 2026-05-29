@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>     /* malloc — used by <img> in-flex-column downscale */
 #include <string.h>
 #ifdef BROWSER_BUILD
 #include "qjs_window.h"   /* qjs_window_set_history_length proto */
