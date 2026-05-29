@@ -2130,17 +2130,6 @@ static void emit_flex_container(walk_ctx_t *w, dom_node_t *n) {
   int justify     = style_stack[style_depth].justify;
   int align       = style_stack[style_depth].align_items;
 
-  /* TEMP DEBUG: dump container info to serial */
-  {
-    const char *cls = dom_get_attr(n, "class");
-    char d[160];
-    sprintf(d, "[FLEX] <%s class=\"%s\"> x=%d y=%d w=%d dir=%d gap=%d jus=%d aln=%d\n",
-            n->tag_name ? n->tag_name : "?",
-            cls ? cls : "",
-            container_x, container_y, container_w, flex_dir, gap, justify, align);
-    print(d);
-  }
-
   /* Flush any pending inline text from the parent first; we
    * don't want the container's children to inherit a half-built
    * word run from before. */
@@ -2194,14 +2183,6 @@ static void emit_flex_container(walk_ctx_t *w, dom_node_t *n) {
   const int MIN_COL_W = 80;
   int gross_w = container_w - (nchildren - 1) * gap;
   if (gross_w / nchildren < MIN_COL_W) {
-    {
-      const char *cls = dom_get_attr(n, "class");
-      char d[160];
-      sprintf(d, "[FLEX] DEGRADE <%s class=\"%s\"> n=%d gross=%d per=%d\n",
-              n->tag_name ? n->tag_name : "?", cls ? cls : "",
-              nchildren, gross_w, gross_w / nchildren);
-      print(d);
-    }
     int first = 1;
     for (dom_node_t *c = n->first_child; c; c = c->next_sibling) {
       if (c->type != DOM_NODE_ELEMENT) { w_emit_node(w, c); continue; }
@@ -2279,17 +2260,6 @@ static void emit_flex_container(walk_ctx_t *w, dom_node_t *n) {
   for (int i = 0; i < nchildren; i++) {
     starts[i] = x_cursor;
     x_cursor += widths[i] + extra_gap;
-  }
-
-  /* TEMP DEBUG: dump per-column starts/widths */
-  {
-    const char *cls = dom_get_attr(n, "class");
-    char d[200];
-    sprintf(d, "[FLEX] LAY <%s class=\"%s\"> n=%d w[0..3]=%d,%d,%d,%d s[0..3]=%d,%d,%d,%d\n",
-            n->tag_name ? n->tag_name : "?", cls ? cls : "",
-            nchildren, widths[0], widths[1], widths[2], widths[3],
-            starts[0], starts[1], starts[2], starts[3]);
-    print(d);
   }
 
   /* Pass 3: render each child into its column. We anchor each
@@ -2694,13 +2664,46 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
     const char *src = dom_get_attr(n, "src");
     int idx = src ? load_image_for_src(src) : -1;
     if (idx >= 0) {
+#ifdef BROWSER_BUILD
+      /* L5+: if we're emitting this <img> inside a narrower
+       * flex/grid column, halve the cached pixel buffer again
+       * until it fits the column. load_image_for_src() only knows
+       * about CONTENT_W (the whole content area), so a 1080² logo
+       * lands at 270² — fine for a hero <center><img>, but a
+       * watermark-sized monster inside a 89 px brand column.
+       * Aspect-preserving, in-place. We also leave 2*IMG_PAD card
+       * room so the card frame still fits inside the column. */
+      const int IMG_PAD = 6;
+      layout_frame_t *cf = layout_top();
+      int max_col_w = (cf ? cf->w : CONTENT_W) - IMG_PAD * 2;
+      if (max_col_w < 8) max_col_w = 8;
+      eq_image_t *im = &g_images[idx];
+      while (im->w > max_col_w && im->w > 1 && im->h > 1) {
+        int nw = im->w / 2; if (nw < 1) nw = 1;
+        int nh = im->h / 2; if (nh < 1) nh = 1;
+        uint8_t *dst = (uint8_t *)malloc((size_t)nw * nh * 4);
+        if (!dst) break;
+        for (int y = 0; y < nh; y++) {
+          const uint8_t *srow = im->rgba + (size_t)(y * 2) * im->w * 4;
+          uint8_t       *drow = dst       + (size_t) y      * nw   * 4;
+          for (int x = 0; x < nw; x++) {
+            const uint8_t *sp = srow + (size_t)(x * 2) * 4;
+            drow[x * 4 + 0] = sp[0];
+            drow[x * 4 + 1] = sp[1];
+            drow[x * 4 + 2] = sp[2];
+            drow[x * 4 + 3] = sp[3];
+          }
+        }
+        eq_image_free(im);
+        im->rgba = dst; im->w = nw; im->h = nh;
+      }
+#endif
       push_line("", 0, STYLE_IMAGE, w->in_list);
       lines[line_count - 1].image_idx = idx;
 #ifdef BROWSER_BUILD
       /* L1: replace the default LINE_H placeholder with the
        * image's real on-screen advance — image + 2*PAD card + 6
        * px gap, matching render()'s tail bump. */
-      const int IMG_PAD = 6;
       int img_h = g_images[idx].h + IMG_PAD * 2 + 6;
       layout_set_last_height(img_h);
 #endif
@@ -4200,13 +4203,20 @@ static void render(const char *filename) {
       int ii = lines[idx].image_idx;
       if (ii >= 0 && ii < g_image_count && g_images[ii].rgba) {
         const eq_image_t *im = &g_images[ii];
-        int draw_x = CONTENT_X;
+        /* L5+: honour the line's pixel box_x so an <img> inside
+         * a flex / grid column draws inside that column, not at
+         * the page's left margin. box_x is relative to the
+         * content area (frame.x), so add CONTENT_X to get fb
+         * coords. */
+        int box_x_px = lines[idx].box_x;
+        int box_w_px = lines[idx].box_w > 0 ? lines[idx].box_w : CONTENT_W;
+        int draw_x = CONTENT_X + box_x_px;
         int draw_y = cur_y;
         /* Honour center alignment if the parent set it (e.g. an
          * <img> inside a <center> or text-align:center container). */
         if (lines[idx].css_align == ALIGN_CENTER &&
-            im->w < CONTENT_W)
-          draw_x = CONTENT_X + (CONTENT_W - im->w) / 2;
+            im->w < box_w_px)
+          draw_x = CONTENT_X + box_x_px + (box_w_px - im->w) / 2;
 
         /* R6/B4 follow-up: paint a soft-grey "card" behind the
          * image first, then alpha-composite the pixels on top.
