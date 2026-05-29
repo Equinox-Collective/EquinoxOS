@@ -3882,6 +3882,22 @@ static void draw_text_line(int x, int y, const line_t *ln) {
 
   uint32_t color = ln->css_color ? ln->css_color : color_for_style(style);
 
+  /* L5+: skip per-line bg painting for empty/whitespace lines inside
+   * narrow flex columns. Without this, a `.tt-bar` of 6
+   * `<span class="dot">` siblings (each with a dark bg) — degraded
+   * vertical because the column is only ~250 px wide — emits 6
+   * empty dark stripes, stacked, that look like one tall solid
+   * black rectangle next to the hero. The dots are decorative;
+   * dropping their empty-line bg keeps the actual terminal text
+   * visible without the leading 100 px of black slab. */
+  bool text_is_blank = true;
+  for (const char *p = ln->text; *p; p++) {
+    if (*p != ' ' && *p != '\t') { text_is_blank = false; break; }
+  }
+  if (ln->css_bg && text_is_blank && ln->box_w > 0 &&
+      ln->box_w < CONTENT_W) {
+    /* skip — no text in this column line, don't paint dark slab */
+  } else
   /* CSS background override */
   if (ln->css_bg) {
     /* L5+: a "full-width" CSS bg only paints the window edge-to-edge
