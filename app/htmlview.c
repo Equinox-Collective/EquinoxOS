@@ -2192,6 +2192,14 @@ static void emit_flex_container(walk_ctx_t *w, dom_node_t *n) {
       if (c->type != DOM_NODE_ELEMENT) { w_emit_node(w, c); continue; }
       if (!first && gap > 0) layout_top()->y += gap;
       w_emit_node(w, c);
+      /* L5+: force a line break between degraded-vertical flex
+       * children. Without this, a `.badges` row of 7 inline
+       * `<span class="badge">` siblings — degraded to vertical
+       * because the column is too narrow — would concatenate all
+       * 7 text runs into a single line, then bg-paint the row
+       * yellow once, looking like one continuous yellow bar with
+       * all 7 labels smushed together. */
+      w_flush(w);
       first = 0;
     }
     w_flush(w);
