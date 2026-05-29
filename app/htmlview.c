@@ -2178,10 +2178,18 @@ static void emit_flex_container(walk_ctx_t *w, dom_node_t *n) {
   }
 
   /* If the container is too narrow to give every child at least
-   * MIN_COL_W pixels, degrade to vertical stacking. This is
-   * critical at our 604-px content width: 6+ columns just turn
-   * into chopped text. */
-  const int MIN_COL_W = 80;
+   * MIN_COL_W pixels, degrade to vertical stacking.
+   *
+   * Lowered from 80 → 28: a header nav like
+   *   `.nav{display:flex;gap:24}` with 4 <a> children inside a
+   *   189-px column would otherwise turn into a 4-row vertical
+   *   stack (≈ 162 px tall). That blew the .bar's outer
+   *   align-items:center cross-axis sizing up to 162 and pushed
+   *   the brand img / span into the same y band as the nav
+   *   links and the cta button. 28 keeps such short-label rows
+   *   horizontal — text clipping in draw_text_line then trims
+   *   each label so it can't bleed into a neighbour column. */
+  const int MIN_COL_W = 28;
   int gross_w = container_w - (nchildren - 1) * gap;
   if (gross_w / nchildren < MIN_COL_W) {
     int first = 1;
@@ -3793,14 +3801,13 @@ static void draw_text_line(int x, int y, const line_t *ln) {
    * smeared line. The truncated copy lives in a local buffer so we
    * don't mutate the cached line text. */
   char clip_buf[LINE_BYTES];
-  if (ln->box_w > 0 && ln->box_w < CONTENT_W) {
-    int max_px = ln->box_w;
-    int est_cell = 8;  /* default bitmap cell */
-    if (style == STYLE_H1) est_cell = 11;
-    else if (style == STYLE_H2) est_cell = 9;
-    else if (ln->font_size >= 2) est_cell = 11;
-    else if (ln->font_size >= 1) est_cell = 9;
-    int max_chars = max_px / est_cell;
+  /* Only clip body-size text — for headings / large fonts we'd rather
+   * see overflow than a brutally truncated H1. */
+  bool clip_eligible = (style != STYLE_H1 && style != STYLE_H2 &&
+                        ln->font_size == 0);
+  if (clip_eligible && ln->box_w > 0 && ln->box_w < CONTENT_W) {
+    int est_cell = 8;  /* bitmap cell ~8 px wide */
+    int max_chars = ln->box_w / est_cell;
     if (max_chars < 1) max_chars = 1;
     int n = (int)strlen(text);
     if (n > max_chars) {
@@ -3858,10 +3865,11 @@ static void draw_text_line(int x, int y, const line_t *ln) {
     if (is_full) {
       eid_draw_rect(fb, WIN_W, WIN_H, 0, y - 2, WIN_W, LINE_H, ln->css_bg);
     } else if (ln->full_width_bg) {
-      /* Box-confined fill: paint the column rectangle. */
-      int bg_x = CONTENT_X + ln->box_x - 2;
-      int bg_w = ln->box_w + 4;
-      if (bg_w < 24) bg_w = 24;
+      /* Box-confined fill: paint just the column rectangle so the
+       * gap between flex children stays visible (no halo). */
+      int bg_x = CONTENT_X + ln->box_x;
+      int bg_w = ln->box_w;
+      if (bg_w < 12) bg_w = 12;
       eid_draw_rect(fb, WIN_W, WIN_H, bg_x, y - 2, bg_w, LINE_H, ln->css_bg);
     } else {
       int bg_w = w + 12;
