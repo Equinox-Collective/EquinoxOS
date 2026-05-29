@@ -4063,7 +4063,13 @@ static void render(const char *filename) {
     cur_y = line_y;
     int line_h = lines[idx].box_h > 0 ? lines[idx].box_h : LINE_H;
     if (line_y + line_h > content_bottom)
-      break;
+      continue;  /* below the fold; later DOM-order lines might
+                  * still be above (multi-column flex/grid) — keep
+                  * scanning instead of break. */
+    if (line_y < content_top)
+      continue;  /* above the fold; lines[] isn't sorted by box_y
+                  * since flex/grid column children are appended
+                  * in DOM order, so we can't break here either. */
 
     /* box_x already includes the LAYOUT_DEFAULT_INDENT offset for
      * indented lines (see push_line). Don't add it again. */
