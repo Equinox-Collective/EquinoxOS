@@ -42,7 +42,21 @@ void eid_begin(eid_ctx_t *ctx, uint32_t *buffer, int w, int h) {
   bool was_down = ctx->m_down;
   ctx->m_down = (btns & 1);
   ctx->m_clicked = (ctx->m_down && !was_down);
-  ctx->last_key = (uint8_t)_syscall(SYS_GET_SCANCODE, 0, 0, 0, 0, 0);
+  // ВАЖНО: НЕ дёргаем SYS_GET_SCANCODE здесь.
+  //
+  // Раньше тут был `ctx->last_key = (uint8_t)_syscall(SYS_GET_SCANCODE,...)`.
+  // Это ломало стрелки и PgUp/PgDn: цикл в sysgui/main.c уже читает один
+  // байт сканкода за кадр (включая 0xE0-префикс extended-клавиш). Второй
+  // pop здесь "съедал" следующий байт из FIFO ядра и тут же затирал его
+  // через `eid_ctx.last_key = cur_key` в main.c. В итоге Lua видела ТОЛЬКО
+  // 0xE0 (без кода клавиши после него) — то есть стрелки/PgUp/PgDn вообще
+  // не доходили до приложений.
+  //
+  // Теперь sysgui сам полностью владеет очередью клавиатуры и склеивает
+  // extended-коды в `0x100 | code` (см. eid.h::last_key). Приложения,
+  // которые хотят читать клавиши напрямую, должны делать `SYS_GET_SCANCODE`
+  // у себя — но если в одном процессе крутится несколько eid-инстансов,
+  // двойной поллинг тут больше ничего не сломает молча.
   ctx->hot_id = 0;
 }
 
