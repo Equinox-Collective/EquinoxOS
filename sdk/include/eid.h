@@ -23,7 +23,11 @@ typedef struct {
   uint32_t active_id; // ID виджета, который мы удерживаем
   uint32_t focus_id;  // ID виджета с фокусом клавиатуры
 
-  uint8_t last_key; // Последний сканкод
+  uint16_t last_key; // Последний сканкод. Для extended-клавиш (0xE0-префикс)
+                     // выставляется верхний бит: 0x100 | code. Например:
+                     //   Up=0x148, Down=0x150, Left=0x14B, Right=0x14D,
+                     //   PgUp=0x149, PgDn=0x151, Home=0x147, End=0x14F,
+                     //   Insert=0x152, Delete=0x153.
 } eid_ctx_t;
 
 // Инициализация
