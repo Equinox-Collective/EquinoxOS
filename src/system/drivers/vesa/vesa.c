@@ -6,6 +6,7 @@
 #include "../../../syslibc/string.h"
 #include "../../mem/memory.h"
 #include "../../fs/vfs.h"
+#include "../../mem/vmm.h"
 
 #include <stdint.h>
 
@@ -30,15 +31,20 @@ void init_vesa(uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch) {
   screen_height = height;
   screen_pitch = pitch;
 
-  // Выделяем память под задний буфер кадра
-  backbuffer = (uint32_t *)kmalloc(width * height * 4);
+  // Выделяем память под задний буфер кадра напрямую через страничные регистры
+  backbuffer = (uint32_t *)vmm_alloc_large_buffer(width * height * 4);
+  if (!backbuffer) {
+    // Резервный вариант на случай непредвиденных обстоятельств
+    backbuffer = (uint32_t *)kmalloc(width * height * 4);
+  }
+  
   memset(backbuffer, 0, width * height * 4);
   vesa_mark_dirty(0, 0, screen_width, screen_height);
   screen_dirty.x1 = 0;
-    screen_dirty.y1 = 0;
-    screen_dirty.x2 = width;
-    screen_dirty.y2 = height;
-    screen_dirty.modified = true; // Очищаем от мусора
+  screen_dirty.y1 = 0;
+  screen_dirty.x2 = width;
+  screen_dirty.y2 = height;
+  screen_dirty.modified = true;
 }
 
 void put_pixel(int x, int y, uint32_t color) {
@@ -49,10 +55,13 @@ void put_pixel(int x, int y, uint32_t color) {
 
 void draw_background() {
   if (!cached_bg) {
-    cached_bg = (uint32_t *)kmalloc(screen_width * screen_height * 4);
+    cached_bg = (uint32_t *)vmm_alloc_large_buffer(screen_width * screen_height * 4);
+    if (!cached_bg) {
+      cached_bg = (uint32_t *)kmalloc(screen_width * screen_height * 4);
+    }
+    
     for (int y = 0; y < (int)screen_height; y++) {
       for (int x = 0; x < (int)screen_width; x++) {
-        // Красивый темно-синий градиент
         uint8_t r = 20;
         uint8_t g = 30;
         uint8_t b = 50 + (y * 50 / screen_height);

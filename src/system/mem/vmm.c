@@ -2,11 +2,11 @@
 #include "../drivers/vesa/vesa.h"
 #include "../../syslibc/string.h"
 #include "../mem/pmm.h"
+#include "../core/cpu.h"
 
 static page_table_t *kernel_pml4;
 uint64_t kernel_cr3;
 
-// Вспомогательная функция для паники внутри VMM
 static void vmm_panic(const char *msg) {
   draw_rect_direct(0, 0, screen_width, screen_height, 0x880000);
   vesa_draw_string_direct("VMM CRITICAL ERROR", 50, 50, 0xFFFFFF);
@@ -19,8 +19,6 @@ static void vmm_panic(const char *msg) {
 static page_table_t *get_next_level(page_table_t *table, uint64_t index,
                                     bool allocate) {
   if (table[index] & PTE_PRESENT) {
-    // КРИТИЧНО: Если мы мапим что-то для юзера,
-    // промежуточные таблицы ТОЖЕ должны иметь флаг PTE_USER
     table[index] |= (PTE_PRESENT | PTE_USER | PTE_WRITABLE);
     return (page_table_t *)VIRT(table[index] & ~0xFFFULL);
   }
@@ -32,17 +30,13 @@ static page_table_t *get_next_level(page_table_t *table, uint64_t index,
   if (!next_level_phys)
     vmm_panic("VMM: Out of physical memory for page tables!");
 
-  // Обнуляем новую таблицу, чтобы не было мусора
   memset((void *)VIRT(next_level_phys), 0, PAGE_SIZE);
-
-  // При создании новой таблицы сразу ставим USER и WRITABLE
   table[index] =
       (uint64_t)next_level_phys | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
 
   return (page_table_t *)VIRT(next_level_phys);
 }
 
-// Обнови vmm_map, чтобы он был агрессивнее
 void vmm_map(page_table_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags) {
   virt &= ~0xFFFULL;
   phys &= ~0xFFFULL;
@@ -55,22 +49,79 @@ void vmm_map(page_table_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags) {
   page_table_t *pdpt = get_next_level(pml4, pml4_idx, true);
   page_table_t *pd = get_next_level(pdpt, pdpt_idx, true);
   page_table_t *pt = get_next_level(pd, pd_idx, true);
-  if (pt[pt_idx] & PTE_PRESENT) {
-    // Страница уже замаплена! Просто выходим, чтобы не убить данные!
-    return;
-  }
+  
+  // Разрешаем перезапись флагов кэширования для существующих страниц видеопамяти
   pt[pt_idx] = phys | flags | PTE_PRESENT;
 
-  // Полная инвалидация страницы
   __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
+}
+
+void pat_init(void) {
+  // Читаем текущий регистр IA32_PAT MSR (0x277)
+  uint64_t pat = read_msr(0x277);
+  
+  // Очищаем запись PA3 (биты 24-31) и выставляем тип 0x01 (Write-Combining)
+  pat &= ~(0xFFULL << 24);
+  pat |= (0x01ULL << 24);
+  
+  write_msr(0x277, pat);
+}
+
+extern uintptr_t fb_base_addr;
+extern uint32_t screen_width;
+extern uint32_t screen_height;
+extern uint32_t screen_pitch;
+extern uint64_t hhdm_offset;
+
+void vmm_remap_fb_wc(void) {
+  if (!fb_base_addr) return;
+  
+  uint64_t phys_fb = (uint64_t)fb_base_addr - hhdm_offset;
+  uint32_t size = screen_height * screen_pitch;
+  uint32_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+
+  // Виртуальный адрес в верхней половине, гарантированно свободный от коллизий
+  uint64_t wc_virt = 0xFFFFD00000000000;
+
+  for (uint32_t i = 0; i < pages; i++) {
+    vmm_map(kernel_pml4, wc_virt + (i * PAGE_SIZE), phys_fb + (i * PAGE_SIZE),
+            PTE_PRESENT | PTE_WRITABLE | PTE_PCD | PTE_PWT);
+  }
+  
+  // Переключаем фреймбуфер ядра на быстрый Write-Combining адрес
+  fb_base_addr = wc_virt;
+}
+
+void *vmm_alloc_large_buffer(uint64_t size) {
+  uint32_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+  void *phys = pmm_alloc_continuous(pages);
+  if (!phys) return NULL;
+
+  // Резервируем диапазон адресов под крупные буферы ядра
+  static uint64_t large_vaddr = 0xFFFFE00000000000;
+  uint64_t virt = large_vaddr;
+  large_vaddr += (pages * PAGE_SIZE);
+
+  for (uint32_t i = 0; i < pages; i++) {
+    vmm_map(kernel_pml4, virt + (i * PAGE_SIZE), (uint64_t)phys + (i * PAGE_SIZE),
+            PTE_PRESENT | PTE_WRITABLE);
+  }
+
+  memset((void *)virt, 0, size);
+  return (void *)virt;
 }
 
 void vmm_init() {
   uint64_t cr3_val;
   __asm__ volatile("mov %%cr3, %0" : "=r"(cr3_val));
   kernel_cr3 = cr3_val & ~0xFFFULL;
-  // Сохраняем виртуальный адрес текущей (Limine) таблицы PML4
   kernel_pml4 = (page_table_t *)VIRT(kernel_cr3);
+
+  // Инициализируем аппаратную поддержку PAT
+  pat_init();
+
+  // Применяем WC к видеопамяти ядра
+  vmm_remap_fb_wc();
 }
 
 page_table_t *vmm_create_address_space() {
@@ -81,15 +132,9 @@ page_table_t *vmm_create_address_space() {
   page_table_t *new_pml4 = (page_table_t *)VIRT(phys);
   memset(new_pml4, 0, PAGE_SIZE);
 
-  // Копируем ВЕСЬ верхний диапазон (ядро + HHDM + куча)
-  // В Limine это обычно всё, что выше 256-го индекса
   for (int i = 256; i < 512; i++) {
     new_pml4[i] = kernel_pml4[i];
   }
-
-  // БЕЗПОЩАДНЫЙ ФИКС: Если твоя куча оказалась в нижней половине (ошибка
-  // дизайна), нам ПРИДЕТСЯ скопировать и нижние таблицы, но это опасно для
-  // изоляции. Лучше убедись, что hhdm_offset > 0xFFFF800000000000
 
   return new_pml4;
 }
@@ -117,13 +162,9 @@ uint64_t vmm_get_phys(page_table_t *pml4, uint64_t virt) {
   return (pt[pt_idx] & ~0xFFFULL) + (virt & 0xFFF);
 }
 
-// В vmm.c
-// В vmm.c
 void vmm_destroy_address_space(uint64_t cr3_phys) {
   page_table_t *pml4 = (page_table_t *)VIRT(cr3_phys);
 
-  // Проходим только по нижней половине (0-255), так как там живет юзерспейс.
-  // Верхняя половина (256-511) общая для всех — это ядро, её НЕ ТРОГАЕМ.
   for (int i = 0; i < 256; i++) {
     if (pml4[i] & PTE_PRESENT) {
       page_table_t *pdpt = (page_table_t *)VIRT(pml4[i] & ~0xFFFULL);
@@ -135,19 +176,16 @@ void vmm_destroy_address_space(uint64_t cr3_phys) {
               page_table_t *pt = (page_table_t *)VIRT(pd[k] & ~0xFFFULL);
               for (int l = 0; l < 512; l++) {
                 if (pt[l] & PTE_PRESENT) {
-                  // ОСВОБОЖДАЕМ ФИЗИЧЕСКУЮ СТРАНИЦУ (Кадры Doom, стек и т.д.)
                   pmm_free((void *)(pt[l] & ~0xFFFULL));
                 }
               }
-              pmm_free((void *)(pd[k] & ~0xFFFULL)); // Свобождаем PT
+              pmm_free((void *)(pd[k] & ~0xFFFULL));
             }
           }
-          pmm_free((void *)(pdpt[j] & ~0xFFFULL)); // Свобождаем PD
+          pmm_free((void *)(pdpt[j] & ~0xFFFULL));
         }
       }
-      pmm_free((void *)(pml4[i] & ~0xFFFULL)); // Свобождаем PDPT
+      pmm_free((void *)(pml4[i] & ~0xFFFULL));
     }
   }
-  // Сам PML4 (корень таблиц) мы удалим чуть позже, когда переключимся на другую
-  // задачу.
 }
