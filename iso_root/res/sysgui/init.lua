@@ -80,11 +80,11 @@ local desktop_icons = {
 }
 
 -- Инициализируем системные окна через подключенные модули
-table.insert(windows, Window.new("Equinox Terminal", 50, 80, 500, 320, draw_terminal))
+table.insert(windows, Window.new("Equinox Terminal", 50, 80, 500, 320, draw_terminal.draw, draw_terminal.handle_key))
 table.insert(windows, Window.new("System Monitor", 600, 80, 320, 140, draw_monitor))
 table.insert(windows, Window.new("Vector Paint Brush", 120, 200, 420, 300, draw_paint))
 table.insert(windows, Window.new("VFS File Explorer", 400, 150, 350, 260, draw_explorer))
-table.insert(windows, Window.new("Notepad Text Editor", 100, 100, 400, 260, draw_notepad))
+table.insert(windows, Window.new("Notepad Text Editor", 100, 100, 400, 260, draw_notepad, draw_notepad.handle_key))
 
 -- Все окна изначально развернуты
 for _, win in ipairs(windows) do win.active = true end
@@ -137,28 +137,9 @@ function on_tick(dt)
         if key == 42 or key == 54 then shift_pressed = true end
         local char = scancodeToAscii(key, shift_pressed)
 
-        if focused_window then
-            if focused_window.title == "Equinox Terminal" then
-                if key == 28 then 
-                    table.insert(_G.term_lines, ">> " .. _G.term_input)
-                    if type(_G.process_terminal_command) == "function" then
-                        _G.process_terminal_command(_G.term_input)
-                    end
-                    _G.term_input = ""
-                elseif key == 14 then 
-                    _G.term_input = string.sub(_G.term_input, 1, -2)
-                elseif string.len(char) > 0 and string.byte(char) >= 32 then
-                    _G.term_input = _G.term_input .. char
-                end
-            elseif focused_window.title == "Notepad Text Editor" then
-                if key == 28 then 
-                    _G.notepad_text = _G.notepad_text .. "\n"
-                elseif key == 14 then 
-                    _G.notepad_text = string.sub(_G.notepad_text, 1, -2)
-                elseif string.len(char) > 0 and string.byte(char) >= 32 then
-                    _G.notepad_text = _G.notepad_text .. char
-                end
-            end
+        -- Просто отдаем событие активному окну, оно само знает, что делать
+        if focused_window and type(focused_window.handle_key) == "function" then
+            focused_window:handle_key(key, char)
         end
     else
         shift_pressed = false

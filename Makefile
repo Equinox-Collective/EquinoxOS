@@ -141,6 +141,33 @@ DOOM_DIR = app/doom
 DOOM_SRCS = $(wildcard $(DOOM_DIR)/*.c)
 DOOM_OBJS = $(patsubst $(DOOM_DIR)/%.c, $(OBJ_DIR)/doom/%.o, $(DOOM_SRCS))
 
+
+# --- OPTIONAL COMPONENT SKIPS ---
+# Позволяет пропускать тяжелые компоненты при разработке (например, при cleanrun).
+# Поддерживает синтаксис SKIP=doom,bearssl или отдельные флаги SKIP_DOOM=1 / SKIP_BEARSSL=1.
+ifneq ($(findstring doom,$(SKIP)),)
+  SKIP_DOOM = 1
+endif
+ifneq ($(findstring bearssl,$(SKIP)),)
+  SKIP_BEARSSL = 1
+endif
+
+# Определение зависимостей на основе флагов пропуска
+ifeq ($(SKIP_DOOM),1)
+  DOOM_DEP =
+else
+  DOOM_DEP = doom.elf
+endif
+
+ifeq ($(SKIP_BEARSSL),1)
+  BEARSSL_DEP =
+  TLS_APPS_DEP =
+else
+  BEARSSL_DEP = $(BEARSSL_LIB)
+  TLS_APPS_DEP = $(APP_ELFS_TLS)
+endif
+
+
 # --- MAIN RULES ---
 
 # Full local build: compile everything, generate hdd.img, then build the ISO.
@@ -218,7 +245,8 @@ HTTP_CLIENT_OBJ := sdk/lib_http/http_client.o
 # this matters when users run `make -j`.
 $(KERNEL_OBJS) $(SDK_OBJS) $(APP_OBJS) $(DOOM_OBJS): | setup
 
-apps: setup $(SDK_OBJS) $(BEARSSL_LIB) $(APP_ELFS_SIMPLE) $(APP_ELFS_TLS) sysgui_app
+# Заменяем жесткие зависимости BearSSL и TLS-приложений на динамические переменные
+apps: setup $(SDK_OBJS) $(BEARSSL_DEP) $(APP_ELFS_SIMPLE) $(TLS_APPS_DEP) sysgui_app
 
 $(ISO_ROOT)/bin/%.elf: app/%.o $(SDK_OBJS)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< -o $@
@@ -318,11 +346,13 @@ clean:
 	@rm -f third_party/bearssl/libbearssl.a
 endif
 
-create_hdd: kernel.elf apps doom.elf
+# Переменная DOOM_DEP подставляется динамически
+create_hdd: kernel.elf apps $(DOOM_DEP)
 	@echo --- Generating EXT2 hdd.img ---
 	python WINDOWS_ext2.py
 
-iso: kernel.elf apps doom.elf
+# Переменная DOOM_DEP подставляется динамически
+iso: kernel.elf apps $(DOOM_DEP)
 	@$(call RM_F,equos.iso)
 	xorriso -as mkisofs -b boot/limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table --efi-boot EFI/BOOT/limine-bios-cd.bin -efi-boot-part --efi-boot-image -o equos.iso $(ISO_ROOT)
 
