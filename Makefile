@@ -321,6 +321,8 @@ sysgui_app: $(SDK_OBJS)
 	@$(call CP_F,app/sysgui/scripts/paint.lua,iso_root/res/sysgui/paint.lua)
 	@$(call CP_F,app/sysgui/scripts/explorer.lua,iso_root/res/sysgui/explorer.lua)
 	@$(call CP_F,app/sysgui/scripts/notepad.lua,iso_root/res/sysgui/notepad.lua)
+	@$(call CP_F,app/sysgui/scripts/BOOTSOUND.wav,iso_root/res/sysgui/BOOTSOUND.wav)
+	@$(call CP_F,app/sysgui/scripts/bootvid.lua,iso_root/res/sysgui/bootvid.lua)
 
 # --- SYSTEM RULES ------------------------------------------------------------
 ifeq ($(OS),Windows_NT)

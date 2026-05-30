@@ -481,13 +481,13 @@ void syscall_handler(syscall_regs_t *regs) {
     uint32_t size = regs->rsi;
     uint32_t pages = (size + 4095) / 4096;
 
-    // ВНИМАНИЕ: Это опасный вызов. В будущем добавь проверку прав!
     uint64_t virt = 0x20000000000; // Фиксированный адрес для видеопамяти
 
     page_table_t *pml4 = (page_table_t *)VIRT(current_task->cr3);
     for (uint32_t i = 0; i < pages; i++) {
+      // Добавляем флаги PCD и PWT для активации Write-Combining (Index 3 в PAT)
       vmm_map(pml4, virt + (i * 4096), phys + (i * 4096),
-              PTE_PRESENT | PTE_USER | PTE_WRITABLE);
+              PTE_PRESENT | PTE_USER | PTE_WRITABLE | PTE_PCD | PTE_PWT);
     }
     regs->rax = virt;
     break;
