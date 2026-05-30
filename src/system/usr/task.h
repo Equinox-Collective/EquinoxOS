@@ -12,11 +12,13 @@ typedef struct {
     uint64_t rip, cs, rflags, rsp, ss;
 } __attribute__((packed)) stack_frame_t;
 
+#define MAX_FD 32
+
 typedef struct task {
     uint64_t rsp;
-    uint64_t kstack_at_bottom; // <--- ДОБАВЬ ЭТО (Верхушка стека ядра)
+    uint64_t kstack_at_bottom;
     uint64_t cr3;
-    uint64_t fs_base;          // FS base for TLS (Thread Local Storage)
+    uint64_t fs_base;
     struct task* next;
     uint64_t id;
     bool running;
