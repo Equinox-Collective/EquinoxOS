@@ -1,24 +1,20 @@
--- res/sysgui/terminal.lua
+--- START OF FILE res/sysgui/terminal.lua ---
 local M = {}
 
 local term_lines = {
-    "Equinox OS Ring 3 Terminal [Version 2.0]",
-    "Welcome to the modular CLI shell.",
-    "PageUp/PageDown - scroll back | Arrows Up/Down - history | Tab - autocomplete",
+    "Equinox OS Ring 3 Interactive Shell [v3.0]",
+    "Modular Unix-like command subsystem loaded.",
+    "Type 'neofetch' or 'help' to begin.",
     ""
 }
 
 _G.term_lines = term_lines
 _G.term_input = ""
 
-local matrix_mode = false
-local matrix_tick = 0
 local last_blink_state = -1
-
--- Локальная история команд терминала
 local cmd_history = {}
 local history_idx = 0
-local scroll_offset = 0 -- Смещение прокрутки назад
+local scroll_offset = 0
 
 local function strip_ansi(s)
     if not s then return "" end
@@ -33,69 +29,130 @@ local function term_append_multiline(text)
     end
 end
 
-local function process_command(raw)
-    raw = raw or ""
-    local s = string.match(raw, "^%s*(.-)%s*$") or ""
+local function execute_cli_command(raw_input)
+    local s = string.match(raw_input, "^%s*(.-)%s*$") or ""
     if s == "" then return end
 
-    local verb = string.match(s, "^(%S+)")
+    local parts = {}
+    for word in s:gmatch("%S+") do
+        table.insert(parts, word)
+    end
+    local verb = parts[1]
 
-    local GUI_LOCAL_COMMANDS = {
-        clear   = function() 
-            _G.term_lines = {}
-            term_lines = _G.term_lines
-        end,
-        matrix  = function()
-            matrix_mode = not matrix_mode
-            table.insert(term_lines, "Matrix digital rain: " .. (matrix_mode and "ENABLED" or "DISABLED"))
-        end,
-        doom    = function()
-            table.insert(term_lines, "Launching doom.elf...")
-            exec("bin/doom.elf -iwad res/doom1.wad")
-        end,
-        snake   = function()
-            table.insert(term_lines, "Launching snake.elf...")
-            exec("bin/snake.elf")
-        end,
-    }
-
-    local local_handler = GUI_LOCAL_COMMANDS[verb]
-    if local_handler then
-        local_handler()
+    -- Shell Utilities Implementation
+    if verb == "help" then
+        term_append_multiline("Available commands:\n" ..
+                             "  neofetch      Display system information\n" ..
+                             "  ls            List files on Root VFS\n" ..
+                             "  cat <file>    Print file content\n" ..
+                             "  rm <file>     Delete file from storage\n" ..
+                             "  clear         Clear console log\n" ..
+                             "  ps            List running processes\n" ..
+                             "  kill <pid>    Terminate process\n" ..
+                             "  doom / snake  Launch system games\n")
         return
     end
 
-    if type(shellExec) ~= "function" then
-        table.insert(term_lines, "shellExec() not available")
+    if verb == "neofetch" or verb == "sysinfo" then
+        local used, total = getMemInfo()
+        local sw, sh = getScreenSize()
+        local sys_art = "\n" ..
+            "  #######   Equinox OS Ring 3\n" ..
+            " #######    -----------------\n" ..
+            " ##         Kernel: Ring-0 Micro Monolithic\n" ..
+            " ##         Shell: enGUI Modular Interpreter\n" ..
+            " #######    Resolution: " .. sw .. "x" .. sh .. "\n" ..
+            "  #######   Memory: " .. math.floor(used/(1024*1024)) .. " / " .. math.floor(total/(1024*1024)) .. " MB\n" ..
+            "            Uptime: " .. math.floor(getUptime()) .. " seconds\n"
+        term_append_multiline(sys_art)
         return
     end
 
-    local out = shellExec(s)
-    term_append_multiline(out)
-end
-
--- Отрисовка
-M.draw = function(win, mx, my, mdown, dt)
-    if matrix_mode then
-        matrix_tick = matrix_tick + 1
-        _G.needs_redraw = true
-        drawRect(win.x, win.y, win.w, win.h, 0x000000)
-        for i = 1, 30 do
-            local rx = win.x + ((i * 17) % win.w)
-            local speed = 2 + (i % 4)
-            local ry = win.y + math.floor((matrix_tick * speed + i * 43) % win.h)
-            local char_code = 33 + ((matrix_tick + i) % 90)
-            local char_str = string.char(char_code)
-            local col = (i % 5 == 0) and 0xFFFFFF or 0x00FF00
-            drawText(char_str, rx, ry, col)
+    if verb == "ls" then
+        local ok, files = pcall(getFiles)
+        if ok and type(files) == "table" then
+            local file_str = "VFS Root Directory Layout:\n"
+            for _, f in ipairs(files) do
+                file_str = file_str .. string.format("  %-18s  [%dB]  dev: %s\n", f.name, f.size, f.dev)
+            end
+            term_append_multiline(file_str)
+        else
+            term_append_multiline("VFS read failure.")
         end
         return
     end
 
+    if verb == "cat" then
+        local name = parts[2]
+        if not name then term_append_multiline("Syntax: cat <filename>") return end
+        local content = readFile(name)
+        if content then
+            term_append_multiline(content)
+        else
+            term_append_multiline("File not found.")
+        end
+        return
+    end
+
+    if verb == "rm" then
+        local name = parts[2]
+        if not name then term_append_multiline("Syntax: rm <filename>") return end
+        saveFile(name, "") -- Empty file functions as VFS removal placeholder
+        if type(_G.refresh_explorer) == "function" then _G.refresh_explorer() end
+        term_append_multiline("File wiped successfully.")
+        return
+    end
+
+    if verb == "ps" then
+        local ok, tasks = pcall(getTasks)
+        if ok and type(tasks) == "table" then
+            local task_str = "Active Tasks:\n"
+            for _, t in ipairs(tasks) do
+                task_str = task_str .. string.format("  PID: %d  State: %s  CR3: 0x%X\n", t.pid, t.state, t.cr3)
+            end
+            term_append_multiline(task_str)
+        else
+            term_append_multiline("Task manager read error.")
+        end
+        return
+    end
+
+    if verb == "kill" then
+        local pid = tonumber(parts[2])
+        if not pid then term_append_multiline("Syntax: kill <pid>") return end
+        local ok = killTask(pid)
+        term_append_multiline(ok and "Process terminated." or "Process termination failure.")
+        return
+    end
+
+    if verb == "clear" then
+        _G.term_lines = {}
+        term_lines = _G.term_lines
+        return
+    end
+
+    if verb == "doom" then
+        term_append_multiline("Launching doom.elf...")
+        exec("bin/doom.elf -iwad res/doom1.wad")
+        return
+    elseif verb == "snake" then
+        term_append_multiline("Launching snake.elf...")
+        exec("bin/snake.elf")
+        return
+    end
+
+    if type(shellExec) == "function" then
+        local out = shellExec(s)
+        term_append_multiline(out)
+    else
+        term_append_multiline("Unknown shell command. Type 'help'.")
+    end
+end
+
+M.draw = function(win, mx, my, mdown, dt)
     local line_h = 14
     local max_lines = math.floor((win.h - 30) / line_h)
     
-    -- Рассчитываем индексы вывода с учетом скроллбека
     local total_lines = #term_lines
     local end_idx = total_lines - scroll_offset
     local start_idx = end_idx - max_lines + 1
@@ -104,22 +161,20 @@ M.draw = function(win, mx, my, mdown, dt)
     local draw_y = win.y + 8
     for i = start_idx, end_idx do
         if term_lines[i] then
-            drawText(term_lines[i], win.x + 8, draw_y, 0x50FA7B)
+            drawText(term_lines[i], win.x + 8, draw_y, 0x98C379)
             draw_y = draw_y + line_h
         end
     end
 
-    -- Отрисовка строки ввода
     local prompt_y = win.y + win.h - 22
-    drawRect(win.x, prompt_y, win.w, 1, 0x2E3440)
+    drawRect(win.x, prompt_y, win.w, 1, 0x3E4452)
     
     local input_prefix = ">> "
     if scroll_offset > 0 then
-        input_prefix = string.format("[%d] >> ", scroll_offset) -- Показываем индикатор скролла
+        input_prefix = string.format("[%d] >> ", scroll_offset)
     end
-    drawText(input_prefix .. _G.term_input, win.x + 8, prompt_y + 4, 0xF8F8F2)
+    drawText(input_prefix .. _G.term_input, win.x + 8, prompt_y + 4, 0xABB2BF)
 
-    -- Курсор
     local blink = math.floor(getUptime() * 2) % 2
     if blink ~= last_blink_state then
         _G.needs_redraw = true
@@ -127,20 +182,10 @@ M.draw = function(win, mx, my, mdown, dt)
     end
     if blink == 0 then
         local cur_cx = win.x + 8 + (string.len(input_prefix) + string.len(_G.term_input)) * 8
-        drawRect(cur_cx, prompt_y + 16, 8, 2, 0x8BE9FD)
+        drawRect(cur_cx, prompt_y + 16, 8, 2, 0x61AFEF)
     end
 end
 
--- Обработка клавиш приложения
---
--- Используем именованные KEY_* константы из api_gui.c (зарегистрированы
--- через register_key_constants). Для extended-клавиш (стрелки, PgUp/PgDn)
--- значение = 0x100 | scancode (например, KEY_UP = 0x148). Раньше тут были
--- "магические" 72/80/73/81 — это были вторые байты PS/2 sequence без
--- 0xE0-префикса, и работали они только случайно: дублирующий pop в
--- `eid_begin()` (см. sdk/lib/eid.c) "съедал" второй байт, поэтому до Lua
--- доходил только 0xE0, и стрелки не реагировали вовсе. После починки
--- eid_begin и склейки в main.c сюда приходит уже полный extended-код.
 M.handle_key = function(win, key, char)
     if key == KEY_ENTER then
         if _G.term_input ~= "" then
@@ -148,26 +193,20 @@ M.handle_key = function(win, key, char)
             history_idx = #cmd_history + 1
         end
         table.insert(term_lines, ">> " .. _G.term_input)
-        process_command(_G.term_input)
+        execute_cli_command(_G.term_input)
         _G.term_input = ""
-        scroll_offset = 0 -- Сбрасываем скролл при вводе новой команды
+        scroll_offset = 0
 
     elseif key == KEY_BACKSPACE then
         _G.term_input = string.sub(_G.term_input, 1, -2)
 
-    elseif key == KEY_TAB then -- Автокомплит файлов VFS
+    elseif key == KEY_TAB then
         local word = string.match(_G.term_input, "(%S+)$") or ""
         if word ~= "" then
-            -- Защита от подвисания: getFiles() ходит через SYS_READ_DIR
-            -- по всем VFS-устройствам и в худшем случае выполняет
-            -- сотни disk-I/O. Оборачиваем в pcall, чтобы исключение не
-            -- роняло весь GUI, и ограничиваем число просматриваемых
-            -- записей разумным потолком.
             local ok, files = pcall(getFiles)
             if ok and type(files) == "table" then
                 local wlen = string.len(word)
-                local limit = math.min(#files, 256)
-                for i = 1, limit do
+                for i = 1, math.min(#files, 128) do
                     local f = files[i]
                     if f and f.name and string.sub(f.name, 1, wlen) == word then
                         _G.term_input = _G.term_input .. string.sub(f.name, wlen + 1)
@@ -177,14 +216,14 @@ M.handle_key = function(win, key, char)
             end
         end
 
-    elseif key == KEY_UP then -- Предыдущая команда из истории
+    elseif key == KEY_UP then
         if #cmd_history > 0 then
             history_idx = history_idx - 1
             if history_idx < 1 then history_idx = 1 end
             _G.term_input = cmd_history[history_idx] or ""
         end
 
-    elseif key == KEY_DOWN then -- Следующая команда из истории
+    elseif key == KEY_DOWN then
         if #cmd_history > 0 then
             history_idx = history_idx + 1
             if history_idx > #cmd_history then
@@ -195,7 +234,7 @@ M.handle_key = function(win, key, char)
             end
         end
 
-    elseif key == KEY_PGUP then -- Скролл вывода назад
+    elseif key == KEY_PGUP then
         scroll_offset = scroll_offset + 3
         local max_lines = math.floor((win.h - 30) / 14)
         if scroll_offset > #term_lines - max_lines then
@@ -203,15 +242,15 @@ M.handle_key = function(win, key, char)
         end
         if scroll_offset < 0 then scroll_offset = 0 end
 
-    elseif key == KEY_PGDN then -- Скролл вывода вперед
+    elseif key == KEY_PGDN then
         scroll_offset = scroll_offset - 3
         if scroll_offset < 0 then scroll_offset = 0 end
 
-    elseif key == KEY_HOME then -- Прыжок в начало скроллбэка
+    elseif key == KEY_HOME then
         local max_lines = math.floor((win.h - 30) / 14)
         scroll_offset = math.max(0, #term_lines - max_lines)
 
-    elseif key == KEY_END then -- Прыжок в "живой" конец вывода
+    elseif key == KEY_END then
         scroll_offset = 0
 
     elseif string.len(char) > 0 and string.byte(char) >= 32 then
@@ -220,3 +259,4 @@ M.handle_key = function(win, key, char)
 end
 
 return M
+--- END OF FILE res/sysgui/terminal.lua ---
