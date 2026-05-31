@@ -1072,6 +1072,31 @@ static void apply_css_property(css_rule_t *rule, const char *prop,
 /* ── CSS: parse the declaration block between { and } ────────── */
 static void parse_css_declarations(css_rule_t *rule, const char *decl,
                                    int dlen) {
+  /* Strip C-style comments from the declaration block first. An inline
+   * comment sitting between two declarations otherwise gets glued onto
+   * the FRONT of the next property name, so that property (and its var)
+   * is silently dropped. We copy into a scratch buffer with comments
+   * removed, then parse that. For unusually large blocks (bigger than the
+   * scratch buffer) we fall back to parsing the raw text so nothing is
+   * truncated. */
+  char clean[1024];
+  if (dlen < (int)sizeof(clean)) {
+    int cn = 0;
+    for (int i = 0; i < dlen; i++) {
+      if (decl[i] == '/' && i + 1 < dlen && decl[i + 1] == '*') {
+        i += 2; /* skip the opening "/*" */
+        while (i + 1 < dlen && !(decl[i] == '*' && decl[i + 1] == '/'))
+          i++;
+        i += 1; /* land on the closing '/'; the for-loop's i++ steps past */
+        continue;
+      }
+      clean[cn++] = decl[i];
+    }
+    clean[cn] = '\0';
+    decl = clean;
+    dlen = cn;
+  }
+
   char prop[48], val[48];
   int pi = 0, vi = 0;
   bool in_val = false;
