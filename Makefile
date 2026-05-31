@@ -332,6 +332,10 @@ clean:
 	@if exist sdk\lib\*.d del /q sdk\lib\*.d
 	@if exist app\*.o del /q app\*.o
 	@if exist app\*.d del /q app\*.d
+	@if exist app\sysgui\*.d del /q app\sysgui\*.d
+	@if exist app\sysgui\*.o del /q app\sysgui\*.o
+	@if exist app\sysgui\lua\*.o del /q app\sysgui\lua\*.o
+	@if exist app\sysgui\lua\*.d del /q app\sysgui\lua\*.d
 	@if exist kernel.elf del /q kernel.elf
 	@if exist equos.iso del /q equos.iso
 	@if exist app\sysgui\sysgui.elf del /q app\sysgui\sysgui.elf
