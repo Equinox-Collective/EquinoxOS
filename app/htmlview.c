@@ -1896,6 +1896,29 @@ static void blank_line(void) {
   push_line("", 0, STYLE_NORMAL, false);
 }
 
+/* R6/L5c: vertical spacing at a block boundary. CSS padding on block
+ * elements is modelled as blank lines; large design paddings (e.g.
+ * `section.bk{padding:90px 0}` → ~5 line-units) were emitted in full on
+ * BOTH the exiting section's bottom and the next section's top, with no
+ * collapsing — burying ~180px of dead space between adjacent sections on
+ * the 420px-tall viewport. Fix: collapse against blank lines already at
+ * the tail (like blank_line() does for the single-blank case) and cap a
+ * single boundary so it never eats more than BLOCK_PAD_MAX lines. */
+#define BLOCK_PAD_MAX 2
+static void emit_block_spacing(void) {
+  if (line_count == 0) return;            /* never lead with a blank */
+  layout_frame_t *f = layout_top();
+  if (f && f->y == f->start_y) return;    /* top of a fresh sub-frame */
+
+  int want = style_stack[style_depth].padding;
+  if (want <= 0) want = 1;                /* default: single blank */
+  if (want > BLOCK_PAD_MAX) want = BLOCK_PAD_MAX;
+
+  int have = 0;                           /* blanks already at the tail */
+  for (int i = line_count - 1; i >= 0 && lines[i].text[0] == '\0'; i--) have++;
+  for (int k = have; k < want; k++) push_line("", 0, STYLE_NORMAL, false);
+}
+
 /* R6/B2c: width math is in *cells*, not bytes. `*len` and `word_len`
  * are byte indices; we use utf8_cells_n to convert. Buffer overflow
  * is guarded against LINE_BYTES. */
@@ -2864,12 +2887,7 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
              tag_eq(tag, "main")    || tag_eq(tag, "nav")     ||
              tag_eq(tag, "aside")   || tag_eq(tag, "blockquote")) {
     w_flush(w);
-    int pad = style_stack[style_depth].padding;
-    if (pad > 0) {
-      for (int p = 0; p < pad; p++) push_line("", 0, STYLE_NORMAL, false);
-    } else if (line_count > 0) {
-      blank_line();
-    }
+    emit_block_spacing();
   } else if (tag_eq(tag, "center")) {
     w_flush(w);
     style_stack[style_depth].align = ALIGN_CENTER;
@@ -3188,12 +3206,7 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
              tag_eq(tag, "main")    || tag_eq(tag, "nav")     ||
              tag_eq(tag, "aside")   || tag_eq(tag, "blockquote")) {
     w_flush(w);
-    int pad = style_stack[style_depth].padding;
-    if (pad > 0) {
-      for (int p = 0; p < pad; p++) push_line("", 0, STYLE_NORMAL, false);
-    } else {
-      blank_line();
-    }
+    emit_block_spacing();
   } else if (tag_eq(tag, "center")) {
     w_flush(w);
   } else if (tag_eq(tag, "ul") || tag_eq(tag, "ol")) {
