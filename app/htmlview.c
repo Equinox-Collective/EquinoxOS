@@ -4291,6 +4291,22 @@ static void render(const char *filename) {
   int scroll_y_px = 0;
   if (scroll_line > 0 && scroll_line < line_count)
     scroll_y_px = lines[scroll_line].box_y;
+
+  /* Pixel-based scroll clamp. `max_scroll` above is line_count - v_lines,
+   * but line_count over-counts vertical rows whenever flex/grid rows span
+   * several lines — so scroll_line can run well past the real bottom and
+   * project the entire page above the fold (a fully blank viewport).
+   * Clamp the pixel offset to the actual rendered content height. */
+  int content_px_h = 0;
+  for (int li = 0; li < line_count; li++) {
+    int bottom_li = lines[li].box_y +
+                    (lines[li].box_h > 0 ? lines[li].box_h : LINE_H);
+    if (bottom_li > content_px_h) content_px_h = bottom_li;
+  }
+  int view_px = content_bottom - content_top;
+  int max_scroll_px = content_px_h - view_px;
+  if (max_scroll_px < 0) max_scroll_px = 0;
+  if (scroll_y_px > max_scroll_px) scroll_y_px = max_scroll_px;
   /* Compatibility alias for branches further down that still
    * advance a `cur_y` of their own (notably the link
    * eid_process_interaction rect below). */
@@ -4315,10 +4331,17 @@ static void render(const char *filename) {
                   bot - top, bb->color);
   }
 
-  for (int i = 0; i < v_lines; i++) {
-    int idx = scroll_line + i;
-    if (idx >= line_count)
-      break;
+  /* R6/L5 fix: paint EVERY line that falls inside the visible band,
+   * not just `v_lines` lines starting at `scroll_line`. Multi-column
+   * flex/grid rows append several lines that share a single vertical
+   * row (a 3-column lang legend = 3 lines on one row), so a fixed
+   * budget of v_lines iterations is exhausted by columns long before
+   * the viewport is vertically filled — which left the lower half of
+   * the page blank and only "appeared" as you scrolled. Each line is
+   * independently projected via its own box_y and clipped to
+   * [content_top, content_bottom), so scanning all lines is correct
+   * regardless of DOM/column ordering. */
+  for (int idx = 0; idx < line_count; idx++) {
     /* cur_y for this line, derived from box_y rather than a
      * running accumulator. */
     int line_y = content_top + lines[idx].box_y - scroll_y_px;
