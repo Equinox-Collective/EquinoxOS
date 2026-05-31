@@ -295,6 +295,70 @@ typedef struct {
 
 static css_rule_t css_rules[MAX_CSS_RULES];
 static int css_rule_count = 0;
+
+/* R6/L5: CSS custom properties (var()). Many modern pages drive their
+ * whole palette through `:root{ --bg:#0a0a0e; --text:#f3f3f6; ... }`
+ * and reference them as `background:var(--bg)`. Without resolution we
+ * dropped every var() value (parse_css_color returns 0 = unset), so a
+ * dark-themed page rendered with a default white body. We collect the
+ * declared custom properties here and expand var(--name[,fallback])
+ * before parsing a value. */
+#define MAX_CSS_VARS 64
+typedef struct {
+  char name[40];   /* includes leading "--"            */
+  char value[64];  /* literal value (already lowercased) */
+} css_var_t;
+static css_var_t css_vars[MAX_CSS_VARS];
+static int css_var_count = 0;
+
+static const char *css_var_lookup(const char *name, int nlen) {
+  for (int i = 0; i < css_var_count; i++) {
+    if ((int)strlen(css_vars[i].name) == nlen &&
+        strncmp(css_vars[i].name, name, nlen) == 0)
+      return css_vars[i].value;
+  }
+  return NULL;
+}
+
+/* Expand var(--x[, fallback]) occurrences in `in` into `out`.
+ * Non-var text is copied verbatim. Returns true if any var() was
+ * seen (resolved or not). Handles the common embedded case too,
+ * e.g. "1px solid var(--line)". */
+static bool css_resolve_vars(const char *in, char *out, int outsz) {
+  int o = 0;
+  bool saw = false;
+  for (const char *p = in; *p && o < outsz - 1;) {
+    if (strncmp(p, "var(", 4) == 0) {
+      saw = true;
+      const char *q = p + 4;
+      while (*q == ' ') q++;
+      const char *name = q;
+      int nlen = 0;
+      while (q[nlen] && q[nlen] != ',' && q[nlen] != ')') nlen++;
+      /* trim trailing spaces in the name */
+      int tn = nlen;
+      while (tn > 0 && name[tn - 1] == ' ') tn--;
+      const char *sub = css_var_lookup(name, tn);
+      /* locate fallback (after a comma) and the closing paren */
+      const char *fb = NULL;
+      const char *r = q + nlen;
+      if (*r == ',') { fb = r + 1; while (*fb == ' ') fb++; }
+      while (*r && *r != ')') r++;
+      if (!sub && fb) {
+        /* copy fallback text up to the close paren */
+        const char *fe = r;
+        while (fb < fe && o < outsz - 1) out[o++] = *fb++;
+      } else if (sub) {
+        for (const char *s = sub; *s && o < outsz - 1; s++) out[o++] = *s;
+      }
+      p = (*r == ')') ? r + 1 : r;
+    } else {
+      out[o++] = *p++;
+    }
+  }
+  out[o] = '\0';
+  return saw;
+}
 static uint32_t body_bg = CLR_BG;
 
 /* ── Line model (extended) ─────────────────────────────────────── */
@@ -837,6 +901,26 @@ static const char *skip_ws(const char *p) {
 /* ── CSS: parse a single property: value pair ────────────────── */
 static void apply_css_property(css_rule_t *rule, const char *prop,
                                const char *val) {
+  /* Custom property declaration: store it for later var() expansion
+   * and stop (it has no direct visual effect itself). */
+  if (prop[0] == '-' && prop[1] == '-') {
+    if (css_var_count < MAX_CSS_VARS) {
+      int ni = 0;
+      while (prop[ni] && ni < 39) { css_vars[css_var_count].name[ni] = prop[ni]; ni++; }
+      css_vars[css_var_count].name[ni] = '\0';
+      int vi2 = 0;
+      while (val[vi2] && vi2 < 63) { css_vars[css_var_count].value[vi2] = val[vi2]; vi2++; }
+      css_vars[css_var_count].value[vi2] = '\0';
+      css_var_count++;
+    }
+    return;
+  }
+
+  /* Expand any var(--x) references before parsing the value. */
+  char resolved[80];
+  if (css_resolve_vars(val, resolved, sizeof(resolved)))
+    val = resolved;
+
   if (strncmp(prop, "color", 5) == 0 && prop[5] == '\0') {
     uint32_t c = parse_css_color(val);
     if (c) {
@@ -1200,6 +1284,7 @@ static void parse_css_block(const char *css, int css_len) {
 /* ── CSS: extract all <style> blocks from HTML ───────────────── */
 static void extract_css(const char *html, uint32_t size) {
   css_rule_count = 0;
+  css_var_count = 0;
 
   for (uint32_t i = 0; i + 6 < size; i++) {
     if (html[i] != '<')
