@@ -291,6 +291,11 @@ typedef struct {
   /* L5 (grid): raw `grid-template-columns` string, parsed by the
    * container when laying out children. */
   char grid_cols[64];
+  /* L5+: `margin-left:auto` — the flexbox/auto-margin "push to the
+   * end" trick. On an inline element it pushes the element (and its
+   * text) to the right edge of the current frame; e.g. a `.lang-pct`
+   * span flush-right against its name. */
+  bool margin_left_auto;
 } css_rule_t;
 
 static css_rule_t css_rules[MAX_CSS_RULES];
@@ -629,6 +634,7 @@ typedef struct {
   int flex_grow;
   int flex_basis;
   char grid_cols[64];
+  bool margin_left_auto; /* push this element flush-right (auto margin) */
 } style_state_t;
 
 static eid_font_t *h_font = NULL;
@@ -674,6 +680,7 @@ static void push_style_state(void) {
     style_stack[style_depth].flex_grow     = 0;
     style_stack[style_depth].flex_basis    = 0;
     style_stack[style_depth].grid_cols[0]  = '\0';
+    style_stack[style_depth].margin_left_auto = false;
   }
 }
 
@@ -724,6 +731,8 @@ static void apply_css_to_current_state(const css_rule_t *r) {
   if (r->grid_cols[0])
     strncpy(style_stack[style_depth].grid_cols, r->grid_cols,
             sizeof(style_stack[style_depth].grid_cols) - 1);
+  if (r->margin_left_auto)
+    style_stack[style_depth].margin_left_auto = true;
 }
 
 static void pop_style_state(void) {
@@ -1066,6 +1075,11 @@ static void apply_css_property(css_rule_t *rule, const char *prop,
     rule->margin_top = 1;
   } else if (strncmp(prop, "margin-bottom", 13) == 0) {
     rule->margin_bottom = 1;
+  } else if (strncmp(prop, "margin-left", 11) == 0) {
+    /* `margin-left:auto` is the flexbox push-to-end trick — flush the
+     * element right within its container. We only act on the `auto`
+     * keyword; numeric left margins are ignored (no box model). */
+    if (strstr(val, "auto")) rule->margin_left_auto = true;
   }
 }
 
@@ -2755,6 +2769,22 @@ static void emit_grid_container(walk_ctx_t *w, dom_node_t *n) {
   w_flush(w);
 }
 
+/* Sum the visible cell width of every TEXT descendant of `n`. Used to
+ * right-align a `margin-left:auto` element: we need to know how wide
+ * its own text will be before we pad the line up to the frame edge.
+ * Approximate (ignores entity expansion / inline-image slots) but
+ * accurate for the common case of a short label like "84.1%". */
+static int measure_node_text_cells(dom_node_t *n) {
+  if (!n) return 0;
+  if (n->type == DOM_NODE_TEXT)
+    return n->text ? utf8_cells_n(n->text, (int)strlen(n->text)) : 0;
+  if (n->type == DOM_NODE_COMMENT) return 0;
+  int total = 0;
+  for (dom_node_t *c = n->first_child; c; c = c->next_sibling)
+    total += measure_node_text_cells(c);
+  return total;
+}
+
 static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
   if (!n) return;
 
@@ -3098,6 +3128,33 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
     w->in_pre = save.in_pre;
     return;
 #endif
+  }
+
+  /* L5+: `margin-left:auto` push-to-end. If this (inline) element
+   * declared an auto left margin and there is already content on the
+   * current line, flush the pending word and pad the line with spaces
+   * so the element's own text lands flush against the right edge of
+   * the current frame — e.g. "C" on the left, "84.1%" on the right of
+   * a `.lang-item` cell. We subtract one extra cell because append_word
+   * re-inserts a single separating space before the next word. */
+  if (style_stack[style_depth].margin_left_auto &&
+      style_stack[style_depth].display == 0) {
+    if (w->word_len > 0) {
+      append_word(w->current, &w->current_len, w->word, w->word_len,
+                  w->style, w->in_list);
+      w->word_len = 0;
+    }
+    int used = utf8_cells_n(w->current, w->current_len);
+    if (used > 0) {
+      layout_frame_t *cf = layout_top();
+      int cap = (cf ? cf->w : CONTENT_W) / 8;
+      if (w->in_list) cap -= 4;
+      if (cap > LINE_CHARS) cap = LINE_CHARS;
+      int tw  = measure_node_text_cells(n);
+      int pad = cap - used - tw - 1;
+      for (int i = 0; i < pad && w->current_len + 1 < LINE_BYTES; i++)
+        w->current[w->current_len++] = ' ';
+    }
   }
 
   /* ---- recurse into children ----------------------------------- */
