@@ -72,18 +72,30 @@ double sqrt(double x) {
 
 // Возведение в степень
 double pow(double x, double y) {
-  if (y == 0)
-    return 1.0;
-  double res = 1.0;
+  if (x == 0.0) return 0.0;
+  if (y == 0.0) return 1.0;
+
+  // Если показатель степени целый — используем быстрый цикл
   int iy = (int)y;
-  if (iy > 0) {
-    for (int i = 0; i < iy; i++)
-      res *= x;
-  } else {
-    for (int i = 0; i < -iy; i++)
-      res /= x;
+  if ((double)iy == y) {
+    double res = 1.0;
+    if (iy > 0) {
+      for (int i = 0; i < iy; i++) {
+        res *= x;
+      }
+    } else {
+      for (int i = 0; i < -iy; i++) {
+        res /= x;
+      }
+    }
+    return res;
   }
-  return res;
+
+  // Для дробных показателей степени используем тождество x^y = exp(y * log(x))
+  if (x < 0.0) {
+    return 0.0; // Избегаем логарифма отрицательного числа
+  }
+  return exp(y * log(x));
 }
 
 // Экспонента и логарифм (Ряды Тейлора)
