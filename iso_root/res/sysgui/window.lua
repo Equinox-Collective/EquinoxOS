@@ -119,6 +119,19 @@ function Window:draw(mx, my, mdown, dt)
         if button("X", bx + 48, ty + 4, 20, 20) then
             self.active = false
             _G.needs_redraw = true
+
+            -- Если это контейнер внешнего приложения — завершаем процесс игры
+            if self.is_app_container then
+                if type(getTasks) == "function" and type(killTask) == "function" then
+                    local tasks = getTasks()
+                    for _, t in ipairs(tasks) do
+                        -- Безопасно убиваем только сторонние процессы, пропуская системные (1, 2, 3)
+                        if t.pid ~= 1 and t.pid ~= 2 and t.pid ~= 3 then
+                            killTask(t.pid)
+                        end
+                    end
+                end
+            end
             return
         end
 
@@ -148,7 +161,9 @@ function Window:draw(mx, my, mdown, dt)
         end
     else
         if type(setAppWindowPos) == "function" then
-            setAppWindowPos(win_x, win_y, win_w, win_h)
+            if focused_window == self and win_w > 0 and win_h > 0 then
+                setAppWindowPos(win_x, win_y, win_w, win_h)
+            end
         end
     end
 
