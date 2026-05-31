@@ -142,3 +142,7 @@ double atan2(double y, double x) {
 double asin(double x) { return 0; } // Оставим как есть для простоты
 double acos(double x) { return 0; }
 double difftime(time_t t1, time_t t0) { return (double)(t1 - t0); }
+
+float powf(float x, float y) {
+  return (float)pow((double)x, (double)y);
+}
