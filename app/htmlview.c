@@ -3184,16 +3184,16 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
       w->word_len = 0;
     }
   } else if (tag_eq(tag, "a")) {
-    /* R6: force a word boundary on link open so consecutive inline
-     * <a>…</a><a>…</a> pairs without surrounding whitespace
-     * ("FeaturesRepos…") don't get glued into one giant word.
-     * append_word will re-introduce a separating space the next
-     * time something is pushed because current_len > 0. */
-    if (w->word_len > 0) {
-      append_word(w->current, &w->current_len, w->word, w->word_len,
-                  w->style, w->in_list);
-      w->word_len = 0;
-    }
+    /* R6/B6: push any preceding inline run as its own line before the
+     * link opens. This (a) keeps consecutive <a>…</a><a>…</a> pairs from
+     * gluing into one word, and (b) makes the link's own text flush as a
+     * STYLE_LINK line *with* its href while the context is live. The old
+     * code only flushed the pending word into the buffer; the actual
+     * push_line was deferred to the next block / flex-child boundary,
+     * which fires *after* </a> below has already reset w->style to NORMAL
+     * and cleared tag_context — so nav links were emitted as dead,
+     * unclickable plain-text lines with an empty link_url. */
+    w_flush(w);
     w_set_link_context(n);
     w->style = STYLE_LINK;
     style_stack[style_depth].underline = true;
@@ -3424,13 +3424,13 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
     w->style = STYLE_NORMAL;
     w->at_li_start = false;
   } else if (tag_eq(tag, "a")) {
-    /* R6: mirror the open-side flush so the next inline run starts
-     * fresh and append_word inserts a separator. */
-    if (w->word_len > 0) {
-      append_word(w->current, &w->current_len, w->word, w->word_len,
-                  w->style, w->in_list);
-      w->word_len = 0;
-    }
+    /* R6/B6: flush the link's text as a STYLE_LINK line NOW, while
+     * w->style is still STYLE_LINK and tag_context still holds the href.
+     * Only after the line is pushed do we reset the style and clear the
+     * context. Previously the reset happened first and the deferred
+     * flush (flex child / block boundary) produced a NORMAL line with no
+     * link_url, so the anchor/nav click handler never fired. */
+    w_flush(w);
     w->style = w->in_list ? STYLE_BULLET : STYLE_NORMAL;
     tag_context[0] = 0;
   } else if (tag_eq(tag, "span")) {
