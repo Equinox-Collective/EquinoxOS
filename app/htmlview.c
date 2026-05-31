@@ -1613,6 +1613,27 @@ static void extract_attr(const char *tag, const char *attr, char *out,
 static bool match_simple_sel(const char *sel, const char *tag,
                              const char *cls, const char *id) {
   if (!sel || !*sel) return false;
+  /* Reject pseudo-ELEMENT selectors (`::before`, `::after`, and the
+   * legacy single-colon `:before`/`:after`/`:first-line`/`:first-letter`).
+   * They style a generated box we don't render, so they must NOT match
+   * the base element — otherwise their declarations (very often a
+   * `background`) get slapped onto the real element as a bogus slab.
+   * Concrete bug this fixes: `.live::before{background:var(--done)}` (a
+   * 7px status dot) was painting the whole "offline snapshot" line solid
+   * green. Pseudo-CLASSES (`:hover`, `:nth-child`, `:not`…) keep the
+   * existing "apply unconditionally" behaviour below. */
+  {
+    const char *colon = sel;
+    while (*colon && *colon != ':') colon++;
+    if (*colon == ':') {
+      const char *p = colon + 1;
+      if (*p == ':' ||
+          strncmp(p, "before", 6) == 0 || strncmp(p, "after", 5) == 0 ||
+          strncmp(p, "first-line", 10) == 0 ||
+          strncmp(p, "first-letter", 12) == 0)
+        return false;
+    }
+  }
   /* Effective length: stop at first ':' to gracefully drop
    * pseudo-class suffixes from the comparison. */
   int slen = 0;
