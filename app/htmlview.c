@@ -256,6 +256,10 @@ typedef struct {
   char selector[MAX_SELECTOR]; /* e.g. "h1", ".intro", "#main" */
   uint32_t color;              /* text colour        (0 = unset) */
   uint32_t bg_color;           /* background colour  (0 = unset) */
+  int bg_alpha;                /* background alpha 0-255 (255 = opaque).
+                                * Only meaningful when has_bg; lets a
+                                * subtle rgba(...) tint composite over the
+                                * page bg instead of painting full-bright. */
   bool underline;              /* text-decoration: underline      */
   int margin_top;              /* blank lines before (0-2)        */
   int margin_bottom;           /* blank lines after  (0-2)        */
@@ -373,6 +377,34 @@ static bool css_resolve_vars(const char *in, char *out, int outsz) {
   return saw;
 }
 static uint32_t body_bg = CLR_BG;
+
+/* Side-channel: parse_css_color() writes the alpha (0-255) of the colour
+ * it just parsed here. 255 for opaque hex/named/rgb; the real alpha for
+ * rgba(). Read immediately after the call (e.g. in the background branch
+ * of apply_css_property) before the next parse overwrites it. */
+static int g_css_alpha = 255;
+
+/* Alpha-composite `src` over `dst` (both 0xRRGGBB) with `a` in 0-255.
+ * Used so a translucent CSS background (rgba) blends into the page bg
+ * instead of being slammed on at full saturation. */
+static uint32_t composite_over(uint32_t src, uint32_t dst, int a) {
+  if (a >= 255) return src;
+  if (a <= 0)   return dst;
+  int sr = (src >> 16) & 0xFF, sg = (src >> 8) & 0xFF, sb = src & 0xFF;
+  int dr = (dst >> 16) & 0xFF, dg = (dst >> 8) & 0xFF, db = dst & 0xFF;
+  int r = (sr * a + dr * (255 - a)) / 255;
+  int g = (sg * a + dg * (255 - a)) / 255;
+  int b = (sb * a + db * (255 - a)) / 255;
+  uint32_t c = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+  return c ? c : 0x000001; /* keep non-zero (0 = "unset" sentinel) */
+}
+
+/* R6/B5: in-page anchor table. Built during layout from elements that
+ * carry an `id`, so clicking an `<a href="#id">` link can scroll to the
+ * target section instead of reloading the whole page. */
+#define MAX_ANCHORS 64
+static struct { char id[48]; int y; } g_anchors[MAX_ANCHORS];
+static int g_anchor_count = 0;
 
 /* ── Line model (extended) ─────────────────────────────────────── */
 
@@ -746,7 +778,13 @@ static void apply_css_to_current_state(const css_rule_t *r) {
   if (r->has_color)
     style_stack[style_depth].color = r->color;
   if (r->has_bg) {
-    style_stack[style_depth].bg = r->bg_color;
+    /* Composite translucent backgrounds over the page bg so a subtle
+     * rgba(...) tint (badges, ghost buttons, faint panels) renders as a
+     * gentle shade instead of a full-saturation slab. body_bg already
+     * holds the resolved page background by the time element content is
+     * laid out. */
+    int a = r->bg_alpha ? r->bg_alpha : 255;
+    style_stack[style_depth].bg = composite_over(r->bg_color, body_bg, a);
     style_stack[style_depth].full_width_bg = true;
   }
   if (r->underline)
@@ -857,6 +895,8 @@ static int parse_int_from(const char *s, const char **next) {
 }
 
 static uint32_t parse_css_color(const char *s) {
+  /* Default: every colour is opaque unless an rgba() says otherwise. */
+  g_css_alpha = 255;
   /* Skip leading whitespace */
   while (*s == ' ')
     s++;
@@ -864,8 +904,8 @@ static uint32_t parse_css_color(const char *s) {
   /* rgb(r, g, b) or rgba(r, g, b, a) */
   if (strncmp(s, "rgb", 3) == 0) {
     const char *p = s + 3;
-    if (*p == 'a')
-      p++;
+    int is_rgba = 0;
+    if (*p == 'a') { p++; is_rgba = 1; }
     if (*p == '(')
       p++;
     const char *next;
@@ -878,6 +918,26 @@ static uint32_t parse_css_color(const char *s) {
     while (*p == ' ' || *p == ',')
       p++;
     int b = parse_int_from(p, &next);
+    p = next;
+    if (is_rgba) {
+      /* 4th component: alpha as a 0..1 decimal (.05, 0.72, 1). Parse
+       * integer-only to avoid pulling in float math. */
+      while (*p == ' ' || *p == ',' || *p == '/')
+        p++;
+      int whole = 0;
+      while (*p >= '0' && *p <= '9') { whole = whole * 10 + (*p - '0'); p++; }
+      int frac = 0, fdiv = 1;
+      if (*p == '.') {
+        p++;
+        while (*p >= '0' && *p <= '9' && fdiv < 100000) {
+          frac = frac * 10 + (*p - '0'); fdiv *= 10; p++;
+        }
+      }
+      if (whole >= 1) g_css_alpha = 255;          /* 1.0 (or 100%) → opaque */
+      else            g_css_alpha = (frac * 255) / fdiv;
+      if (g_css_alpha > 255) g_css_alpha = 255;
+      if (g_css_alpha < 0)   g_css_alpha = 0;
+    }
     if (r > 255)
       r = 255;
     if (g > 255)
@@ -1005,6 +1065,7 @@ static void apply_css_property(css_rule_t *rule, const char *prop,
     uint32_t c = parse_css_color(val);
     if (c) {
       rule->bg_color = c;
+      rule->bg_alpha = g_css_alpha; /* captured from the parse above */
       rule->has_bg = true;
     }
   } else if (strncmp(prop, "text-decoration", 15) == 0) {
@@ -2934,6 +2995,19 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
   apply_css_for_node(n);
   if (style_stack[style_depth].display_none) { pop_style_state(); return; }
 
+  /* R6/B5: record this element's document-y for in-page anchor jumps
+   * (`<a href="#id">`). layout_top()->y is the content-relative pixel
+   * offset where the element's content will start. */
+  {
+    const char *nid = dom_get_attr(n, "id");
+    if (nid && nid[0] && g_anchor_count < MAX_ANCHORS) {
+      strncpy(g_anchors[g_anchor_count].id, nid, sizeof(g_anchors[0].id) - 1);
+      g_anchors[g_anchor_count].id[sizeof(g_anchors[0].id) - 1] = '\0';
+      g_anchors[g_anchor_count].y = layout_top()->y;
+      g_anchor_count++;
+    }
+  }
+
   style_save_t save = { w->style, w->in_pre };
 
   /* R6/L5: box-level bg. If this is a *block-level* element with a
@@ -3555,6 +3629,7 @@ static void rebuild_lines_from_dom(void) {
    * reset scroll_line explicitly. */
   int saved_scroll = scroll_line;
   line_count  = 0;
+  g_anchor_count = 0;
   layout_reset();
   reset_style_stack();
   body_bg = CLR_BG;
@@ -4780,15 +4855,15 @@ static void render(const char *filename) {
             im->w < box_w_px)
           draw_x = CONTENT_X + box_x_px + (box_w_px - im->w) / 2;
 
-        /* R6/B4 follow-up: paint a soft-grey "card" behind the
-         * image first, then alpha-composite the pixels on top.
-         * Without this a transparent PNG logo whose foreground is
-         * pure white (very common — site logos targeting dark
-         * headers) disappears completely on our white page
-         * background. The card gives those white pixels something
-         * to contrast against, and the proper alpha blend keeps
-         * antialiased edges smooth instead of speckled. */
-        const uint32_t CLR_IMG_CARD = 0xF1F3F4;  /* Google grey 50 */
+        /* R6/B5: paint the "card" behind the image in the *page*
+         * background colour, then alpha-composite the pixels on top.
+         * Earlier this was a fixed light-grey slab so a transparent
+         * white-on-nothing logo wouldn't vanish on a white page — but
+         * on a dark themed site that slab shows up as an ugly grey
+         * square around the logo. Matching body_bg means the
+         * transparent PNG reads as truly cut-out (logo sits straight
+         * on the page), while the alpha blend still smooths the edges. */
+        const uint32_t CLR_IMG_CARD = body_bg;
         const int      PAD          = 6;
         eid_draw_rect(fb, WIN_W, WIN_H,
                       draw_x - PAD, draw_y - PAD,
@@ -4838,8 +4913,40 @@ static void render(const char *filename) {
       uint32_t state = eid_process_interaction(
           &ui, id, cur_x, cur_y, eid_text_width_utf8(lines[idx].text), LINE_H);
       if (state & EID_STATE_CLICKED) {
+        const char *lu = lines[idx].link_url;
+        /* R6/B5: in-page anchor (`#id`, `/#id`, or same-page URL + #id)
+         * → scroll to the recorded element instead of refetching the
+         * whole page. */
+        const char *hash = lu;
+        while (*hash && *hash != '#') hash++;
+        if (*hash == '#' && hash[1]) {
+          int prefix_len = (int)(hash - lu);
+          int same_page = (prefix_len == 0) ||
+                          (prefix_len == 1 && lu[0] == '/');
+          if (!same_page) {
+            char pre[128];
+            int n = prefix_len < 127 ? prefix_len : 127;
+            memcpy(pre, lu, n); pre[n] = '\0';
+            char rprefix[128];
+            resolve_url(current_url, pre, rprefix);
+            same_page = (strcmp(rprefix, current_url) == 0);
+          }
+          if (same_page) {
+            const char *frag = hash + 1;
+            int target_px = -1;
+            if (strcmp(frag, "top") == 0) target_px = 0;
+            for (int a = 0; a < g_anchor_count && target_px < 0; a++)
+              if (strcmp(g_anchors[a].id, frag) == 0)
+                target_px = g_anchors[a].y;
+            if (target_px >= 0) {
+              scroll_line = target_px / LINE_H;
+              if (scroll_line < 0) scroll_line = 0;
+            }
+            return; /* re-render next frame at the new scroll position */
+          }
+        }
         char resolved[128];
-        resolve_url(current_url, lines[idx].link_url, resolved);
+        resolve_url(current_url, lu, resolved);
         strcpy(current_url, resolved);
         load_page(current_url);
         return; /* Avoid drawing more in this frame */
