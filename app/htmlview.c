@@ -413,6 +413,27 @@ static line_t lines[MAX_LINES];
 static int line_count = 0;
 static int scroll_line = 0;
 
+/* R6/L5: box-level background pass.
+ *
+ * Per-line css_bg painting can't fill the gaps *between* a block
+ * container's child lines (e.g. the white body of the .terminal
+ * card between its dark title bar and the log lines). So when a
+ * block-level element resolves a CSS bg, we record the bounding
+ * rectangle of all the lines it emitted and paint it as one solid
+ * rect *behind* the text in the render loop. Inline elements
+ * (span/a/badge) keep their per-line bg and are NOT recorded here. */
+typedef struct {
+  int box_x;        /* left, relative to content area (CONTENT_X anchors) */
+  int box_y;        /* top, document space (scroll subtracts at draw)     */
+  int box_w;
+  int box_h;
+  uint32_t color;
+} box_bg_t;
+
+#define MAX_BOX_BGS 64
+static box_bg_t box_bgs[MAX_BOX_BGS];
+static int box_bg_count = 0;
+
 /* Phase R6/L2: layout context stack.
  *
  * Each frame describes a rectangular sub-area of the document into
@@ -460,6 +481,7 @@ static inline layout_frame_t *layout_top(void) {
 /* Reset to a single root frame covering the content area.
  * Called at the top of every parse pass. */
 static void layout_reset(void) {
+  box_bg_count = 0;
   layout_depth = 0;
   layout_stack[0].x       = 0;
   layout_stack[0].y       = 0;
@@ -2656,6 +2678,23 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
 
   style_save_t save = { w->style, w->in_pre };
 
+  /* R6/L5: box-level bg. If this is a *block-level* element with a
+   * resolved CSS bg, remember where its line range starts so we can
+   * paint a solid rect behind the whole box at the end (covers the
+   * gaps between child lines that per-line bg can't reach, e.g. the
+   * .terminal card body). Inline tags keep per-line bg and are
+   * excluded so a `.badge` <span> never becomes a full-box slab. */
+  bool box_bg_block =
+      style_stack[style_depth].bg != 0 &&
+      !tag_eq(tag, "span") && !tag_eq(tag, "a")    && !tag_eq(tag, "code") &&
+      !tag_eq(tag, "em")   && !tag_eq(tag, "b")    && !tag_eq(tag, "i")    &&
+      !tag_eq(tag, "strong") && !tag_eq(tag, "small") &&
+      !tag_eq(tag, "sup")  && !tag_eq(tag, "sub")  && !tag_eq(tag, "mark") &&
+      !tag_eq(tag, "label") && !tag_eq(tag, "button");
+  if (tag_eq(tag, "body")) box_bg_block = false;  /* body paints via body_bg */
+  int box_bg_first = line_count;
+  uint32_t box_bg_color = style_stack[style_depth].bg;
+
   /* ---- per-tag prelude ----------------------------------------- */
   if (tag_eq(tag, "body")) {
     if (style_stack[style_depth].bg) body_bg = style_stack[style_depth].bg;
@@ -3013,6 +3052,36 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
     w->in_pre = false;
   }
   (void)save;   /* most paths overwrite explicitly; struct kept for clarity */
+
+  /* R6/L5: emit a box-level bg rect for this block element, covering
+   * the bounding box of every line it produced. */
+  if (box_bg_block && box_bg_color && line_count > box_bg_first &&
+      box_bg_count < MAX_BOX_BGS) {
+    int min_x = 1 << 30, min_y = 1 << 30, max_x = 0, max_y = 0;
+    for (int i = box_bg_first; i < line_count; i++) {
+      int lx = lines[i].box_x;
+      int ly = lines[i].box_y;
+      int lr = lines[i].box_x + lines[i].box_w;
+      int lb = lines[i].box_y + (lines[i].box_h > 0 ? lines[i].box_h
+                                                    : LINE_H);
+      if (lx < min_x) min_x = lx;
+      if (ly < min_y) min_y = ly;
+      if (lr > max_x) max_x = lr;
+      if (lb > max_y) max_y = lb;
+    }
+    /* Skip full-width block bars (body/header/footer) — the per-line
+     * full_width_bg path already paints those edge-to-edge and a box
+     * rect would just duplicate it. */
+    bool is_full_width = (min_x == 0 && (max_x - min_x) >= CONTENT_W);
+    if (!is_full_width && max_x > min_x && max_y > min_y) {
+      box_bgs[box_bg_count].box_x = min_x;
+      box_bgs[box_bg_count].box_y = min_y;
+      box_bgs[box_bg_count].box_w = max_x - min_x;
+      box_bgs[box_bg_count].box_h = max_y - min_y;
+      box_bgs[box_bg_count].color = box_bg_color;
+      box_bg_count++;
+    }
+  }
 
   pop_style_state();
 }
@@ -4053,6 +4122,25 @@ static void render(const char *filename) {
    * eid_process_interaction rect below). */
   int cur_y = content_top;
   (void)cur_y;
+
+  /* R6/L5: paint box-level bgs first, *behind* all text. Painted in
+   * reverse record order so an outer container (recorded last, on
+   * element exit) paints before its inner children (recorded first),
+   * letting the inner box (e.g. the .terminal title bar) sit on top
+   * of the outer card. Each rect is clipped to the content area. */
+  for (int b = box_bg_count - 1; b >= 0; b--) {
+    box_bg_t *bb = &box_bgs[b];
+    int top = content_top + bb->box_y - scroll_y_px;
+    int bot = top + bb->box_h;
+    if (bot <= content_top || top >= content_bottom)
+      continue;  /* fully outside the fold */
+    if (top < content_top) top = content_top;
+    if (bot > content_bottom) bot = content_bottom;
+    int rx = CONTENT_X + bb->box_x;
+    eid_draw_rect(fb, WIN_W, WIN_H, rx, top - 2, bb->box_w,
+                  bot - top, bb->color);
+  }
+
   for (int i = 0; i < v_lines; i++) {
     int idx = scroll_line + i;
     if (idx >= line_count)
