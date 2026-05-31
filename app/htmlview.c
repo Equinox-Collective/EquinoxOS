@@ -296,6 +296,12 @@ typedef struct {
    * text) to the right edge of the current frame; e.g. a `.lang-pct`
    * span flush-right against its name. */
   bool margin_left_auto;
+  /* R6/L6: position: sticky | fixed — pin this element to the top of
+   * the viewport instead of scrolling it with the document flow. Both
+   * keywords collapse to the same "pin at top" behaviour here, which is
+   * what the only positioned bar on the target page (`.bar{position:
+   * sticky;top:0}`) needs. static/relative/absolute leave it false. */
+  bool sticky;
 } css_rule_t;
 
 static css_rule_t css_rules[MAX_CSS_RULES];
@@ -446,6 +452,9 @@ typedef struct {
   int box_y;
   int box_w;
   int box_h;
+  /* R6/L6: this line belongs to a position:sticky/fixed element and is
+   * painted pinned to the top of the viewport (no scroll offset). */
+  bool sticky;
 } line_t;
 
 static uint32_t fb[WIN_W * WIN_H];
@@ -500,6 +509,7 @@ typedef struct {
   int box_w;
   int box_h;
   uint32_t color;
+  bool sticky;      /* R6/L6: pinned-to-top bg (no scroll offset) */
 } box_bg_t;
 
 #define MAX_BOX_BGS 64
@@ -638,6 +648,7 @@ typedef struct {
   int flex_basis;
   char grid_cols[64];
   bool margin_left_auto; /* push this element flush-right (auto margin) */
+  bool sticky;           /* R6/L6: position:sticky/fixed — pin to top   */
 } style_state_t;
 
 static eid_font_t *h_font = NULL;
@@ -684,6 +695,12 @@ static void push_style_state(void) {
     style_stack[style_depth].flex_basis    = 0;
     style_stack[style_depth].grid_cols[0]  = '\0';
     style_stack[style_depth].margin_left_auto = false;
+    /* NB: `sticky` is intentionally NOT reset here. In this flat
+     * line model we have no nested positioning contexts, so the only
+     * way the bar's children (nav links, lang buttons, the star CTA)
+     * get painted pinned together with the bar is to let the flag
+     * inherit down the subtree. It is cleared when the sticky element
+     * pops and we return to the (non-sticky) body state. */
   }
 }
 
@@ -704,6 +721,8 @@ static void apply_css_to_current_state(const css_rule_t *r) {
     style_stack[style_depth].display_none = true;
   if (r->has_padding && r->padding > 0)
     style_stack[style_depth].padding = r->padding;
+  if (r->sticky)
+    style_stack[style_depth].sticky = true;
   if (r->max_width > 0)
     style_stack[style_depth].max_width = r->max_width;
   if (r->font_size > 0)
@@ -975,6 +994,13 @@ static void apply_css_property(css_rule_t *rule, const char *prop,
     } else if (strstr(val, "flex")) {
       rule->display = 1;
     }
+  } else if (strncmp(prop, "position", 8) == 0) {
+    /* sticky / fixed both pin to the top of the viewport here. The page
+     * also uses position:relative/absolute on ::before/::after pseudo
+     * decorations we don't render and on a display:none mobile nav, so
+     * only sticky/fixed flip the flag. */
+    if (strstr(val, "sticky") || strstr(val, "fixed"))
+      rule->sticky = true;
   } else if (strncmp(prop, "flex-direction", 14) == 0) {
     if (strstr(val, "column")) rule->flex_dir = 1;
     else                        rule->flex_dir = 0;
@@ -1825,6 +1851,7 @@ static void push_line(const char *text, int len, line_style_t style,
   lines[line_count].css_bold = style_stack[style_depth].bold;
   lines[line_count].css_align = style_stack[style_depth].align;
   lines[line_count].full_width_bg = style_stack[style_depth].full_width_bg;
+  lines[line_count].sticky = style_stack[style_depth].sticky;
   lines[line_count].padding = style_stack[style_depth].padding;
   lines[line_count].font_size = style_stack[style_depth].font_size;
   lines[line_count].uppercase = style_stack[style_depth].uppercase;
@@ -3269,6 +3296,7 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
       box_bgs[box_bg_count].box_w = max_x - min_x;
       box_bgs[box_bg_count].box_h = max_y - min_y;
       box_bgs[box_bg_count].color = box_bg_color;
+      box_bgs[box_bg_count].sticky = style_stack[style_depth].sticky;
       box_bg_count++;
     }
   }
@@ -4330,6 +4358,39 @@ static void render(const char *filename) {
   int cur_y = content_top;
   (void)cur_y;
 
+  /* R6/L6: sticky region. Lines / box-bgs flagged sticky (an element
+   * with position:sticky|fixed, e.g. the top `.bar`) are PINNED to the
+   * top of the viewport — painted with no scroll offset and clipped to
+   * a band at the very top — while the normal scrollable content is
+   * pushed below them (scroll_content_top) so it never draws under the
+   * bar. The bar is shifted up by sticky_min_y so its top aligns to the
+   * content area regardless of its natural document Y. */
+  int sticky_min_y = 1 << 30, sticky_max_y = 0;
+  bool has_sticky = false;
+  for (int li = 0; li < line_count; li++) {
+    if (!lines[li].sticky) continue;
+    has_sticky = true;
+    int t = lines[li].box_y;
+    int b = lines[li].box_y + (lines[li].box_h > 0 ? lines[li].box_h : LINE_H);
+    if (t < sticky_min_y) sticky_min_y = t;
+    if (b > sticky_max_y) sticky_max_y = b;
+  }
+  for (int bi = 0; bi < box_bg_count; bi++) {
+    if (!box_bgs[bi].sticky) continue;
+    has_sticky = true;
+    if (box_bgs[bi].box_y < sticky_min_y) sticky_min_y = box_bgs[bi].box_y;
+    int b = box_bgs[bi].box_y + box_bgs[bi].box_h;
+    if (b > sticky_max_y) sticky_max_y = b;
+  }
+  int sticky_h = has_sticky ? (sticky_max_y - sticky_min_y) : 0;
+  if (sticky_h < 0) sticky_h = 0;
+  /* Safety: never let a pinned bar swallow more than 2/3 of the
+   * viewport (guards against a flex bar degrading to a tall vertical
+   * stack). Normal nav bars are 1-2 lines, well under this. */
+  if (sticky_h > (view_px * 2) / 3) sticky_h = (view_px * 2) / 3;
+  if (!has_sticky) sticky_min_y = 0;
+  const int scroll_content_top = content_top + sticky_h;
+
   /* R6/L5: paint box-level bgs first, *behind* all text. Painted in
    * reverse record order so an outer container (recorded last, on
    * element exit) paints before its inner children (recorded first),
@@ -4337,12 +4398,21 @@ static void render(const char *filename) {
    * of the outer card. Each rect is clipped to the content area. */
   for (int b = box_bg_count - 1; b >= 0; b--) {
     box_bg_t *bb = &box_bgs[b];
-    int top = content_top + bb->box_y - scroll_y_px;
+    int top, clip_top, clip_bot;
+    if (bb->sticky) {
+      top      = content_top + (bb->box_y - sticky_min_y);  /* pinned */
+      clip_top = content_top;
+      clip_bot = content_top + sticky_h;
+    } else {
+      top      = content_top + bb->box_y - scroll_y_px;
+      clip_top = scroll_content_top;   /* never under the pinned bar */
+      clip_bot = content_bottom;
+    }
     int bot = top + bb->box_h;
-    if (bot <= content_top || top >= content_bottom)
-      continue;  /* fully outside the fold */
-    if (top < content_top) top = content_top;
-    if (bot > content_bottom) bot = content_bottom;
+    if (bot <= clip_top || top >= clip_bot)
+      continue;  /* fully outside its band */
+    if (top < clip_top) top = clip_top;
+    if (bot > clip_bot) bot = clip_bot;
     int rx = CONTENT_X + bb->box_x;
     eid_draw_rect(fb, WIN_W, WIN_H, rx, top - 2, bb->box_w,
                   bot - top, bb->color);
@@ -4359,17 +4429,28 @@ static void render(const char *filename) {
    * [content_top, content_bottom), so scanning all lines is correct
    * regardless of DOM/column ordering. */
   for (int idx = 0; idx < line_count; idx++) {
-    /* cur_y for this line, derived from box_y rather than a
-     * running accumulator. */
-    int line_y = content_top + lines[idx].box_y - scroll_y_px;
-    cur_y = line_y;
     int line_h = lines[idx].box_h > 0 ? lines[idx].box_h : LINE_H;
-    if (line_y + line_h > content_bottom)
-      continue;  /* below the fold; later DOM-order lines might
-                  * still be above (multi-column flex/grid) — keep
-                  * scanning instead of break. */
-    if (line_y < content_top)
-      continue;  /* above the fold; lines[] isn't sorted by box_y
+    /* cur_y for this line, derived from box_y rather than a running
+     * accumulator. Sticky lines (R6/L6) are pinned to the top band
+     * with no scroll offset; everything else scrolls and is clipped to
+     * the area below the pinned bar. */
+    int line_y, clip_top, clip_bot;
+    if (lines[idx].sticky) {
+      line_y   = content_top + (lines[idx].box_y - sticky_min_y);
+      clip_top = content_top;
+      clip_bot = content_top + sticky_h;
+    } else {
+      line_y   = content_top + lines[idx].box_y - scroll_y_px;
+      clip_top = scroll_content_top;
+      clip_bot = content_bottom;
+    }
+    cur_y = line_y;
+    if (line_y + line_h > clip_bot)
+      continue;  /* below its band; later DOM-order lines might still
+                  * be above (multi-column flex/grid) — keep scanning
+                  * instead of break. */
+    if (line_y < clip_top)
+      continue;  /* above its band; lines[] isn't sorted by box_y
                   * since flex/grid column children are appended
                   * in DOM order, so we can't break here either. */
 
