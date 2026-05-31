@@ -4384,10 +4384,14 @@ static void render(const char *filename) {
   }
   int sticky_h = has_sticky ? (sticky_max_y - sticky_min_y) : 0;
   if (sticky_h < 0) sticky_h = 0;
-  /* Safety: never let a pinned bar swallow more than 2/3 of the
-   * viewport (guards against a flex bar degrading to a tall vertical
-   * stack). Normal nav bars are 1-2 lines, well under this. */
-  if (sticky_h > (view_px * 2) / 3) sticky_h = (view_px * 2) / 3;
+  /* Cap the pinned strip so it can't dominate the viewport. On this
+   * narrow (604px) layout the bar's flex row degrades to a vertical
+   * stack (each nav link + the logo on its own line), which would pin
+   * ~half the screen. Keep the pinned bar to a compact strip — at most
+   * STICKY_MAX_PX, ~1/4 of the content area — and let the rest of the
+   * bar scroll off under it. */
+  const int STICKY_MAX_PX = view_px / 4;
+  if (sticky_h > STICKY_MAX_PX) sticky_h = STICKY_MAX_PX;
   if (!has_sticky) sticky_min_y = 0;
   const int scroll_content_top = content_top + sticky_h;
 
