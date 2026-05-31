@@ -17,6 +17,10 @@ local draw_paint = dofile("res/sysgui/paint.lua")
 local draw_explorer = dofile("res/sysgui/explorer.lua")
 local draw_notepad = dofile("res/sysgui/notepad.lua")
 
+local app_container = Window.new("External Application", 250, 150, 640, 400, nil)
+app_container.is_app_container = true
+app_container.active = false
+
 -- Оборонительный запуск интро через pcall [3]
 local system_state = "BOOT"
 local bootvid = nil
@@ -156,11 +160,36 @@ function on_tick(dt)
     local mx, my, mdown = getMouse()
 
     -- 1. Inactivity & Screensaver Check
-    if mx ~= last_mx or my ~= last_my or mdown ~= last_mdown or getLastKey() > 0 then
+    local is_app_running = false
+    for _, w in ipairs(windows) do
+        if w.is_app_container and w.active and not w.minimized then
+            is_app_running = true
+        end
+    end
+
+    if app_container.active then
+        local tasks = getTasks()
+        local external_proc_alive = false
+        for _, t in ipairs(tasks) do
+            -- Если есть процесс с PID отличным от ядра (1) и sysgui (2)
+            if t.pid ~= 1 and t.pid ~= 2 then
+                external_proc_alive = true
+            end
+        end
+        -- Если процесс умер, мягко закрываем окно контейнера
+        if not external_proc_alive then
+            app_container.active = false
+            focused_window = nil
+            _G.needs_redraw = true 
+        end
+    end
+
+    -- Если есть активность ИЛИ запущено оконное приложение, сбрасываем таймер
+    if mx ~= last_mx or my ~= last_my or mdown ~= last_mdown or getLastKey() > 0 or is_app_running then
         last_input_time = getUptime()
         if screensaver_active then
             screensaver_active = false
-            sysgui_mark_all_dirty()
+            _G.needs_redraw = true -- Использовать этот флаг вместо невидимой Lua функции!
         end
     end
 
@@ -445,12 +474,18 @@ function on_tick(dt)
         end
     end
 
+    local app_focused = (focused_window == app_container)
+
+    -- Если игра закрыта, свернута ИЛИ не в фокусе — сбрасываем координаты в 0
+    if not (app_container.active and not app_container.minimized and app_focused) then
+        if type(setAppWindowPos) == "function" then
+            setAppWindowPos(0, 0, 0, 0)
+        end
+    end
+
     last_mx = mx
     last_my = my
     last_mdown = mdown
 end
 
-local app_container = Window.new("External Application", 250, 150, 640, 400, nil)
-app_container.is_app_container = true
-app_container.active = false
 table.insert(windows, app_container)

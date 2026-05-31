@@ -1,22 +1,22 @@
+#include "../../syslibc/stdio.h"
+#include "../../syslibc/string.h"
+#include "../core/cpu.h"
 #include "../drivers/devices/audio/ac97.h"
-#include "../drivers/vesa/vesa.h"
-#include "../fs/vfs.h"
 #include "../drivers/devices/keyboard/keyboard.h"
 #include "../drivers/hardware/net/dns.h"
 #include "../drivers/hardware/net/net.h"
-#include "../../syslibc/string.h"
-#include "../../syslibc/stdio.h"
-#include "../drivers/hardware/net/tcp.h"
 #include "../drivers/hardware/net/socket.h"
+#include "../drivers/hardware/net/tcp.h"
+#include "../drivers/vesa/vesa.h"
+#include "../fs/vfs.h"
 #include "../mem/memory.h"
 #include "../mem/pmm.h"
 #include "../mem/shm.h"
-#include "../usr/task.h"
 #include "../mem/vmm.h"
-#include "../shell/shellsyntx.h"
-#include "../core/cpu.h"
 #include "../misc/random.h"
 #include "../misc/rtc.h"
+#include "../shell/shellsyntx.h"
+#include "../usr/task.h"
 #include "ipc.h"
 #include <stdint.h>
 
@@ -25,13 +25,14 @@ extern void sys_draw_app_buffer(int x, int y, int w, int h, uint32_t *buffer);
 extern uint8_t keyboard_pop();
 extern void term_print(const char *str);
 
-static int k_app_win_x = 100;
-static int k_app_win_y = 100;
-static int k_app_win_w = 640;
-static int k_app_win_h = 400;
-static bool k_app_win_active = false;
+static volatile int k_app_win_x = 100;
+static volatile int k_app_win_y = 100;
+static volatile int k_app_win_w = 640;
+static volatile int k_app_win_h = 400;
+static volatile bool k_app_win_active = false;
 
-typedef struct {
+typedef struct
+{
   uint64_t rax; // syscall_number
   uint64_t r9;
   uint64_t r8;
@@ -47,7 +48,8 @@ typedef struct {
 extern int mouse_x, mouse_y;
 extern bool mouse_left_button;
 
-uint64_t copy_to_user(void *kernel_buf, uint64_t size) {
+uint64_t copy_to_user(void *kernel_buf, uint64_t size)
+{
   if (!kernel_buf || size == 0)
     return 0;
 
@@ -60,7 +62,8 @@ uint64_t copy_to_user(void *kernel_buf, uint64_t size) {
   __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
   page_table_t *pml4 = (page_table_t *)VIRT(cr3);
 
-  for (uint64_t i = 0; i < pages; i++) {
+  for (uint64_t i = 0; i < pages; i++)
+  {
     // Берем ЛЮБУЮ свободную страницу, не обязательно подряд!
     void *phys = pmm_alloc();
     if (!phys)
@@ -81,23 +84,27 @@ uint64_t copy_to_user(void *kernel_buf, uint64_t size) {
   return target_virt;
 }
 
-void syscall_handler(syscall_regs_t *regs) {
+void syscall_handler(syscall_regs_t *regs)
+{
   uint64_t num = regs->rax;
 
-  switch (num) {
+  switch (num)
+  {
   case 1: // SYS_PRINT
     stac();
     term_print((const char *)regs->rdi);
     clac();
     break;
-  case 2: { // SYS_READ_FILE (Now VFS-agnostic)
+  case 2:
+  { // SYS_READ_FILE (Now VFS-agnostic)
     const char *filename = (const char *)regs->rdi;
     uint32_t *out_size_ptr = (uint32_t *)regs->rsi;
 
     uint32_t size = 0;
     uint8_t *file_data = vfs_read_file(filename, &size);
 
-    if (!file_data) {
+    if (!file_data)
+    {
       regs->rax = 0;
       break;
     }
@@ -119,7 +126,8 @@ void syscall_handler(syscall_regs_t *regs) {
     page_table_t *pml4 = (page_table_t *)VIRT(cr3);
 
     // Map and copy
-    for (uint32_t i = 0; i < pages_needed; i++) {
+    for (uint32_t i = 0; i < pages_needed; i++)
+    {
       uint64_t v = target_virt + (i * 4096);
       void *p = pmm_alloc();
       memset((void *)VIRT(p), 0, 4096);
@@ -136,7 +144,8 @@ void syscall_handler(syscall_regs_t *regs) {
     regs->rax = target_virt;
     break;
   }
-  case 3: { // SYS_WRITE_FILE (Теперь через VFS!)
+  case 3:
+  { // SYS_WRITE_FILE (Теперь через VFS!)
     const char *filename = (const char *)regs->rdi;
     const uint8_t *data = (const uint8_t *)regs->rsi;
     uint32_t size = (uint32_t)regs->rdx;
@@ -144,8 +153,10 @@ void syscall_handler(syscall_regs_t *regs) {
     // Ищем устройство с поддержкой записи (первое попавшееся, обычно EXT2 или
     // FAT32)
     vfs_node_t *dev = vfs_root->next;
-    while (dev) {
-      if (dev->write) {
+    while (dev)
+    {
+      if (dev->write)
+      {
         vfs_node_t file_node;
         memset(&file_node, 0, sizeof(vfs_node_t));
         // Безопасное копирование имени из юзерспейса. Раньше использовался
@@ -153,7 +164,8 @@ void syscall_handler(syscall_regs_t *regs) {
         // file_node.name (фикс. 128 байт) → порча стека ядра.
         stac();
         size_t i = 0;
-        for (; i < sizeof(file_node.name) - 1 && filename[i] != '\0'; i++) {
+        for (; i < sizeof(file_node.name) - 1 && filename[i] != '\0'; i++)
+        {
           file_node.name[i] = filename[i];
         }
         file_node.name[i] = '\0';
@@ -166,11 +178,13 @@ void syscall_handler(syscall_regs_t *regs) {
     }
     break;
   }
-  case 4: { // SYS_READ_DIR
+  case 4:
+  { // SYS_READ_DIR
     int idx = (int)regs->rdi;
 
     // Временная структура для безопасной записи в память пользователя
-    struct {
+    struct
+    {
       char name[128];
       uint32_t size;
       char dev[32];
@@ -180,14 +194,18 @@ void syscall_handler(syscall_regs_t *regs) {
     vfs_node_t *dev = vfs_root->next;
     bool found = false;
 
-    while (dev) {
-      if (dev->readdir) {
-        for (int i = 0; i < 32; i++) {
+    while (dev)
+    {
+      if (dev->readdir)
+      {
+        for (int i = 0; i < 32; i++)
+        {
           vfs_dirent_t *de = dev->readdir(dev, i);
           if (!de)
             break;
 
-          if (current_idx == idx) {
+          if (current_idx == idx)
+          {
             stac(); // Разрешаем доступ к памяти Ring 3
             strcpy(out->name, de->name);
             out->size = de->size;
@@ -208,6 +226,15 @@ void syscall_handler(syscall_regs_t *regs) {
     break;
   }
   case 5: // SYS_DRAW_BUFFER
+    if (!k_app_win_active) {
+      break; // Мягкая пауза: просто пропускаем кадр, если игра ушла в фон
+    }
+    {
+      extern volatile uint64_t fg_app_pid;
+      if (current_task) {
+        fg_app_pid = current_task->id;
+      }
+    }
     stac();
     sys_draw_app_buffer(regs->rdi, regs->rsi, regs->rdx, regs->rcx,
                         (uint32_t *)regs->r8);
@@ -218,21 +245,15 @@ void syscall_handler(syscall_regs_t *regs) {
     // напрямую измеряется в мс с момента загрузки.
     regs->rax = tick;
     break;
-  case 7: { // SYS_GET_MOUSE_FULL
+  case 7:
+  { // SYS_GET_MOUSE_FULL
     extern int mouse_x, mouse_y;
     extern bool mouse_left_button, mouse_right_button;
-    extern volatile uint64_t fg_app_pid;
-    // Если активно foreground-приложение (последний кто вызвал
-    // SYS_DRAW_BUFFER), мышь видит только оно. Иначе — все подряд.
-    if (fg_app_pid != 0 && current_task && current_task->id != fg_app_pid) {
-      regs->rax = 0;
-      regs->rbx = 0;
-      regs->rcx = 0;
-    } else {
-      regs->rax = mouse_x;
-      regs->rbx = mouse_y;
-      regs->rcx = (mouse_left_button ? 1 : 0) | (mouse_right_button ? 2 : 0);
-    }
+
+    // Всегда возвращаем реальные координаты, чтобы sysgui мог отрисовать курсор
+    regs->rax = mouse_x;
+    regs->rbx = mouse_y;
+    regs->rcx = (mouse_left_button ? 1 : 0) | (mouse_right_button ? 2 : 0);
     break;
   }
   case 9: // SYS_GET_SCANCODE
@@ -244,9 +265,12 @@ void syscall_handler(syscall_regs_t *regs) {
     // "съедал" тот, кто поллит чаще — обычно sysgui (16 ms цикл).
     // Теперь: пока есть foreground-app, sysgui получает 0; ввод идёт
     // только в активный процесс.
-    if (fg_app_pid != 0 && current_task && current_task->id != fg_app_pid) {
+    if (fg_app_pid != 0 && current_task && current_task->id != fg_app_pid)
+    {
       regs->rax = 0;
-    } else {
+    }
+    else
+    {
       regs->rax = keyboard_pop();
     }
     break;
@@ -269,7 +293,8 @@ void syscall_handler(syscall_regs_t *regs) {
     {
       extern int sock_close_owned_by(uint64_t pid);
       int n = sock_close_owned_by(current_task->id);
-      if (n > 0) {
+      if (n > 0)
+      {
         char mb[64];
         sprintf(mb, "[SYS] Reaped %d socket(s) on exit\n", n);
         term_print(mb);
@@ -290,7 +315,8 @@ void syscall_handler(syscall_regs_t *regs) {
     // Если выходит foreground-app — отдаём фокус ввода обратно sysgui.
     {
       extern volatile uint64_t fg_app_pid;
-      if (fg_app_pid == current_task->id) {
+      if (fg_app_pid == current_task->id)
+      {
         fg_app_pid = 0;
       }
     }
@@ -302,16 +328,18 @@ void syscall_handler(syscall_regs_t *regs) {
 
     yield();
     break;
-  case 11: // SYS_YIELD (Уступить процессор)
+  case 11:   // SYS_YIELD (Уступить процессор)
     yield(); // Фактический switch context через int $32
     break;
-  case 12: { // SYS_GET_FONT
+  case 12:
+  { // SYS_GET_FONT
     extern void *vesa_get_font();
     extern uint64_t vesa_get_font_size(void);
     void *kfont = vesa_get_font();
 
     uint64_t font_addr = (uint64_t)kfont;
-    if (font_addr < hhdm_offset) {
+    if (font_addr < hhdm_offset)
+    {
       font_addr = VIRT(font_addr);
     }
 
@@ -328,30 +356,29 @@ void syscall_handler(syscall_regs_t *regs) {
     regs->rax = copy_to_user((void *)font_addr, size);
     break;
   }
-  case 13: { // SYS_SLEEP
+  case 13:
+  { // SYS_SLEEP
     uint32_t ms = regs->rdi;
-    uint32_t start = tick;
-
-    /* Спим через yield() — каждую итерацию передаем CPU другим задачам,
-     * а потом планировщик вернёт нас обратно. hlt здесь не нужен —
-     * yield() сам обеспечивает пробуждение через IRQ0.
-     * Важно: не делаем cli после выхода — это убивало планировщик
-     * до следующего сисколла. */
-    while (tick < start + ms) {
+    if (ms > 0)
+    {
+      current_task->sleep_until = tick + ms;
       yield();
     }
     break;
   }
 
-  case 14: {
+  case 14:
+  {
     uint64_t len = regs->rsi;
-    if (len == 0) {
+    if (len == 0)
+    {
       regs->rax = 0;
       break;
     }
     uint64_t pages = (len + 4095) / 4096;
     void *phys = pmm_alloc_continuous(pages);
-    if (!phys) {
+    if (!phys)
+    {
       regs->rax = 0;
       break;
     }
@@ -360,24 +387,28 @@ void syscall_handler(syscall_regs_t *regs) {
     mmap_ptr += (pages * 4096);
     uint64_t cr3;
     __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
-    for (uint64_t i = 0; i < pages; i++) {
+    for (uint64_t i = 0; i < pages; i++)
+    {
       vmm_map((page_table_t *)VIRT(cr3), virt + (i * 4096),
               (uint64_t)phys + (i * 4096), PTE_USER | PTE_WRITABLE);
     }
     regs->rax = virt;
     break;
   }
-  case 15: { // SYS_BRK
+  case 15:
+  { // SYS_BRK
     if (current_task->brk == 0)
       current_task->brk = 0x40000000;
 
     uint64_t requested_brk = regs->rdi;
-    if (requested_brk == 0) {
+    if (requested_brk == 0)
+    {
       regs->rax = current_task->brk;
       break;
     }
 
-    if (requested_brk > current_task->brk) {
+    if (requested_brk > current_task->brk)
+    {
       // Округляем текущий brk вниз до страницы, а новый - вверх
       uint64_t start_map = (current_task->brk + 4095) & ~4095;
       uint64_t end_map = (requested_brk + 4095) & ~4095;
@@ -386,9 +417,11 @@ void syscall_handler(syscall_regs_t *regs) {
       __asm__ volatile("mov %%cr3, %0" : "=r"(cr3_val));
       page_table_t *pml4 = (page_table_t *)VIRT(cr3_val);
 
-      for (uint64_t addr = start_map; addr < end_map; addr += 4096) {
+      for (uint64_t addr = start_map; addr < end_map; addr += 4096)
+      {
         void *phys = pmm_alloc();
-        if (phys) {
+        if (phys)
+        {
           vmm_map(pml4, addr, (uintptr_t)phys,
                   PTE_PRESENT | PTE_USER | PTE_WRITABLE);
           memset((void *)VIRT(phys), 0, 4096);
@@ -399,30 +432,42 @@ void syscall_handler(syscall_regs_t *regs) {
     regs->rax = current_task->brk;
     break;
   }
-  case 16: {
-    if (regs->rdi == 1 || regs->rdi == 2) {
+  case 16:
+  {
+    if (regs->rdi == 1 || regs->rdi == 2)
+    {
       term_print((const char *)regs->rsi);
       regs->rax = regs->rdx;
-    } else {
+    }
+    else
+    {
       regs->rax = -1;
     }
     break;
   }
-  case 17: {
+  case 17:
+  {
     regs->rax = 0;
     break;
   }
-  case 18: {
+  case 18:
+  {
     regs->rax = -1;
     break;
   }
-  case 19: {
+  case 19:
+  {
     regs->rax = 0;
     break;
   }
-  case 20: { // SYS_AUDIO_PLAY
+  case 20:
+  { // SYS_AUDIO_PLAY
     uintptr_t user_ptr = regs->rdi;
     uint32_t size = (uint32_t)regs->rsi;
+    if (size == 0) {
+      ac97_stop();
+      break;
+    }
 
     static void *s_bufs_phys[32] = {NULL};
     static void *s_bufs_virt[32] = {NULL};
@@ -434,13 +479,18 @@ void syscall_handler(syscall_regs_t *regs) {
         s_bufs_phys[i] = pmm_alloc_continuous(2);
         s_bufs_virt[i] = (void *)((uintptr_t)s_bufs_phys[i] + hhdm_offset);
         memset(s_bufs_virt[i], 0, 8192);
+        
+        // Привязываем буфер к BDL без старта воспроизведения
+        extern void ac97_set_bdl_entry(int idx, void* phys_addr);
+        ac97_set_bdl_entry(i, s_bufs_phys[i]);
       }
     }
 
     extern uint8_t ac97_get_civ();
 
     // При самом первом звуке начинаем писать СРАЗУ ЗА текущим указателем карты
-    if (ring_ptr == -1) {
+    if (ring_ptr == -1)
+    {
       ring_ptr = (ac97_get_civ() + 1) % 32;
     }
 
@@ -450,12 +500,13 @@ void syscall_handler(syscall_regs_t *regs) {
     // Считаем, на сколько слотов мы убежали вперед от играющего сейчас
     int dist = (ring_ptr - civ + 32) % 32;
 
-    // Если мы оторвались больше чем на 3 буфера — Дум должен подождать!
-    // Это дает задержку всего 85мс и НАМЕРТВО защищает от "наслаивания"
-    while (dist > 3) {
-      __asm__ volatile("pause"); // Ждем, пока карта проиграет звук
+    int safety = 0;
+    while (dist > 8 && safety < 100) {
+      current_task->sleep_until = tick + 2; 
+      yield();
       civ = ac97_get_civ();
       dist = (ring_ptr - civ + 32) % 32;
+      safety++;
     }
 
     // Копируем звук
@@ -471,12 +522,14 @@ void syscall_handler(syscall_regs_t *regs) {
     ring_ptr = (ring_ptr + 1) % 32;
     break;
   }
-  case 21: { // SYS_AUDIO_SET_RATE
+  case 21:
+  { // SYS_AUDIO_SET_RATE
     extern void ac97_set_rate(uint32_t rate);
     ac97_set_rate((uint32_t)regs->rdi);
     break;
   }
-  case 30: { // SYS_MAP_PHYS (Для Композитора: мапим VESA LFB в юзерспейс)
+  case 30:
+  { // SYS_MAP_PHYS (Для Композитора: мапим VESA LFB в юзерспейс)
     uint64_t phys = regs->rdi;
     uint32_t size = regs->rsi;
     uint32_t pages = (size + 4095) / 4096;
@@ -484,7 +537,8 @@ void syscall_handler(syscall_regs_t *regs) {
     uint64_t virt = 0x20000000000; // Фиксированный адрес для видеопамяти
 
     page_table_t *pml4 = (page_table_t *)VIRT(current_task->cr3);
-    for (uint32_t i = 0; i < pages; i++) {
+    for (uint32_t i = 0; i < pages; i++)
+    {
       // Добавляем флаги PCD и PWT для активации Write-Combining (Index 3 в PAT)
       vmm_map(pml4, virt + (i * 4096), phys + (i * 4096),
               PTE_PRESENT | PTE_USER | PTE_WRITABLE | PTE_PCD | PTE_PWT);
@@ -493,12 +547,14 @@ void syscall_handler(syscall_regs_t *regs) {
     break;
   }
 
-  case 31: { // SYS_SHM_GET
+  case 31:
+  { // SYS_SHM_GET
     regs->rax = sys_shm_get((uint32_t)regs->rdi, (uint32_t)regs->rsi);
     break;
   }
 
-  case 32: {                       // SYS_GET_VESA_INFO
+  case 32:
+  {                                // SYS_GET_VESA_INFO
     extern uintptr_t fb_base_addr; // Виртуальный адрес от Limine (0xFFFF...)
     extern uint32_t screen_width, screen_height, screen_pitch;
     extern uint64_t hhdm_offset;
@@ -512,59 +568,84 @@ void syscall_handler(syscall_regs_t *regs) {
     regs->rdx = screen_pitch;
     break;
   }
-  case 33: { // SYS_GET_WINDOW_POS
+  case 33:
+  { // SYS_GET_WINDOW_POS
     regs->rax = (uint64_t)k_app_win_x;
     regs->rbx = (uint64_t)k_app_win_y;
     break;
   }
 
-  case 36: { // SYS_SET_WINDOW_POS (Вызывается из Lua)
+  case 36:
+  { // SYS_SET_WINDOW_POS (Вызывается из Lua)
     k_app_win_x = (int)regs->rdi;
     k_app_win_y = (int)regs->rsi;
     k_app_win_w = (int)regs->rdx;
     k_app_win_h = (int)regs->rcx;
-    k_app_win_active = true;
+    k_app_win_active = (k_app_win_w > 0 && k_app_win_h > 0);
     break;
   }
-  case 40: { // SYS_NET_DNS_RESOLVE
+  case 40:
+  { // SYS_NET_DNS_RESOLVE
     const char *hostname = (const char *)regs->rdi;
 
     // IPv4 literal short-circuit. Без этого URL вида http://10.0.2.2/
     // и любые тесты против host-only QEMU-сети (где у хоста просто IP, а DNS
     // не настроен) уходят в DNS-запрос к 8.8.8.8 и валятся таймаутом. Парсим
     // строго "a.b.c.d", a-d ∈ [0,255]. На любое отклонение — fallback в DNS.
-    if (hostname) {
+    if (hostname)
+    {
       uint32_t parts[4] = {0, 0, 0, 0};
       int part_idx = 0;
       int digits_in_part = 0;
       bool ok = true;
-      for (const char *p = hostname;; p++) {
+      for (const char *p = hostname;; p++)
+      {
         char c = *p;
-        if (c >= '0' && c <= '9') {
+        if (c >= '0' && c <= '9')
+        {
           parts[part_idx] = parts[part_idx] * 10 + (uint32_t)(c - '0');
-          if (parts[part_idx] > 255 || ++digits_in_part > 3) { ok = false; break; }
-        } else if (c == '.') {
-          if (digits_in_part == 0 || part_idx >= 3) { ok = false; break; }
+          if (parts[part_idx] > 255 || ++digits_in_part > 3)
+          {
+            ok = false;
+            break;
+          }
+        }
+        else if (c == '.')
+        {
+          if (digits_in_part == 0 || part_idx >= 3)
+          {
+            ok = false;
+            break;
+          }
           part_idx++;
           digits_in_part = 0;
-        } else if (c == '\0') {
-          if (part_idx != 3 || digits_in_part == 0) ok = false;
+        }
+        else if (c == '\0')
+        {
+          if (part_idx != 3 || digits_in_part == 0)
+            ok = false;
           break;
-        } else {
+        }
+        else
+        {
           ok = false;
           break;
         }
       }
-      if (ok) {
-        // Сетевые драйверы EquinoxOS трактуют uint32_t IP как network-byte-order
-        // (a в старшем байте). dns_get_result возвращает в той же форме.
-        regs->rax = (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3];
+      if (ok)
+      {
+        // Сетевые драйверы EquinoxOS трактуют uint32_t IP как
+        // network-byte-order (a в старшем байте). dns_get_result возвращает в
+        // той же форме.
+        regs->rax =
+            (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3];
         break;
       }
     }
 
     net_interface_t *iface = net_get_primary_interface();
-    if (!iface) {
+    if (!iface)
+    {
       regs->rax = 0;
       break;
     }
@@ -587,16 +668,22 @@ void syscall_handler(syscall_regs_t *regs) {
     };
     uint32_t resolved = 0;
     for (unsigned s = 0;
-         s < sizeof(dns_servers)/sizeof(dns_servers[0]) && resolved == 0;
-         s++) {
+         s < sizeof(dns_servers) / sizeof(dns_servers[0]) && resolved == 0;
+         s++)
+    {
       stac();
       dns_query(iface, hostname, dns_servers[s]);
       clac();
 
       uint32_t timeout = 400;
-      while (timeout > 0) {
+      while (timeout > 0)
+      {
         uint32_t ip = dns_get_result(hostname);
-        if (ip != 0) { resolved = ip; break; }
+        if (ip != 0)
+        {
+          resolved = ip;
+          break;
+        }
         __asm__ volatile("hlt"); // sleep until next interrupt (timer)
         timeout--;
       }
@@ -605,10 +692,12 @@ void syscall_handler(syscall_regs_t *regs) {
     regs->rax = resolved;
     break;
   }
-  case 41: { // SYS_NET_HTTP_GET
+  case 41:
+  { // SYS_NET_HTTP_GET
     uint32_t ip = (uint32_t)regs->rdi;
     net_interface_t *iface = net_get_primary_interface();
-    if (!iface) {
+    if (!iface)
+    {
       regs->rax = 0;
       break;
     }
@@ -618,7 +707,8 @@ void syscall_handler(syscall_regs_t *regs) {
     extern bool http_finished;
 
     http_finished = false;
-    if (http_response_buf) {
+    if (http_response_buf)
+    {
       kfree(http_response_buf);
       http_response_buf = NULL;
     }
@@ -631,39 +721,48 @@ void syscall_handler(syscall_regs_t *regs) {
 
     // Wait for finish — interrupts MUST be on for network_thread
     uint32_t timeout = 2000;
-    while (timeout > 0 && !http_finished) {
+    while (timeout > 0 && !http_finished)
+    {
       __asm__ volatile("hlt"); // sleep until next interrupt (timer)
       timeout--;
     }
 
     __asm__ volatile("cli");
 
-    if (http_finished && http_response_buf) {
+    if (http_finished && http_response_buf)
+    {
       regs->rax = copy_to_user(http_response_buf, http_response_len);
-      if (regs->rsi) {
+      if (regs->rsi)
+      {
         stac();
         *(uint32_t *)regs->rsi = http_response_len;
         clac();
       }
-    } else {
+    }
+    else
+    {
       regs->rax = 0;
     }
     break;
   }
-  case 34: { // SYS_GET_USED_MEM
+  case 34:
+  { // SYS_GET_USED_MEM
     regs->rax = pmm_get_used_memory();
     break;
   }
-  case 35: { // SYS_GET_TOTAL_MEM
+  case 35:
+  { // SYS_GET_TOTAL_MEM
     regs->rax = pmm_get_total_memory();
     break;
   }
-  case 50: { // SYS_EXEC
+  case 50:
+  { // SYS_EXEC
     const char *cmd = (const char *)regs->rdi;
     char cmd_buf[256];
     stac();
     int idx = 0;
-    while (idx < 255 && cmd[idx] != '\0') {
+    while (idx < 255 && cmd[idx] != '\0')
+    {
       cmd_buf[idx] = cmd[idx];
       idx++;
     }
@@ -673,36 +772,40 @@ void syscall_handler(syscall_regs_t *regs) {
     break;
   }
   /* ---- IPC: pipes ----------------------------------------------------- */
-  case 60: regs->rax = (uint64_t)(int64_t)pipe_create(); break;
+  case 60:
+    regs->rax = (uint64_t)(int64_t)pipe_create();
+    break;
   case 61:
-    regs->rax = (uint64_t)(int64_t)pipe_read((int)regs->rdi,
-                                             (void *)regs->rsi,
+    regs->rax = (uint64_t)(int64_t)pipe_read((int)regs->rdi, (void *)regs->rsi,
                                              (uint32_t)regs->rdx);
     break;
   case 62:
-    regs->rax = (uint64_t)(int64_t)pipe_write((int)regs->rdi,
-                                              (const void *)regs->rsi,
-                                              (uint32_t)regs->rdx);
+    regs->rax = (uint64_t)(int64_t)pipe_write(
+        (int)regs->rdi, (const void *)regs->rsi, (uint32_t)regs->rdx);
     break;
-  case 63: pipe_close((int)regs->rdi); break;
+  case 63:
+    pipe_close((int)regs->rdi);
+    break;
   /* ---- IPC: message queues ------------------------------------------- */
   case 64:
     regs->rax = (uint64_t)(int64_t)mq_create((uint32_t)regs->rdi);
     break;
   case 65:
-    regs->rax = (uint64_t)(int64_t)mq_send((int)regs->rdi,
-                                           (const void *)regs->rsi,
-                                           (uint32_t)regs->rdx);
+    regs->rax = (uint64_t)(int64_t)mq_send(
+        (int)regs->rdi, (const void *)regs->rsi, (uint32_t)regs->rdx);
     break;
   case 66:
-    regs->rax = (uint64_t)(int64_t)mq_recv((int)regs->rdi,
-                                           (void *)regs->rsi);
+    regs->rax = (uint64_t)(int64_t)mq_recv((int)regs->rdi, (void *)regs->rsi);
     break;
-  case 67: mq_close((int)regs->rdi); break;
+  case 67:
+    mq_close((int)regs->rdi);
+    break;
   /* ---- task introspection / control (ps / kill / killall) ------------ */
-  case 70: { // SYS_TASK_INFO
+  case 70:
+  { // SYS_TASK_INFO
     int idx = (int)regs->rdi;
-    struct user_task_info {
+    struct user_task_info
+    {
       uint64_t pid;
       uint64_t cr3;
       uint64_t brk;
@@ -710,35 +813,47 @@ void syscall_handler(syscall_regs_t *regs) {
       uint32_t _pad;
     } *uout = (void *)regs->rsi;
     task_snapshot_t snap;
-    if (uout && task_snapshot_at(idx, &snap)) {
+    if (uout && task_snapshot_at(idx, &snap))
+    {
       stac();
-      uout->pid     = snap.pid;
-      uout->cr3     = snap.cr3;
-      uout->brk     = snap.brk;
+      uout->pid = snap.pid;
+      uout->cr3 = snap.cr3;
+      uout->brk = snap.brk;
       uout->running = snap.running ? 1u : 0u;
-      uout->_pad    = 0;
+      uout->_pad = 0;
       clac();
       regs->rax = 1;
-    } else {
+    }
+    else
+    {
       regs->rax = 0;
     }
     break;
   }
   case 71: { // SYS_TASK_KILL
     uint64_t pid = regs->rdi;
+    
+    // ЗАЩИТА ОТ САМОУБИЙСТВА: Процесс не может завершить сам себя через этот вызов!
+    if (current_task && pid == current_task->id) {
+      regs->rax = 0;
+      break;
+    }
+    
     regs->rax = task_terminate_by_pid(pid) ? 1 : 0;
     break;
   }
-  case 72: { // SYS_TASK_KILLALL
+  case 72:
+  { // SYS_TASK_KILLALL
     regs->rax = (uint64_t)task_kill_all_user_count();
     break;
   }
-  case 73: { // SYS_SHELL_EXEC — выполнить строку ring-0 shell'а и
-             // вернуть printed-вывод в user-buf. См. shellsyntx.h и
-             // shell_capture_sink ниже.
-    const char *user_line   = (const char *)regs->rdi;
-    char       *user_outbuf = (char *)regs->rsi;
-    uint64_t    out_cap     = regs->rdx;
+  case 73:
+  { // SYS_SHELL_EXEC — выполнить строку ring-0 shell'а и
+    // вернуть printed-вывод в user-buf. См. shellsyntx.h и
+    // shell_capture_sink ниже.
+    const char *user_line = (const char *)regs->rdi;
+    char *user_outbuf = (char *)regs->rsi;
+    uint64_t out_cap = regs->rdx;
 
     /* 1) Скопировать команду в kernel-память (даём шеллу свободно
      *    дергать sh_print без stac/clac на каждый чих). */
@@ -746,7 +861,8 @@ void syscall_handler(syscall_regs_t *regs) {
     {
       uint64_t i = 0;
       stac();
-      while (i < sizeof(kline) - 1 && user_line && user_line[i] != '\0') {
+      while (i < sizeof(kline) - 1 && user_line && user_line[i] != '\0')
+      {
         kline[i] = user_line[i];
         i++;
       }
@@ -756,7 +872,7 @@ void syscall_handler(syscall_regs_t *regs) {
 
     /* 2) Обнулить capture-буфер и натравить шелл на capture-sink. */
     extern char shell_capture_buf[];
-    extern int  shell_capture_pos;
+    extern int shell_capture_pos;
     extern void shell_capture_sink(const char *);
 
     shell_capture_pos = 0;
@@ -765,20 +881,23 @@ void syscall_handler(syscall_regs_t *regs) {
 
     /* 3) Скопировать результат юзеру, усечение допустимо. */
     int n = shell_capture_pos;
-    if (out_cap == 0 || user_outbuf == NULL) {
+    if (out_cap == 0 || user_outbuf == NULL)
+    {
       regs->rax = (uint64_t)n;
       break;
     }
     uint64_t to_copy = ((uint64_t)n + 1 < out_cap) ? (uint64_t)n + 1 : out_cap;
     stac();
     memcpy(user_outbuf, shell_capture_buf, to_copy);
-    if (to_copy > 0) user_outbuf[to_copy - 1] = '\0';
+    if (to_copy > 0)
+      user_outbuf[to_copy - 1] = '\0';
     clac();
 
     regs->rax = (to_copy > 0) ? to_copy - 1 : 0;
     break;
   }
-  case 74: { // SYS_GET_FG_APP — текущий PID foreground-приложения
+  case 74:
+  { // SYS_GET_FG_APP — текущий PID foreground-приложения
     // 0 если нет (десктоп пустой → ввод и vram свободны для sysgui).
     // Используется sysgui чтобы не композитить vram, пока активна
     // полно­экранная игра вроде doom — иначе sysgui раз в 16 ms
@@ -798,14 +917,16 @@ void syscall_handler(syscall_regs_t *regs) {
    * stac()/clac() bracketing for the buffer transfers — same convention
    * as the read/write/dns paths above.
    * ================================================================== */
-  case 80: { /* SYS_SOCKET () -> int fd */
+  case 80:
+  { /* SYS_SOCKET () -> int fd */
     regs->rax = (uint64_t)(int64_t)sock_create();
     break;
   }
-  case 81: { /* SYS_CONNECT (fd, ip_be, port) -> int rc */
-    int      fd     = (int)regs->rdi;
-    uint32_t ip_be  = (uint32_t)regs->rsi;
-    uint16_t port   = (uint16_t)regs->rdx;
+  case 81:
+  { /* SYS_CONNECT (fd, ip_be, port) -> int rc */
+    int fd = (int)regs->rdi;
+    uint32_t ip_be = (uint32_t)regs->rsi;
+    uint16_t port = (uint16_t)regs->rdx;
     /* sock_connect spins with sti/hlt internally; mirror DNS handler. */
     __asm__ volatile("sti");
     int rc = sock_connect(fd, ip_be, port);
@@ -813,20 +934,22 @@ void syscall_handler(syscall_regs_t *regs) {
     regs->rax = (uint64_t)(int64_t)rc;
     break;
   }
-  case 82: { /* SYS_SEND (fd, buf, len) -> int sent */
-    int            fd  = (int)regs->rdi;
+  case 82:
+  { /* SYS_SEND (fd, buf, len) -> int sent */
+    int fd = (int)regs->rdi;
     const uint8_t *buf = (const uint8_t *)regs->rsi;
-    uint32_t       len = (uint32_t)regs->rdx;
+    uint32_t len = (uint32_t)regs->rdx;
     stac();
     int rc = sock_send(fd, buf, len);
     clac();
     regs->rax = (uint64_t)(int64_t)rc;
     break;
   }
-  case 83: { /* SYS_RECV (fd, buf, len) -> int recvd */
-    int       fd  = (int)regs->rdi;
-    uint8_t  *buf = (uint8_t *)regs->rsi;
-    uint32_t  len = (uint32_t)regs->rdx;
+  case 83:
+  { /* SYS_RECV (fd, buf, len) -> int recvd */
+    int fd = (int)regs->rdi;
+    uint8_t *buf = (uint8_t *)regs->rsi;
+    uint32_t len = (uint32_t)regs->rdx;
     /* recv may block — must keep interrupts on while we hlt-wait. */
     __asm__ volatile("sti");
     stac();
@@ -836,37 +959,43 @@ void syscall_handler(syscall_regs_t *regs) {
     regs->rax = (uint64_t)(int64_t)rc;
     break;
   }
-  case 84: { /* SYS_CLOSE_SOCK (fd) -> int rc */
+  case 84:
+  { /* SYS_CLOSE_SOCK (fd) -> int rc */
     int fd = (int)regs->rdi;
     regs->rax = (uint64_t)(int64_t)sock_close(fd);
     break;
   }
-  case 85: { /* SYS_SETSOCKOPT (fd, level, optname, val_ptr, vallen) -> int rc */
-    int         fd      = (int)regs->rdi;
-    int         level   = (int)regs->rsi;
-    int         optname = (int)regs->rdx;
-    const void *val     = (const void *)regs->rcx;
-    uint32_t    vallen  = (uint32_t)regs->r8;
+  case 85:
+  { /* SYS_SETSOCKOPT (fd, level, optname, val_ptr, vallen) -> int rc
+     */
+    int fd = (int)regs->rdi;
+    int level = (int)regs->rsi;
+    int optname = (int)regs->rdx;
+    const void *val = (const void *)regs->rcx;
+    uint32_t vallen = (uint32_t)regs->r8;
     stac();
     int rc = sock_setsockopt(fd, level, optname, val, vallen);
     clac();
     regs->rax = (uint64_t)(int64_t)rc;
     break;
   }
-  case 86: { /* SYS_GETRANDOM (buf, len, flags) -> int rc
-              *   rdi = void   *buf    — userspace destination
-              *   rsi = uint32  len    — bytes to fill
-              *   rdx = uint32  flags  — reserved (must be 0 for now)
-              * Always returns 0 on success, -1 on bad args.
-              * No partial fills: either len bytes are written or none. */
-    void    *buf   = (void *)regs->rdi;
-    uint32_t len   = (uint32_t)regs->rsi;
+  case 86:
+  { /* SYS_GETRANDOM (buf, len, flags) -> int rc
+     *   rdi = void   *buf    — userspace destination
+     *   rsi = uint32  len    — bytes to fill
+     *   rdx = uint32  flags  — reserved (must be 0 for now)
+     * Always returns 0 on success, -1 on bad args.
+     * No partial fills: either len bytes are written or none. */
+    void *buf = (void *)regs->rdi;
+    uint32_t len = (uint32_t)regs->rsi;
     uint32_t flags = (uint32_t)regs->rdx;
-    if (!buf || flags != 0) {
+    if (!buf || flags != 0)
+    {
       regs->rax = (uint64_t)(int64_t)-1;
       break;
     }
-    if (len == 0) {
+    if (len == 0)
+    {
       regs->rax = 0;
       break;
     }
@@ -876,14 +1005,16 @@ void syscall_handler(syscall_regs_t *regs) {
     regs->rax = (uint64_t)(int64_t)rc;
     break;
   }
-  case 87: { /* SYS_GET_WALL_TIME (uint64_t *out_unix_secs) -> int rc
-              *   rdi = uint64_t *out — must be non-NULL, user-mapped.
-              * Writes the current UTC time (whole seconds since the
-              * Unix epoch) read from the CMOS RTC. The kernel-side
-              * helper rtc_unix_time() does its own UIP/recheck loop,
-              * so the result is consistent across the seconds tick. */
+  case 87:
+  { /* SYS_GET_WALL_TIME (uint64_t *out_unix_secs) -> int rc
+     *   rdi = uint64_t *out — must be non-NULL, user-mapped.
+     * Writes the current UTC time (whole seconds since the
+     * Unix epoch) read from the CMOS RTC. The kernel-side
+     * helper rtc_unix_time() does its own UIP/recheck loop,
+     * so the result is consistent across the seconds tick. */
     uint64_t *out = (uint64_t *)regs->rdi;
-    if (!out) {
+    if (!out)
+    {
       regs->rax = (uint64_t)(int64_t)-1;
       break;
     }
@@ -904,13 +1035,16 @@ void syscall_handler(syscall_regs_t *regs) {
  * Один-единственный буфер, используемый и case 73 выше, и самим sink'ом.
  * Не thread-safe — но syscall_handler у нас и так не reentrant. */
 char shell_capture_buf[2048];
-int  shell_capture_pos = 0;
+int shell_capture_pos = 0;
 const int shell_capture_cap = (int)sizeof(shell_capture_buf);
 
-void shell_capture_sink(const char *s) {
-    if (!s) return;
-    while (*s && shell_capture_pos < shell_capture_cap - 1) {
-        shell_capture_buf[shell_capture_pos++] = *s++;
-    }
-    shell_capture_buf[shell_capture_pos] = '\0';
+void shell_capture_sink(const char *s)
+{
+  if (!s)
+    return;
+  while (*s && shell_capture_pos < shell_capture_cap - 1)
+  {
+    shell_capture_buf[shell_capture_pos++] = *s++;
+  }
+  shell_capture_buf[shell_capture_pos] = '\0';
 }
