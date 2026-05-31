@@ -269,6 +269,8 @@ typedef struct {
   int padding;   /* padding in line-units (0-6)       */
   bool has_padding;
   int max_width;  /* max-width in pixels (0 = unset)   */
+  int css_width;  /* width  in pixels (0 = unset) — used to size <img> */
+  int css_height; /* height in pixels (0 = unset) — used to size <img> */
   int font_size;  /* font-size hint: 0=normal, 1=large, 2=xlarge */
   bool uppercase; /* text-transform: uppercase         */
   /* R6/L4: flex (and L5: grid) container properties.
@@ -480,6 +482,38 @@ static void images_reset(void) {
   g_image_count = 0;
 }
 
+/* R6/L6b: nearest-neighbour resample of a decoded image to an exact
+ * target size. Used to honour CSS width/height on <img> (e.g. a logo
+ * declared `width:24px;height:24px` that decoded at 512²). Aspect is
+ * the caller's responsibility. In-place; frees the old buffer. */
+#ifdef BROWSER_BUILD
+static void img_resize_to(eq_image_t *im, int tw, int th) {
+  if (!im || !im->rgba) return;
+  if (tw < 1) tw = 1;
+  if (th < 1) th = 1;
+  if (im->w == tw && im->h == th) return;
+  uint8_t *dst = (uint8_t *)malloc((size_t)tw * th * 4);
+  if (!dst) return;
+  for (int y = 0; y < th; y++) {
+    int sy = (int)((long)y * im->h / th);
+    if (sy >= im->h) sy = im->h - 1;
+    const uint8_t *srow = im->rgba + (size_t)sy * im->w * 4;
+    uint8_t       *drow = dst       + (size_t)y  * tw   * 4;
+    for (int x = 0; x < tw; x++) {
+      int sx = (int)((long)x * im->w / tw);
+      if (sx >= im->w) sx = im->w - 1;
+      const uint8_t *sp = srow + (size_t)sx * 4;
+      drow[x * 4 + 0] = sp[0];
+      drow[x * 4 + 1] = sp[1];
+      drow[x * 4 + 2] = sp[2];
+      drow[x * 4 + 3] = sp[3];
+    }
+  }
+  eq_image_free(im);
+  im->rgba = dst; im->w = tw; im->h = th;
+}
+#endif
+
 /* Forward declared so w_emit_node's <img> handler (defined well above
  * the BROWSER_BUILD section) can call it. Real implementation lives
  * down with load_page() because it needs eq_http_get / resolve_url. */
@@ -632,6 +666,8 @@ typedef struct {
   bool full_width_bg;
   int padding;
   int max_width;
+  int img_w;   /* R6/L6b: CSS width  applied to a child <img> (0 = unset) */
+  int img_h;   /* R6/L6b: CSS height applied to a child <img> (0 = unset) */
   int font_size;
   bool uppercase;
   /* R6/L4+L5: container CSS that controls how the *children* of
@@ -686,6 +722,8 @@ static void push_style_state(void) {
     style_stack[style_depth].full_width_bg = false;
     style_stack[style_depth].padding       = 0;
     style_stack[style_depth].max_width     = 0;
+    style_stack[style_depth].img_w         = 0;
+    style_stack[style_depth].img_h         = 0;
     style_stack[style_depth].display       = 0;
     style_stack[style_depth].flex_dir      = 0;
     style_stack[style_depth].gap_px        = 0;
@@ -725,6 +763,10 @@ static void apply_css_to_current_state(const css_rule_t *r) {
     style_stack[style_depth].sticky = true;
   if (r->max_width > 0)
     style_stack[style_depth].max_width = r->max_width;
+  if (r->css_width > 0)
+    style_stack[style_depth].img_w = r->css_width;
+  if (r->css_height > 0)
+    style_stack[style_depth].img_h = r->css_height;
   if (r->font_size > 0)
     style_stack[style_depth].font_size = r->font_size;
   if (r->uppercase)
@@ -1076,6 +1118,17 @@ static void apply_css_property(css_rule_t *rule, const char *prop,
     }
     if (px > 0)
       rule->max_width = px;
+  } else if (strncmp(prop, "width", 5) == 0 && prop[5] == '\0') {
+    /* R6/L6b: explicit pixel width. Only consumed when this element is
+     * an <img>, to honour e.g. `.brand img{width:24px}`. Percent/auto
+     * values (no leading digit) are ignored. */
+    int px = 0; const char *v = val;
+    while (*v >= '0' && *v <= '9') { px = px * 10 + (*v - '0'); v++; }
+    if (px > 0) rule->css_width = px;
+  } else if (strncmp(prop, "height", 6) == 0 && prop[6] == '\0') {
+    int px = 0; const char *v = val;
+    while (*v >= '0' && *v <= '9') { px = px * 10 + (*v - '0'); v++; }
+    if (px > 0) rule->css_height = px;
   } else if (strncmp(prop, "font-size", 9) == 0) {
     int px = 0;
     const char *v = val;
@@ -2945,6 +2998,20 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
       int max_col_w = (cf ? cf->w : CONTENT_W) - IMG_PAD * 2;
       if (max_col_w < 8) max_col_w = 8;
       eq_image_t *im = &g_images[idx];
+      /* R6/L6b: honour an explicit CSS width/height first (e.g. a
+       * `.brand img{width:24px;height:24px}` logo). Without this the
+       * logo decodes huge and is only shrunk to the column width,
+       * blowing up the (now pinned) bar. If only one axis is given,
+       * preserve aspect from the other. */
+      int want_w = style_stack[style_depth].img_w;
+      int want_h = style_stack[style_depth].img_h;
+      if (want_w > 0 || want_h > 0) {
+        int sw = im->w > 0 ? im->w : 1;
+        int sh = im->h > 0 ? im->h : 1;
+        if (want_w <= 0) want_w = sw * want_h / sh;
+        if (want_h <= 0) want_h = sh * want_w / sw;
+        img_resize_to(im, want_w, want_h);
+      }
       while (im->w > max_col_w && im->w > 1 && im->h > 1) {
         int nw = im->w / 2; if (nw < 1) nw = 1;
         int nh = im->h / 2; if (nh < 1) nh = 1;
