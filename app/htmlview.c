@@ -1093,12 +1093,19 @@ static void parse_css_declarations(css_rule_t *rule, const char *decl,
       prop[pi] = '\0';
       val[vi] = '\0';
 
-      /* Trim leading spaces */
+      /* Trim leading whitespace. Must include \n/\t/\r, not just
+       * spaces: in a multi-line rule body every property after the
+       * first is preceded by a newline + indentation, so a space-only
+       * trim leaves prop[0]=='\n'. That silently broke every such
+       * property — most visibly the custom-property check
+       * (prop[0]=='-' && prop[1]=='-') in apply_css_property, so a
+       * multi-line :root{ --bg:..; --text:..; } stored no variables
+       * at all and every later var(--x) reference resolved to empty. */
       const char *pp = prop;
-      while (*pp == ' ')
+      while (*pp == ' ' || *pp == '\n' || *pp == '\t' || *pp == '\r')
         pp++;
       const char *vv = val;
-      while (*vv == ' ')
+      while (*vv == ' ' || *vv == '\n' || *vv == '\t' || *vv == '\r')
         vv++;
 
       if (pp[0] && vv[0])
