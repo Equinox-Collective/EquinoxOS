@@ -248,7 +248,28 @@ static void append_text(dom_node_t *parent, const char *src, uint32_t start, uin
   for (uint32_t i = start; i < end; i++) {
     if (!d_isspace(src[i])) { all_ws = false; break; }
   }
-  if (all_ws) return;
+  if (all_ws) {
+    /* Collapse a whitespace-only run to a single space instead of
+     * dropping it, so adjacent inline elements stay word-separated:
+     * "<span>in</span> <span>C</span>" must render "in C", not "inC".
+     * Guard against spurious spaces:
+     *   - drop leading whitespace (no preceding sibling), so a block
+     *     never starts with a stray space;
+     *   - skip when the previous sibling is already a single-space
+     *     text node, so runs don't accumulate. */
+    if (!parent->last_child) return;
+    if (parent->last_child->type == DOM_NODE_TEXT &&
+        parent->last_child->text &&
+        parent->last_child->text[0] == ' ' &&
+        parent->last_child->text[1] == '\0')
+      return;
+    dom_node_t *sp = node_new(DOM_NODE_TEXT);
+    if (!sp) return;
+    sp->text = d_strndup(" ", 1);
+    if (!sp->text) { free(sp); return; }
+    node_append_child(parent, sp);
+    return;
+  }
 
   dom_node_t *t = node_new(DOM_NODE_TEXT);
   if (!t) return;
