@@ -399,6 +399,18 @@ static uint32_t composite_over(uint32_t src, uint32_t dst, int a) {
   return c ? c : 0x000001; /* keep non-zero (0 = "unset" sentinel) */
 }
 
+/* R6/B5c: theme-aware background for <pre>/<code> blocks. The fixed
+ * light-grey slab (CLR_CODE_BG) is blinding on a dark page — e.g. a
+ * terminal panel whose own CSS is near-black. On a dark page we instead
+ * paint a subtle raised panel derived from the page background; on a
+ * light page we keep the classic light-grey code background. */
+static uint32_t code_bg_for_theme(uint32_t body_bg) {
+  int r = (body_bg >> 16) & 0xFF, g = (body_bg >> 8) & 0xFF, b = body_bg & 0xFF;
+  int lum = (r * 30 + g * 59 + b * 11) / 100;
+  if (lum < 128) return composite_over(0xFFFFFF, body_bg, 16);
+  return CLR_CODE_BG;
+}
+
 /* R6/B5: in-page anchor table. Built during layout from elements that
  * carry an `id`, so clicking an `<a href="#id">` link can scroll to the
  * target section instead of reloading the whole page. */
@@ -4385,7 +4397,7 @@ static void draw_text_line(int x, int y, const line_t *ln) {
       bg_w = 24;
     if (bg_w > CONTENT_W)
       bg_w = CONTENT_W;
-    eid_draw_rect(fb, WIN_W, WIN_H, x - 4, y - 2, bg_w, LINE_H, CLR_CODE_BG);
+    eid_draw_rect(fb, WIN_W, WIN_H, x - 4, y - 2, bg_w, LINE_H, code_bg_for_theme(body_bg));
   }
 
   if (style == STYLE_HR) {
