@@ -2446,10 +2446,15 @@ static void emit_flex_container(walk_ctx_t *w, dom_node_t *n) {
   const int MIN_COL_W = 80;
   int gross_w = container_w - (nchildren - 1) * gap;
   if (gross_w / nchildren < MIN_COL_W) {
+    /* The container's `gap` is a *horizontal* gutter; reusing it as the
+     * vertical spacing of the degraded stack massively inflates height
+     * (e.g. a nav with gap:24px and 4 links would add 72px of dead
+     * vertical space). Cap it to a tight vertical gutter. */
+    int vgap = gap > 6 ? 6 : gap;
     int first = 1;
     for (dom_node_t *c = n->first_child; c; c = c->next_sibling) {
       if (c->type != DOM_NODE_ELEMENT) { w_emit_node(w, c); continue; }
-      if (!first && gap > 0) layout_top()->y += gap;
+      if (!first && vgap > 0) layout_top()->y += vgap;
       w_emit_node(w, c);
       /* L5+: force a line break between degraded-vertical flex
        * children. Without this, a `.badges` row of 7 inline
@@ -4457,7 +4462,7 @@ static void render(const char *filename) {
    * ~half the screen. Keep the pinned bar to a compact strip — at most
    * STICKY_MAX_PX, ~1/4 of the content area — and let the rest of the
    * bar scroll off under it. */
-  const int STICKY_MAX_PX = view_px / 4;
+  const int STICKY_MAX_PX = (view_px * 2) / 5;
   if (sticky_h > STICKY_MAX_PX) sticky_h = STICKY_MAX_PX;
   if (!has_sticky) sticky_min_y = 0;
   const int scroll_content_top = content_top + sticky_h;
