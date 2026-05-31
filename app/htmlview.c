@@ -481,6 +481,9 @@ static int load_image_for_src(const char *src) { (void)src; return -1; }
 static line_t lines[MAX_LINES];
 static int line_count = 0;
 static int scroll_line = 0;
+/* Max scroll in LINE_H steps, published by render() so main()'s key
+ * handler clamps against the same bound the painter uses. */
+static int g_max_scroll_lines = 0;
 
 /* R6/L5: box-level background pass.
  *
@@ -4270,43 +4273,44 @@ static void render(const char *filename) {
   eid_draw_line(fb, WIN_W, WIN_H, 0, 65, WIN_W, 65, CLR_BORDER);
 
   int v_lines = visible_lines();
-  int max_scroll = line_count - v_lines;
-  if (max_scroll < 0)
-    max_scroll = 0;
-  if (scroll_line > max_scroll)
-    scroll_line = max_scroll;
 
   /* R6/L1: pixel-anchored render. Each line carries its own
-   * (box_x, box_y, box_h) so we no longer accumulate cur_y per
-   * style; instead we project box_y onto the screen via a single
-   * scroll offset.
+   * (box_x, box_y, box_h) so we project box_y onto the screen via a
+   * single scroll offset.
    *
-   * scroll_line is still in line units (it indexes the first
-   * visible line); we translate it to pixels by reading that
-   * line's box_y. Lines with box_y < scroll_y_px are clipped
-   * out (above the fold); lines whose top is past content_bottom
-   * are clipped out (below the fold). */
+   * R6/L5b: scroll_line is a count of LINE_H *steps*, and scroll_y_px is
+   * derived as scroll_line * LINE_H — strictly monotonic in scroll_line.
+   * The previous model set scroll_y_px = lines[scroll_line].box_y, but
+   * lines[] is NOT sorted by box_y (flex/grid columns are appended in DOM
+   * order), so incrementing scroll_line could DECREASE box_y and the page
+   * would jump upward mid-scroll. A fixed pixel step removes that coupling
+   * entirely. Lines above/below the fold are clipped per-line by box_y. */
   const int content_top    = CONTENT_Y + 14;
   const int content_bottom = WIN_H - 18;
-  int scroll_y_px = 0;
-  if (scroll_line > 0 && scroll_line < line_count)
-    scroll_y_px = lines[scroll_line].box_y;
+  int view_px = content_bottom - content_top;
 
-  /* Pixel-based scroll clamp. `max_scroll` above is line_count - v_lines,
-   * but line_count over-counts vertical rows whenever flex/grid rows span
-   * several lines — so scroll_line can run well past the real bottom and
-   * project the entire page above the fold (a fully blank viewport).
-   * Clamp the pixel offset to the actual rendered content height. */
+  /* Actual rendered content height (line_count over-counts vertical rows
+   * when flex/grid rows span several lines, so derive height from box_y
+   * rather than a line count). */
   int content_px_h = 0;
   for (int li = 0; li < line_count; li++) {
     int bottom_li = lines[li].box_y +
                     (lines[li].box_h > 0 ? lines[li].box_h : LINE_H);
     if (bottom_li > content_px_h) content_px_h = bottom_li;
   }
-  int view_px = content_bottom - content_top;
   int max_scroll_px = content_px_h - view_px;
   if (max_scroll_px < 0) max_scroll_px = 0;
+
+  /* Max scroll expressed in LINE_H steps; published so main()'s key
+   * handler clamps against the same bound the painter enforces. */
+  int max_scroll = (max_scroll_px + LINE_H - 1) / LINE_H;
+  g_max_scroll_lines = max_scroll;
+  if (scroll_line > max_scroll) scroll_line = max_scroll;
+  if (scroll_line < 0)          scroll_line = 0;
+
+  int scroll_y_px = scroll_line * LINE_H;
   if (scroll_y_px > max_scroll_px) scroll_y_px = max_scroll_px;
+
   /* Compatibility alias for branches further down that still
    * advance a `cur_y` of their own (notably the link
    * eid_process_interaction rect below). */
@@ -5040,7 +5044,10 @@ int main(int argc, char **argv) {
     ui.my -= 90;
 
     uint8_t key = ui.last_key;
-    int max_scroll = line_count - visible_lines();
+    /* Same scroll bound the painter uses (LINE_H steps, derived from the
+     * real pixel content height). Computed by the previous frame's
+     * render(); 0 on the very first frame before the first paint. */
+    int max_scroll = g_max_scroll_lines;
     if (max_scroll < 0)
       max_scroll = 0;
 
