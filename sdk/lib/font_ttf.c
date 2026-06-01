@@ -117,16 +117,71 @@ void eid_draw_text_ttf(eid_ctx_t *ctx, eid_font_t *font, int x, int y,
   }
 }
 
-/* "Bold": there is only a single regular Inter.ttf face available, so a
- * real heavier weight does not exist. Every faux-bold scheme we tried
- * (hard double-stamp, then a softened +1px smear) thickened the strokes
- * enough to close the inner counters of o/e/a/g/0 at 16-22px, which read
- * as a glued, hard-to-read blob. Rather than ship illegible text we draw
- * bold runs at the plain regular weight — crisp and fully readable.
- * Headings still stand out because they use the larger font size. If a
- * genuine bold weight is wanted later, ship Inter-Bold.ttf and load it as
- * a second face instead of synthesising one here. */
+/* Faux-bold: stamp each glyph twice with a 1px horizontal smear to
+ * thicken the strokes, and add 1px of extra advance per glyph so the
+ * heavier shapes keep a gap and words don't run together. */
 void eid_draw_text_ttf_bold(eid_ctx_t *ctx, eid_font_t *font, int x, int y,
                             const char *text, uint32_t color) {
-  eid_draw_text_ttf(ctx, font, x, y, text, color);
+  if (!font || !text || !ctx || !ctx->fb)
+    return;
+
+  int curr_x = x;
+  float scale = font->scale;
+  int baseline = y + (int)(font->ascent * scale);
+
+  int cr = (color >> 16) & 0xFF;
+  int cg = (color >> 8) & 0xFF;
+  int cb = color & 0xFF;
+
+  for (int i = 0; text[i]; i++) {
+    int advance, lsb;
+    stbtt_GetCodepointHMetrics(&font->info, text[i], &advance, &lsb);
+
+    int x0, y0, x1, y1;
+    stbtt_GetCodepointBitmapBox(&font->info, text[i], scale, scale, &x0, &y0,
+                                &x1, &y1);
+
+    int out_w = x1 - x0;
+    int out_h = y1 - y0;
+
+    if (out_w > 0 && out_h > 0) {
+      unsigned char *bitmap = malloc(out_w * out_h);
+      if (!bitmap)
+        continue;
+
+      stbtt_MakeCodepointBitmap(&font->info, bitmap, out_w, out_h, out_w, scale,
+                                scale, text[i]);
+
+      for (int row = 0; row < out_h; row++) {
+        for (int col = 0; col < out_w; col++) {
+          unsigned char alpha = bitmap[row * out_w + col];
+          if (!alpha)
+            continue;
+          int py = baseline + y0 + row;
+          /* Soft smear: the base glyph is drawn at full coverage (dx=0),
+           * the +1px copy at REDUCED coverage (dx=1). A hard full-alpha
+           * double-stamp thickens strokes by a solid pixel and fills the
+           * inner counters of o/e/a/g at 16px, which reads as a glued
+           * blob. Blending the offset copy at ~55% gives a soft ~1.4px
+           * stroke that still looks bold but keeps the counters open. */
+          for (int dx = 0; dx <= 1; dx++) {
+            int px = curr_x + (int)(lsb * scale) + col + dx;
+            if (px < 0 || px >= ctx->win_w || py < 0 || py >= ctx->win_h)
+              continue;
+            unsigned int a = (dx == 0) ? alpha : ((alpha * 140) >> 8);
+            if (!a)
+              continue;
+            uint32_t bg = ctx->fb[py * ctx->win_w + px];
+            uint8_t r = (cr * a + ((bg >> 16) & 0xFF) * (255 - a)) >> 8;
+            uint8_t g = (cg * a + ((bg >> 8) & 0xFF) * (255 - a)) >> 8;
+            uint8_t b = (cb * a + (bg & 0xFF) * (255 - a)) >> 8;
+            ctx->fb[py * ctx->win_w + px] = (r << 16) | (g << 8) | b;
+          }
+        }
+      }
+      free(bitmap);
+    }
+    /* +1px tracking compensates for the smear so glyphs keep their gap. */
+    curr_x += (int)(advance * scale) + 1;
+  }
 }
