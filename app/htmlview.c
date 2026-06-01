@@ -3556,10 +3556,21 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
     w->style = w->in_list ? STYLE_BULLET : STYLE_NORMAL;
     tag_context[0] = 0;
   } else if (tag_eq(tag, "span")) {
-    /* Symmetric postlude: flush the badge's word buffer so a
-     * trailing chip ends cleanly and the next inline run begins
-     * with a fresh separator. */
-    if (style_stack[style_depth].bg && w->word_len > 0) {
+    /* Symmetric postlude: flush the span's pending word NOW, while its
+     * inline CSS (background AND/OR text colour) is still on the style
+     * stack. append_word() samples the colour at flush time, but words
+     * are only committed on the next whitespace. A word that ends exactly
+     * at </span> with no trailing space inside the span — e.g.
+     * <span style="color:..">live</span> · … — would otherwise stay
+     * buffered until the space in the FOLLOWING text node, by which point
+     * the style has popped back to the parent and the word is recoloured
+     * wrong (grey instead of the span's colour). Trigger when the span
+     * sets a background OR changes the text colour vs its parent. */
+    bool span_bg    = style_stack[style_depth].bg != 0;
+    bool span_color = style_depth > 0 &&
+                      style_stack[style_depth].color !=
+                      style_stack[style_depth - 1].color;
+    if ((span_bg || span_color) && w->word_len > 0) {
       append_word(w->current, &w->current_len, w->word, w->word_len,
                   w->style, w->in_list);
       w->word_len = 0;
