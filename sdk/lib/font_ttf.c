@@ -116,3 +116,64 @@ void eid_draw_text_ttf(eid_ctx_t *ctx, eid_font_t *font, int x, int y,
     curr_x += (int)(advance * scale);
   }
 }
+
+/* Faux-bold: stamp each glyph twice with a 1px horizontal smear to
+ * thicken the strokes, and add 1px of extra advance per glyph so the
+ * heavier shapes keep a gap and words don't run together. */
+void eid_draw_text_ttf_bold(eid_ctx_t *ctx, eid_font_t *font, int x, int y,
+                            const char *text, uint32_t color) {
+  if (!font || !text || !ctx || !ctx->fb)
+    return;
+
+  int curr_x = x;
+  float scale = font->scale;
+  int baseline = y + (int)(font->ascent * scale);
+
+  int cr = (color >> 16) & 0xFF;
+  int cg = (color >> 8) & 0xFF;
+  int cb = color & 0xFF;
+
+  for (int i = 0; text[i]; i++) {
+    int advance, lsb;
+    stbtt_GetCodepointHMetrics(&font->info, text[i], &advance, &lsb);
+
+    int x0, y0, x1, y1;
+    stbtt_GetCodepointBitmapBox(&font->info, text[i], scale, scale, &x0, &y0,
+                                &x1, &y1);
+
+    int out_w = x1 - x0;
+    int out_h = y1 - y0;
+
+    if (out_w > 0 && out_h > 0) {
+      unsigned char *bitmap = malloc(out_w * out_h);
+      if (!bitmap)
+        continue;
+
+      stbtt_MakeCodepointBitmap(&font->info, bitmap, out_w, out_h, out_w, scale,
+                                scale, text[i]);
+
+      for (int row = 0; row < out_h; row++) {
+        for (int col = 0; col < out_w; col++) {
+          unsigned char alpha = bitmap[row * out_w + col];
+          if (!alpha)
+            continue;
+          int py = baseline + y0 + row;
+          /* Smear: draw the same coverage at col and col+1. */
+          for (int dx = 0; dx <= 1; dx++) {
+            int px = curr_x + (int)(lsb * scale) + col + dx;
+            if (px < 0 || px >= ctx->win_w || py < 0 || py >= ctx->win_h)
+              continue;
+            uint32_t bg = ctx->fb[py * ctx->win_w + px];
+            uint8_t r = (cr * alpha + ((bg >> 16) & 0xFF) * (255 - alpha)) >> 8;
+            uint8_t g = (cg * alpha + ((bg >> 8) & 0xFF) * (255 - alpha)) >> 8;
+            uint8_t b = (cb * alpha + (bg & 0xFF) * (255 - alpha)) >> 8;
+            ctx->fb[py * ctx->win_w + px] = (r << 16) | (g << 8) | b;
+          }
+        }
+      }
+      free(bitmap);
+    }
+    /* +1px tracking compensates for the smear so glyphs keep their gap. */
+    curr_x += (int)(advance * scale) + 1;
+  }
+}
