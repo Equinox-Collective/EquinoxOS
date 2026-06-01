@@ -2035,7 +2035,9 @@ static void push_line(const char *text, int len, line_style_t style,
   if (len > 0) g_inline_colors_active = false;
 
   char norm_buf[LINE_BYTES];
-  uint32_t norm_cols[LINE_BYTES];
+  /* static (not stack): push_line is never reentrant, and three LINE_BYTES
+   * arrays on the stack would add ~2.5 KB to a deeply-recursive walk. */
+  static uint32_t norm_cols[LINE_BYTES];
   int  norm_len;
   if (inline_cols)
     norm_len = utf8_to_ascii_col(text, len, norm_buf, sizeof(norm_buf),
@@ -2043,7 +2045,7 @@ static void push_line(const char *text, int len, line_style_t style,
   else
     norm_len = utf8_to_ascii(text, len, norm_buf, sizeof(norm_buf));
 
-  uint32_t text_cols[LINE_BYTES];
+  static uint32_t text_cols[LINE_BYTES];
   int  out_w = 0, cols = 0;
   for (int i = 0; i < norm_len && cols < LINE_CHARS; ) {
     unsigned char b = (unsigned char)norm_buf[i];
