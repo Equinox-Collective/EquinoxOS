@@ -112,11 +112,37 @@ static JSValue resp_text(JSContext *ctx, JSValueConst this_val,
   return settle_promise(ctx, s, false);
 }
 
+/* make_error() is defined further down (next to the fetch dispatch);
+ * forward-declare it so resp_json() can reject with a JS Error. */
+static JSValue make_error(JSContext *ctx, const char *msg);
+
+/* Response.prototype.json() — parse the body as JSON and resolve with the
+ * result (reject on empty body or a parse error). The page's GitHub-stats
+ * loaders all call `await r.json()`; without this method every data fetch
+ * threw "r.json is not a function", so the page silently fell back to the
+ * stale embedded constants instead of showing live data. */
+static JSValue resp_json(JSContext *ctx, JSValueConst this_val,
+                         int argc, JSValueConst *argv) {
+  (void)argc; (void)argv;
+  fetch_response_t *r = JS_GetOpaque(this_val, fetch_response_class_id);
+  if (!r || !r->body || r->body_len == 0) {
+    return settle_promise(ctx, make_error(ctx, "json: empty body"), true);
+  }
+  JSValue v = JS_ParseJSON(ctx, r->body, r->body_len, "fetch");
+  if (JS_IsException(v)) {
+    /* JS_ParseJSON left the exception pending; surface it as a
+     * rejected promise so `.catch()` sees a real SyntaxError. */
+    return settle_promise(ctx, JS_GetException(ctx), true);
+  }
+  return settle_promise(ctx, v, false);
+}
+
 static const JSCFunctionListEntry resp_proto[] = {
   JS_CGETSET_DEF("ok",     resp_get_ok,     NULL),
   JS_CGETSET_DEF("status", resp_get_status, NULL),
   JS_CGETSET_DEF("url",    resp_get_url,    NULL),
   JS_CFUNC_DEF("text",     0, resp_text),
+  JS_CFUNC_DEF("json",     0, resp_json),
 };
 
 /* ------------------------------------------------------------------ */
