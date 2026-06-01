@@ -220,6 +220,54 @@ void eid_draw_text(uint32_t *fb, int win_w, int win_h, int x, int y,
   }
 }
 
+/* Faux-bold for the 8x16 bitmap font: stamp each glyph twice (x and x+1)
+ * for weight, like the old whole-string double-stamp — BUT advance an extra
+ * pixel after capital letters. Capitals fill nearly the whole 8 px cell, so
+ * the +1 px smear used to bridge dense all-caps runs (e.g. "QEMU") into one
+ * blob. The extra tracking after caps keeps them separated; lowercase (which
+ * is narrower and already has a gap) stays at the normal 8 px pitch so body
+ * text spacing is unchanged. */
+void eid_draw_text_bold(uint32_t *fb, int win_w, int win_h, int x, int y,
+                        const char *text, uint32_t color) {
+  if (!sys_font || !text) return;
+
+  const unsigned char *p = (const unsigned char *)text;
+  int rows = sys_font->charsize;
+  while (*p) {
+    uint32_t cp = 0;
+    int adv;
+    if (*p < 0x80) {
+      cp = *p; adv = 1;
+    } else {
+      int rem = 0; const unsigned char *q = p;
+      while (*q && rem < 4) { rem++; q++; }
+      adv = utf8_decode_one_internal(p, rem, &cp);
+    }
+
+    const uint8_t *glyph = NULL;
+    if (cp < 0x80) {
+      glyph = (uint8_t *)sys_font + sizeof(psf1_t) + cp * rows;
+    } else if (cp >= 0x0400 && cp <= 0x04FF) {
+      glyph = cyr_font_8x16[cp - 0x0400];
+    } else if (cp == 0x2014 || cp == 0x2013) {
+      glyph = (uint8_t *)sys_font + sizeof(psf1_t) + '-' * rows;
+    } else if (cp == 0x00A0) {
+      glyph = (uint8_t *)sys_font + sizeof(psf1_t) + ' ' * rows;
+    } else {
+      glyph = (uint8_t *)sys_font + sizeof(psf1_t) + '?' * rows;
+    }
+
+    int gr = rows > 16 ? 16 : rows;
+    /* base + 1px smear = bold weight */
+    eid_draw_glyph_at(fb, win_w, win_h, x,     y, glyph, gr, color);
+    eid_draw_glyph_at(fb, win_w, win_h, x + 1, y, glyph, gr, color);
+
+    int is_cap = (cp >= 'A' && cp <= 'Z');
+    x += 8 + (is_cap ? 1 : 0);
+    p += adv;
+  }
+}
+
 /* R6/B2c: visible width of a UTF-8 string, in pixels. Each codepoint
  * is one 8 px cell. Callers that previously used `strlen(s) * 8`
  * should migrate to this for any string that might carry Cyrillic

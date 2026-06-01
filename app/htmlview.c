@@ -4417,10 +4417,13 @@ static void draw_text_line(int x, int y, const line_t *ln) {
     else
       eid_draw_text_ttf(&ui, draw_font, x, y, text, color);
   } else {
-    /* Bitmap fallback keeps the simple double-stamp smear. */
+    /* Bitmap fallback: faux-bold via eid_draw_text_bold, which smears +1px
+     * for weight AND adds tracking after caps so all-caps runs like "QEMU"
+     * don't glue into a blob. Non-bold uses the plain renderer. */
     if (ln->css_bold)
-      eid_draw_text(fb, WIN_W, WIN_H, x + 1, y, text, color);
-    eid_draw_text(fb, WIN_W, WIN_H, x, y, text, color);
+      eid_draw_text_bold(fb, WIN_W, WIN_H, x, y, text, color);
+    else
+      eid_draw_text(fb, WIN_W, WIN_H, x, y, text, color);
   }
 
   /* Underline: from CSS or from default style rules */
