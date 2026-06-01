@@ -44,6 +44,10 @@ void eid_draw_pixel(uint32_t *fb, int win_w, int win_h, int x, int y,
 void eid_draw_rect(uint32_t *fb, int win_w, int win_h, int x, int y, int w,
                    int h, uint32_t color);
 int  eid_text_width_utf8(const char *text);
+/* Faux-bold bitmap text: 1px smear for weight + extra tracking after caps
+ * so dense all-caps runs (e.g. "QEMU") stay legible instead of gluing. */
+void eid_draw_text_bold(uint32_t *fb, int win_w, int win_h, int x, int y,
+                        const char *text, uint32_t color);
 void eid_draw_text(uint32_t *fb, int win_w, int win_h, int x, int y,
                    const char *text, uint32_t color);
 void eid_draw_line(uint32_t *fb, int win_w, int win_h, int x1, int y1, int x2,
