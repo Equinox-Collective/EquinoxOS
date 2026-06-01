@@ -26,7 +26,7 @@ extern int strcasecmp(const char *s1, const char *s2);
 #define CONTENT_Y 56
 #define CONTENT_W (WIN_W - 36)
 #define LINE_H 18
-#define MAX_LINES 512
+#define MAX_LINES 1024
 #define LINE_CHARS 74
 
 #define CLR_BG 0xFDFCFC
@@ -2211,7 +2211,29 @@ static void emit_block_spacing(void) {
  * is guarded against LINE_BYTES. */
 static void append_word(char *line, int *len, const char *word, int word_len,
                         line_style_t style, bool indent) {
-  int max_cells = indent ? (LINE_CHARS - 4) : LINE_CHARS;
+  /* Wrap to the CURRENT layout frame's width — not the full content
+   * width. Inside a flex/grid column the frame is the column, so text
+   * wraps to the column instead of overflowing into the neighbour
+   * (headings) or being truncated at draw time (body). For the root /
+   * full-width frame this still resolves to ~LINE_CHARS, so legacy
+   * single-column geometry is unchanged.
+   *
+   * The px-per-cell used for the budget must match the width
+   * draw_text_line() will actually paint with for this run, or a
+   * heading drawn with the 9-11 px TTF would still overrun a budget
+   * computed at 8 px/cell. */
+  int frame_w = layout_top()->w;
+  int avail_px = frame_w - (indent ? LAYOUT_DEFAULT_INDENT : 0);
+  if (avail_px < 8) avail_px = 8;
+  int ppc = 8;                                   /* bitmap body cell */
+  if (style == STYLE_H1 || style_stack[style_depth].font_size >= 2)
+    ppc = 11;                                    /* large TTF heading */
+  else if (style == STYLE_H2 || style_stack[style_depth].font_size >= 1)
+    ppc = 9;                                     /* medium TTF heading */
+  int max_cells = avail_px / ppc;
+  int cap = indent ? (LINE_CHARS - 4) : LINE_CHARS;
+  if (max_cells < 1)   max_cells = 1;
+  if (max_cells > cap) max_cells = cap;
   if (word_len <= 0) return;
 
   /* R6/B7: colour of this word = the style currently on the stack (set by
@@ -4430,20 +4452,26 @@ static void draw_text_line(int x, int y, const line_t *ln) {
   bool clip_eligible = (style != STYLE_H1 && style != STYLE_H2 &&
                         ln->font_size == 0);
   if (clip_eligible && ln->box_w > 0 && ln->box_w < CONTENT_W) {
-    int est_cell = 8;  /* bitmap cell ~8 px wide */
-    int max_chars = ln->box_w / est_cell;
-    if (max_chars < 1) max_chars = 1;
-    int n = (int)strlen(text);
-    if (n > max_chars) {
-      int copy = max_chars;
-      if (copy >= (int)sizeof clip_buf) copy = (int)sizeof clip_buf - 1;
-      /* Try to cut at the last space within the budget so we
-       * don't slice a word in half ("compositing windo"). */
-      int word_end = -1;
-      for (int i = 0; i < copy; i++) {
-        if (text[i] == ' ') word_end = i;
+    int max_cells = ln->box_w / 8;            /* bitmap cell ~8 px wide */
+    if (max_cells < 1) max_cells = 1;
+    /* Measure in *visible cells* (codepoints), not bytes — a Cyrillic
+     * line is 2 bytes per glyph, so a byte-based budget would chop
+     * correctly-wrapped Russian text in half. With frame-width wrapping
+     * in append_word() this clip is normally a no-op; it stays as a
+     * safety net for the rare over-wide split word. */
+    int total_cells = utf8_cells_n(text, (int)strlen(text));
+    if (total_cells > max_cells) {
+      int cells = 0, bi = 0, last_space = -1;
+      while (text[bi] && cells < max_cells) {
+        unsigned char b = (unsigned char)text[bi];
+        int adv = (b < 0x80) ? 1 : ((b & 0xE0) == 0xC0) ? 2
+                : ((b & 0xF0) == 0xE0) ? 3 : ((b & 0xF8) == 0xF0) ? 4 : 1;
+        if (b == ' ') last_space = bi;          /* cut at word boundary */
+        bi += adv; cells++;
       }
-      if (word_end > copy / 2) copy = word_end;
+      int copy = bi;
+      if (last_space > 0 && last_space > bi / 2) copy = last_space;
+      if (copy >= (int)sizeof clip_buf) copy = (int)sizeof clip_buf - 1;
       memcpy(clip_buf, text, (size_t)copy);
       clip_buf[copy] = '\0';
       text = clip_buf;
