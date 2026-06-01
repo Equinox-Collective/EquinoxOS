@@ -28,7 +28,7 @@ volatile int32_t mouse_x = 0;
 volatile int32_t mouse_y = 0;
 volatile uint8_t mouse_left_button = 0;
 volatile uint8_t mouse_right_button = 0;
-
+extern void keyboard_push(uint8_t scancode);
 static uint8_t mouse_packet[3];
 static int mouse_cycle = 0;
 
@@ -72,11 +72,24 @@ static void mouse_flush_buffer() {
 void mouse_callback() {
     uint8_t status = inb(PS2_CMD_PORT);
     
-    // Проверяем, что данные пришли именно от мыши (бит 5)
-    if (!(status & 0x20)) return;
+    // 1. Проверяем, есть ли вообще данные в выходном буфере (бит 0)
+    if (!(status & 0x01)) {
+        return; 
+    }
 
+    // 2. ОБЯЗАТЕЛЬНО читаем байт из порта данных (0x60) сразу!
+    // Это гарантирует, что контроллер PS/2 никогда не зависнет.
     uint8_t data = inb(PS2_DATA_PORT);
 
+    // 3. Проверяем бит 5 статуса: 1 - данные от мыши, 0 - данные от клавиатуры
+    if (!(status & 0x20)) {
+        // Ого! Клавиатурный скан-код ошибочно вызвал прерывание мыши.
+        // Спасаем его и перенаправляем в кольцевой буфер клавиатуры!
+        keyboard_push(data);
+        return;
+    }
+
+    // 4. Если это действительно данные мыши, обрабатываем их как обычно:
     switch(mouse_cycle) {
         case 0:
             // Бит 3 должен быть установлен в 1 для корректной синхронизации пакета
@@ -99,7 +112,7 @@ void mouse_callback() {
 
             // --- Парсим полный пакет ---
             int8_t delta_x = mouse_packet[1];
-            int8_t delta_y = mouse_packet[2]; // PS/2 мышь инвертирует Y
+            int8_t delta_y = mouse_packet[2];
 
             mouse_left_button = mouse_packet[0] & 0x01;
             mouse_right_button = (mouse_packet[0] >> 1) & 0x01;
@@ -116,7 +129,6 @@ void mouse_callback() {
             break;
     }
 }
-
 // =========================================================================
 //                           ИНИЦИАЛИЗАЦИЯ
 // =========================================================================
