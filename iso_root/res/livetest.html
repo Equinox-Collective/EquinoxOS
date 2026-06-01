@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+<head>
+<style>
+  :root{
+    --done:#34d399;
+    --muted:#85858f;
+    --accent-warm:#fbbf24;
+  }
+  body{background:#0f1115;color:#e6e6ea;font-family:monospace}
+  h1{color:#7dd3fc;font-size:20px}
+  /* exact replica of the real site's .live status line */
+  .live{display:inline-flex;align-items:center;gap:8px;color:var(--muted);font-size:12px}
+  .live .live-word{color:var(--done)}
+  /* exact replica of the boot-log highlight span (known-good case) */
+  .w{color:var(--accent-warm);font-weight:600}
+</style>
+</head>
+<body>
+  <h1>live colour render test</h1>
+
+  <!-- THE FIX TARGET: flex container, inline-colour span ending at </span>
+       with no trailing space inside it. Must render "live" GREEN. -->
+  <div class="live"><span class="live-word" style="color:#34d399">live</span> &middot; last commit 21h ago</div>
+
+  <!-- also test the var()-only path (no inline style): must also be GREEN -->
+  <div class="live"><span class="live-word">live</span> &middot; via var(--done)</div>
+
+  <!-- known-good comparison: mid-line .w span must be YELLOW -->
+  <p>[mem] PMM: bitmap allocator, <span class="w">128 MiB</span> [task] PIT 8253</p>
+
+  <!-- trailing word inside coloured span (no inner space) must be YELLOW -->
+  <p>edge case: <span class="w">EOF</span> next</p>
+</body>
+</html>
