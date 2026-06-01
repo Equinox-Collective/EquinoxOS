@@ -137,6 +137,12 @@ void eid_draw_text_ttf_bold(eid_ctx_t *ctx, eid_font_t *font, int x, int y,
     int advance, lsb;
     stbtt_GetCodepointHMetrics(&font->info, text[i], &advance, &lsb);
 
+    /* Uppercase glyphs are dense and full-height; at 16-22px the heavier
+     * faux-bold smear closes the M/QEMU valleys into a blob. Give caps a
+     * lighter smear than lowercase so their internal gaps stay open. */
+    int is_cap = (text[i] >= 'A' && text[i] <= 'Z');
+    unsigned int smear_a = is_cap ? 105u : 140u;
+
     int x0, y0, x1, y1;
     stbtt_GetCodepointBitmapBox(&font->info, text[i], scale, scale, &x0, &y0,
                                 &x1, &y1);
@@ -168,7 +174,7 @@ void eid_draw_text_ttf_bold(eid_ctx_t *ctx, eid_font_t *font, int x, int y,
             int px = curr_x + (int)(lsb * scale) + col + dx;
             if (px < 0 || px >= ctx->win_w || py < 0 || py >= ctx->win_h)
               continue;
-            unsigned int a = (dx == 0) ? alpha : ((alpha * 140) >> 8);
+            unsigned int a = (dx == 0) ? alpha : ((alpha * smear_a) >> 8);
             if (!a)
               continue;
             uint32_t bg = ctx->fb[py * ctx->win_w + px];
@@ -181,7 +187,11 @@ void eid_draw_text_ttf_bold(eid_ctx_t *ctx, eid_font_t *font, int x, int y,
       }
       free(bitmap);
     }
-    /* +1px tracking compensates for the smear so glyphs keep their gap. */
-    curr_x += (int)(advance * scale) + 1;
+    /* +1px tracking compensates for the smear so glyphs keep their gap.
+     * Uppercase letters have tight metrics, and in dense all-caps runs
+     * like "QEMU" the faux-bold smear bridges the narrow gaps into one
+     * blob. Add 1px extra after each capital so caps keep breathing room;
+     * lowercase (which already has natural side-bearings) is unchanged. */
+    curr_x += (int)(advance * scale) + 1 + (is_cap ? 1 : 0);
   }
 }
