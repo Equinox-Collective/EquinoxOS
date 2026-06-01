@@ -31,7 +31,21 @@
  * ------------------------------------------------------------------------ */
 
 #define SOCK_MAX           16
-#define SOCK_RX_RING_SIZE  32768  /* per-socket reassembled inbound stream */
+/* Per-socket reassembled inbound stream ring (must stay a power of two —
+ * the producer/consumer index into it with `& (rx_size - 1)`).
+ *
+ * This ring is decoupled from TCP flow control: the TCB delivers in-order
+ * bytes into it as soon as they arrive, regardless of how fast the app
+ * drains via sock_recv(). A TLS consumer (BearSSL) cannot drain until it
+ * has buffered a whole record (up to ~16 KiB), so during record assembly
+ * the network keeps filling this ring. With the old 32 KiB size a large
+ * HTTPS body (e.g. a ~78 KiB page) could momentarily outrun the consumer
+ * and overflow by a byte or two — and ring_push() drops overflow silently,
+ * which corrupts the stream mid-body (a lost byte = invalid UTF-8 / broken
+ * JS in the browser). 256 KiB gives ~8 max-size TLS records of headroom so
+ * realistic pages never overflow. (A proper fix would bound the advertised
+ * rcv_wnd by this ring's free space; left as future work.) */
+#define SOCK_RX_RING_SIZE  262144 /* 256 KiB, 2^18 */
 
 #define SOCK_ERR_BADFD       -1
 #define SOCK_ERR_NOMEM       -2
