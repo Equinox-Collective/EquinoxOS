@@ -1,3 +1,4 @@
+-- initlua
 print("enGUI Desktop Environment: Loading modular core...")
 
 windows = {}
@@ -147,17 +148,18 @@ local drag_ox, drag_oy = 0, 0
 function on_tick(dt)
     -- --- 0. КОНЕЧНЫЙ АВТОМАТ: ЗАГРУЗОЧНАЯ АНИМАЦИЯ ---
     if system_state == "BOOT" and bootvid then
-        _G.needs_redraw = true -- <=== СИЛА: Форсируем перерисовку каждого кадра во время загрузки!
+        _G.needs_redraw = true 
         local is_finished = bootvid.draw(dt)
         if is_finished then
             system_state = "DESKTOP"
-            _G.needs_redraw = true -- Обновим экран при переходе на рабочий стол
+            _G.needs_redraw = true 
         end
         return
     end
 
     local sw, sh = getScreenSize() 
     local mx, my, mdown = getMouse()
+    local key = getLastKey()
 
     -- 1. Inactivity & Screensaver Check
     local is_app_running = false
@@ -185,7 +187,7 @@ function on_tick(dt)
     end
 
     -- Если есть активность ИЛИ запущено оконное приложение, сбрасываем таймер
-    if mx ~= last_mx or my ~= last_my or mdown ~= last_mdown or getLastKey() > 0 or is_app_running then
+    if mx ~= last_mx or my ~= last_my or mdown ~= last_mdown or key > 0 or is_app_running then
         last_input_time = getUptime()
         if screensaver_active then
             screensaver_active = false
@@ -247,7 +249,6 @@ function on_tick(dt)
     drawText(string.format("Memory: %d/%d MB", used_mb, total_mb), sw - 180, 95, 0x98C379)
 
     -- 4. Keyboard Modifiers Filter
-    local key = getLastKey()
     if key > 0 then
         local raw_code = key
         if raw_code >= 0x100 then
