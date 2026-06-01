@@ -158,15 +158,23 @@ void eid_draw_text_ttf_bold(eid_ctx_t *ctx, eid_font_t *font, int x, int y,
           if (!alpha)
             continue;
           int py = baseline + y0 + row;
-          /* Smear: draw the same coverage at col and col+1. */
+          /* Soft smear: the base glyph is drawn at full coverage (dx=0),
+           * the +1px copy at REDUCED coverage (dx=1). A hard full-alpha
+           * double-stamp thickens strokes by a solid pixel and fills the
+           * inner counters of o/e/a/g at 16px, which reads as a glued
+           * blob. Blending the offset copy at ~45% gives a soft ~1.4px
+           * stroke that still looks bold but keeps the counters open. */
           for (int dx = 0; dx <= 1; dx++) {
             int px = curr_x + (int)(lsb * scale) + col + dx;
             if (px < 0 || px >= ctx->win_w || py < 0 || py >= ctx->win_h)
               continue;
+            unsigned int a = (dx == 0) ? alpha : ((alpha * 115) >> 8);
+            if (!a)
+              continue;
             uint32_t bg = ctx->fb[py * ctx->win_w + px];
-            uint8_t r = (cr * alpha + ((bg >> 16) & 0xFF) * (255 - alpha)) >> 8;
-            uint8_t g = (cg * alpha + ((bg >> 8) & 0xFF) * (255 - alpha)) >> 8;
-            uint8_t b = (cb * alpha + (bg & 0xFF) * (255 - alpha)) >> 8;
+            uint8_t r = (cr * a + ((bg >> 16) & 0xFF) * (255 - a)) >> 8;
+            uint8_t g = (cg * a + ((bg >> 8) & 0xFF) * (255 - a)) >> 8;
+            uint8_t b = (cb * a + (bg & 0xFF) * (255 - a)) >> 8;
             ctx->fb[py * ctx->win_w + px] = (r << 16) | (g << 8) | b;
           }
         }
