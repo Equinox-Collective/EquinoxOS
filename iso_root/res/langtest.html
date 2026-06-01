@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+<head>
+<style>
+  :root{ --text:#f3f3f6; --muted:#85858f; }
+  body{background:#0f1115;color:var(--text);font-family:monospace}
+  h1{color:#7dd3fc;font-size:18px}
+  /* exact replica of the site's languages legend */
+  .lang-item{display:flex;align-items:center;gap:8px;font-size:13px}
+  .lang-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0}
+  .lang-name{color:var(--text)}
+  .lang-pct{color:var(--muted);margin-left:auto}
+</style>
+</head>
+<body>
+  <h1>lang colour test — all names should be WHITE, pcts grey</h1>
+
+  <!-- FIXED markup: trailing space inside lang-name so the last/only
+       word flushes while --text is still active (all names white). -->
+  <div class="lang-item"><span class="lang-dot" style="background:#a8b9cc"></span><span class="lang-name">C </span><span class="lang-pct">93.7%</span></div>
+  <div class="lang-item"><span class="lang-dot" style="background:#7a96f5"></span><span class="lang-name">Lua </span><span class="lang-pct">4.3%</span></div>
+  <div class="lang-item"><span class="lang-dot" style="background:#c9a76a"></span><span class="lang-name">Makefile </span><span class="lang-pct">0.8%</span></div>
+  <div class="lang-item"><span class="lang-dot" style="background:#8a5cf6"></span><span class="lang-name">Python </span><span class="lang-pct">0.6%</span></div>
+  <div class="lang-item"><span class="lang-dot" style="background:#f34b7d"></span><span class="lang-name">C++ </span><span class="lang-pct">0.3%</span></div>
+  <div class="lang-item"><span class="lang-dot" style="background:#c9a76a"></span><span class="lang-name">Assembly </span><span class="lang-pct">0.2%</span></div>
+  <div class="lang-item"><span class="lang-dot" style="background:#7fb86d"></span><span class="lang-name">Linker Script </span><span class="lang-pct">0.1%</span></div>
+  <div class="lang-item"><span class="lang-dot" style="background:#e34c26"></span><span class="lang-name">HTML </span><span class="lang-pct">0.0%</span></div>
+</body>
+</html>
