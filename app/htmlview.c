@@ -457,6 +457,9 @@ typedef enum {
  * symbols up to 3, so 4× LINE_CHARS leaves headroom for the rare
  * mixed line. */
 #define LINE_BYTES (LINE_CHARS * 4 + 1)
+/* R6/B7: max distinct colour runs recorded per line (inline <span> colour
+ * changes). Lines that exceed this fall back to the single css_color. */
+#define MAX_COLOR_RUNS 8
 typedef struct {
   char text[LINE_BYTES];
   line_style_t style;
@@ -501,6 +504,16 @@ typedef struct {
   /* R6/L6: this line belongs to a position:sticky/fixed element and is
    * painted pinned to the top of the viewport (no scroll offset). */
   bool sticky;
+  /* R6/B7: per-run text colour inside a single line. css_color above is
+   * the whole-line fallback; when an inline <span> changes colour mid-line
+   * (e.g. one green word in an otherwise grey status line) we record the
+   * colour boundaries here. color_run_count == 0 → use css_color for the
+   * entire line (the common case, bit-for-bit the old behaviour).
+   * Otherwise run r covers bytes [color_run_start[r], color_run_start[r+1])
+   * of text[], drawn in color_run_color[r] (0 = line default). */
+  uint8_t  color_run_count;
+  uint16_t color_run_start[MAX_COLOR_RUNS];
+  uint32_t color_run_color[MAX_COLOR_RUNS];
 } line_t;
 
 static uint32_t fb[WIN_W * WIN_H];
@@ -1950,6 +1963,54 @@ static int decode_entity(const char *src, char *out) {
   return 0; /* unknown entity, leave as-is */
 }
 
+/* R6/B7: per-byte text colour for the line currently being assembled by
+ * append_word(). Indexed by byte offset in the line buffer (w->current).
+ * g_inline_colors_active gates the whole feature: it is set by append_word
+ * when it records a colour and cleared by push_line once consumed, so the
+ * many direct push_line() callers (headings, blank lines, image rows) are
+ * never affected and keep the single-css_color path. */
+static uint32_t g_inline_colors[LINE_BYTES];
+static bool     g_inline_colors_active = false;
+
+/* Like utf8_to_ascii but also carries a per-byte colour. in_col is indexed
+ * by source byte offset; out_col receives the colour of the source
+ * codepoint that produced each output byte. Used by push_line so colour
+ * boundaries survive UTF-8 normalisation (a middot/dash mid-line,
+ * Cyrillic, etc.). */
+static int utf8_to_ascii_col(const char *in, int in_len, char *out,
+                             int out_cap, const uint32_t *in_col,
+                             uint32_t *out_col) {
+  if (out_cap <= 0) return 0;
+  int w = 0;
+  const unsigned char *p = (const unsigned char *)in;
+  int rem = in_len;
+  int off = 0;
+  while (rem > 0 && w < out_cap - 1) {
+    uint32_t cp = 0;
+    int n = utf8_decode_one(p, rem, &cp);
+    if (n <= 0) break;
+    uint32_t c = in_col ? in_col[off] : 0;
+    p += n; rem -= n; off += n;
+
+    if (cp < 0x80) {
+      out[w] = (char)cp; out_col[w] = c; w++;
+      continue;
+    }
+    if (cp >= 0x0400 && cp <= 0x04FF) {
+      if (w + 2 >= out_cap) break;
+      out[w] = (char)(0xC0 | (cp >> 6)); out_col[w] = c; w++;
+      out[w] = (char)(0x80 | (cp & 0x3F)); out_col[w] = c; w++;
+      continue;
+    }
+    const char *sub = cp_to_ascii_fallback(cp);
+    if (!sub) sub = cp_to_translit(cp);
+    if (!sub) continue;
+    while (*sub && w < out_cap - 1) { out[w] = *sub++; out_col[w] = c; w++; }
+  }
+  out[w] = 0;
+  return w;
+}
+
 static void push_line(const char *text, int len, line_style_t style,
                       bool indent) {
   if (line_count >= MAX_LINES)
@@ -1964,8 +2025,25 @@ static void push_line(const char *text, int len, line_style_t style,
    * codepoints to plain ASCII (— → "--", … → "...", →/↑ → ASCII). We
    * then truncate at LINE_CHARS *visible columns*, never mid-byte
    * inside a UTF-8 sequence. */
+  /* R6/B7: consume the per-byte inline colour buffer (set by append_word)
+   * exactly once, and only for a non-empty line. Empty pushes (blank_line,
+   * widget placeholders) must NOT consume it — a margin blank_line can fire
+   * between a parent's pending inline text and its flush, and swallowing the
+   * flag there would drop the colours. Direct push_line() callers never set
+   * the flag, so they take the single-css_color path unchanged. */
+  bool inline_cols = g_inline_colors_active && len > 0;
+  if (len > 0) g_inline_colors_active = false;
+
   char norm_buf[LINE_BYTES];
-  int  norm_len = utf8_to_ascii(text, len, norm_buf, sizeof(norm_buf));
+  uint32_t norm_cols[LINE_BYTES];
+  int  norm_len;
+  if (inline_cols)
+    norm_len = utf8_to_ascii_col(text, len, norm_buf, sizeof(norm_buf),
+                                 g_inline_colors, norm_cols);
+  else
+    norm_len = utf8_to_ascii(text, len, norm_buf, sizeof(norm_buf));
+
+  uint32_t text_cols[LINE_BYTES];
   int  out_w = 0, cols = 0;
   for (int i = 0; i < norm_len && cols < LINE_CHARS; ) {
     unsigned char b = (unsigned char)norm_buf[i];
@@ -1975,7 +2053,10 @@ static void push_line(const char *text, int len, line_style_t style,
             : ((b & 0xF8) == 0xF0) ? 4 : 1;
     if (i + adv > norm_len) break;
     if (out_w + adv >= (int)sizeof(lines[line_count].text)) break;
-    for (int k = 0; k < adv; k++) lines[line_count].text[out_w++] = norm_buf[i + k];
+    for (int k = 0; k < adv; k++) {
+      if (inline_cols) text_cols[out_w] = norm_cols[i + k];
+      lines[line_count].text[out_w++] = norm_buf[i + k];
+    }
     i += adv; cols++;
   }
   lines[line_count].text[out_w] = '\0';
@@ -2002,6 +2083,36 @@ static void push_line(const char *text, int len, line_style_t style,
   lines[line_count].padding = style_stack[style_depth].padding;
   lines[line_count].font_size = style_stack[style_depth].font_size;
   lines[line_count].uppercase = style_stack[style_depth].uppercase;
+
+  /* R6/B7: condense the per-byte colours into runs. Only kept when they
+   * add information (>1 colour, or a single run differing from the line
+   * default), so ordinary uniform lines stay on the single-colour path and
+   * render exactly as before. */
+  lines[line_count].color_run_count = 0;
+  if (inline_cols && out_w > 0) {
+    uint8_t rc = 0;
+    uint32_t prev = 0x01000000;  /* sentinel; no 0x00RRGGBB equals this */
+    bool overflow = false;
+    for (int i = 0; i < out_w; ) {
+      uint32_t c = text_cols[i];
+      if (c != prev) {
+        if (rc >= MAX_COLOR_RUNS) { overflow = true; break; }
+        lines[line_count].color_run_start[rc] = (uint16_t)i;
+        lines[line_count].color_run_color[rc] = c;
+        rc++;
+        prev = c;
+      }
+      unsigned char b = (unsigned char)lines[line_count].text[i];
+      int adv = (b < 0x80) ? 1 : ((b & 0xE0) == 0xC0) ? 2
+              : ((b & 0xF0) == 0xE0) ? 3 : ((b & 0xF8) == 0xF0) ? 4 : 1;
+      i += adv;
+    }
+    uint32_t def = lines[line_count].css_color;
+    if (!overflow && rc >= 1 &&
+        !(rc == 1 && (lines[line_count].color_run_color[0] == def ||
+                      lines[line_count].color_run_color[0] == 0)))
+      lines[line_count].color_run_count = rc;
+  }
 
   if (style == STYLE_LINK) {
     extract_attr(tag_context, "href", lines[line_count].link_url, 127);
@@ -2101,6 +2212,14 @@ static void append_word(char *line, int *len, const char *word, int word_len,
   int max_cells = indent ? (LINE_CHARS - 4) : LINE_CHARS;
   if (word_len <= 0) return;
 
+  /* R6/B7: colour of this word = the style currently on the stack (set by
+   * the enclosing inline <span>'s CSS). Record it per byte so push_line can
+   * reconstruct colour runs. WCOL writes the colour for the byte about to
+   * be appended at *len. */
+  uint32_t wc = style_stack[style_depth].color;
+  g_inline_colors_active = true;
+#define WCOL() do { if ((unsigned)(*len) < LINE_BYTES) g_inline_colors[*len] = wc; } while (0)
+
   int cur_cells  = utf8_cells_n(line, *len);
   int word_cells = utf8_cells_n(word, word_len);
 
@@ -2111,7 +2230,7 @@ static void append_word(char *line, int *len, const char *word, int word_len,
   }
 
   if (cur_cells > 0 && *len + 1 < LINE_BYTES) {
-    line[(*len)++] = ' ';
+    WCOL(); line[(*len)++] = ' ';
     cur_cells++;
   }
 
@@ -2125,7 +2244,7 @@ static void append_word(char *line, int *len, const char *word, int word_len,
       int adv = (b < 0x80) ? 1 : ((b & 0xE0) == 0xC0) ? 2
               : ((b & 0xF0) == 0xE0) ? 3 : ((b & 0xF8) == 0xF0) ? 4 : 1;
       if (i + adv > word_len) break;
-      for (int k = 0; k < adv; k++) line[(*len)++] = word[i + k];
+      for (int k = 0; k < adv; k++) { WCOL(); line[(*len)++] = word[i + k]; }
       i += adv; took++;
     }
     word += i; word_len -= i; word_cells -= took;
@@ -2141,9 +2260,10 @@ static void append_word(char *line, int *len, const char *word, int word_len,
     int adv = (b < 0x80) ? 1 : ((b & 0xE0) == 0xC0) ? 2
             : ((b & 0xF0) == 0xE0) ? 3 : ((b & 0xF8) == 0xF0) ? 4 : 1;
     if (i + adv > word_len) break;
-    for (int k = 0; k < adv; k++) line[(*len)++] = word[i + k];
+    for (int k = 0; k < adv; k++) { WCOL(); line[(*len)++] = word[i + k]; }
     i += adv; cur_cells++;
   }
+#undef WCOL
 }
 
 static void flush_current(char *line, int *len, line_style_t style,
@@ -4412,10 +4532,37 @@ static void draw_text_line(int x, int y, const line_t *ln) {
    * at x and x+1, thickening glyphs without widening their advance, which
    * glued letters together. */
   if (use_ttf && draw_font) {
+    /* R6/B7: the TTF path can't measure per-segment advance, so multi-
+     * colour runs degrade to the line's single colour here (headings are
+     * rarely multi-colour anyway). */
     if (ln->css_bold)
       eid_draw_text_ttf_bold(&ui, draw_font, x, y, text, color);
     else
       eid_draw_text_ttf(&ui, draw_font, x, y, text, color);
+  } else if (ln->color_run_count > 0) {
+    /* R6/B7: per-run colour inside one line. The bitmap font is a fixed
+     * 8 px cell, so eid_text_width_utf8() gives the exact advance for each
+     * segment. A colour of 0 means "line default" → fall back to `color`. */
+    int tlen = (int)strlen(text);
+    int rx = x;
+    for (int r = 0; r < ln->color_run_count; r++) {
+      int s = ln->color_run_start[r];
+      int e = (r + 1 < ln->color_run_count) ? ln->color_run_start[r + 1] : tlen;
+      if (s >= tlen) break;
+      if (e > tlen) e = tlen;
+      if (e <= s) continue;
+      char seg[LINE_BYTES];
+      int sl = e - s;
+      if (sl >= (int)sizeof(seg)) sl = (int)sizeof(seg) - 1;
+      memcpy(seg, text + s, (size_t)sl);
+      seg[sl] = '\0';
+      uint32_t rcol = ln->color_run_color[r] ? ln->color_run_color[r] : color;
+      if (ln->css_bold)
+        eid_draw_text_bold(fb, WIN_W, WIN_H, rx, y, seg, rcol);
+      else
+        eid_draw_text(fb, WIN_W, WIN_H, rx, y, seg, rcol);
+      rx += eid_text_width_utf8(seg);
+    }
   } else {
     /* Bitmap fallback: faux-bold via eid_draw_text_bold, which smears +1px
      * for weight AND adds tracking after caps so all-caps runs like "QEMU"
