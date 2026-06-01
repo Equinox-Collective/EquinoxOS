@@ -56,4 +56,11 @@ typedef struct eid_font eid_font_t; // Непрозрачная структур
 eid_font_t *eid_load_font(unsigned char *ttf_data, float size);
 void eid_draw_text_ttf(eid_ctx_t *ctx, eid_font_t *font, int x, int y,
                        const char *text, uint32_t color);
+/* Faux-bold TTF text: each glyph is stamped twice (1px horizontal smear)
+ * to thicken the strokes AND given a small extra advance so the heavier
+ * glyphs don't collide with their neighbours. Use this instead of drawing
+ * eid_draw_text_ttf twice at x and x+1 — that thickens the glyphs without
+ * widening their advance, so words like "QEMU" run together. */
+void eid_draw_text_ttf_bold(eid_ctx_t *ctx, eid_font_t *font, int x, int y,
+                            const char *text, uint32_t color);
 #endif

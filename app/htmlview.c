@@ -4406,18 +4406,20 @@ static void draw_text_line(int x, int y, const line_t *ln) {
     return;
   }
 
-  /* Bold: draw twice with offset if we don't have a bold font */
-  if (ln->css_bold) {
-    if (use_ttf && draw_font) {
-      eid_draw_text_ttf(&ui, draw_font, x + 1, y, text, color);
-    } else {
-      eid_draw_text(fb, WIN_W, WIN_H, x + 1, y, text, color);
-    }
-  }
-
+  /* Bold uses a faux-bold renderer that thickens each glyph AND adds a
+   * little tracking, so heavy words (e.g. "QEMU") stay legible instead of
+   * smearing into one blob. The old approach drew the whole string twice
+   * at x and x+1, thickening glyphs without widening their advance, which
+   * glued letters together. */
   if (use_ttf && draw_font) {
-    eid_draw_text_ttf(&ui, draw_font, x, y, text, color);
+    if (ln->css_bold)
+      eid_draw_text_ttf_bold(&ui, draw_font, x, y, text, color);
+    else
+      eid_draw_text_ttf(&ui, draw_font, x, y, text, color);
   } else {
+    /* Bitmap fallback keeps the simple double-stamp smear. */
+    if (ln->css_bold)
+      eid_draw_text(fb, WIN_W, WIN_H, x + 1, y, text, color);
     eid_draw_text(fb, WIN_W, WIN_H, x, y, text, color);
   }
 
