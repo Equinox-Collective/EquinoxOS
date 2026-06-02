@@ -69,6 +69,7 @@ SRC_DIRS = src src/boot src/syslibc \
            src/system/drivers/devices/mouse \
            src/system/drivers/devices/pci \
            src/system/drivers/devices/pcspeaker \
+		   src/system/drivers/devices/usb \
            src/system/drivers/hardware/disk \
            src/system/drivers/hardware/net \
            src/system/drivers/hardware/serial \
@@ -544,6 +545,7 @@ QEMU_BASE  := -m 512M -boot d \
               -serial stdio \
               -netdev user,id=n0,hostfwd=tcp::2222-:22 \
               -device rtl8139,netdev=n0 \
+			  -usb -device usb-mouse \
               -device ac97,audiodev=snd0 -audiodev dsound,id=snd0
 # Перебор акселераторов: первый рабочий используется, иначе TCG.
 QEMU_ACCEL := -accel whpx,kernel-irqchip=off -accel kvm -accel hvf -accel tcg
