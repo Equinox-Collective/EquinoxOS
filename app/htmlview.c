@@ -4198,16 +4198,6 @@ static void parse_html_legacy(const char *html, uint32_t size) {
   reset_style_stack();
   body_bg = CLR_BG;
 
-  /* Debug: print CSS rule count to serial */
-  char dbg[64];
-  sprintf(dbg, "[CSS] Extracted %d rules\n", css_rule_count);
-  print(dbg);
-  for (int d = 0; d < css_rule_count && d < 10; d++) {
-    sprintf(dbg, "  [%d] sel='%s' c=%06x bg=%06x\n", d, css_rules[d].selector,
-            css_rules[d].color, css_rules[d].bg_color);
-    print(dbg);
-  }
-
   for (uint32_t i = 0; i < size;) {
     char c = html[i];
 
