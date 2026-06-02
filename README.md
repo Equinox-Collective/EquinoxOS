@@ -116,6 +116,7 @@ The OS ships a full desktop environment with the following apps:
 | **Notepad** | Text editor with **disk save** support (`NOTES.TXT` → FAT32/EXT2) |
 | **Paint** | Drawing app with Bresenham line algorithm + **BMP export to disk** |
 | **System Monitor** | Real-time RAM usage bar and process overview |
+| **DOOM** | The classic id Software shooter, ported to run natively with AC97 sound |
 
 ### External Applications (userspace ELF)
 
