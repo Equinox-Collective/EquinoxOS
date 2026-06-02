@@ -3,6 +3,7 @@
 #include "../system/mem/pmm.h"
 #include "../system/misc/timer.h"
 #include "../system/mem/vmm.h"
+#include "nyan_data.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -17,6 +18,62 @@ static void kernel_sleep_ms(uint32_t ms) {
     uint32_t start = tick;
     while (tick < start + ms) {
         __asm__ volatile("hlt");
+    }
+}
+
+// --- NYAN CAT BOOT-АНИМАЦИЯ ---
+// Гифка рисуется прямо во фронтбуфер (как и диагностический лог) в зоне,
+// которую попросил пользователь — по центру-низу экрана под текстом тестов.
+
+// Геометрия кадра: масштаб и левый-верхний угол вычисляются один раз
+// относительно разрешения экрана, чтобы анимация попадала в нужную зону
+// при любом framebuffer'е.
+static int nyan_scale = 0;
+static int nyan_ox = 0;
+static int nyan_oy = 0;
+
+static void nyan_init_geometry(void) {
+    // Целый масштаб ~480px ширины при 1280px экрана (пиксель-арт без блюра).
+    nyan_scale = (int)(screen_width / 500);
+    if (nyan_scale < 1) nyan_scale = 1;
+
+    int nyan_w = NYAN_W * nyan_scale;
+    int nyan_h = NYAN_H * nyan_scale;
+
+    // Центр зоны, обведённой пользователем на скрине (1281x794 -> доли экрана).
+    int cx = (int)((uint64_t)screen_width * 384 / 1281);
+    int cy = (int)((uint64_t)screen_height * 508 / 794);
+
+    nyan_ox = cx - nyan_w / 2;
+    nyan_oy = cy - nyan_h / 2;
+}
+
+// Рисуем один кадр с целочисленным масштабированием (nearest-neighbor).
+static void nyan_draw_frame(int frame) {
+    const uint8_t *fb = nyan_frames[frame % NYAN_FRAMES];
+    for (int y = 0; y < NYAN_H; y++) {
+        for (int x = 0; x < NYAN_W; x++) {
+            uint32_t color = nyan_palette[fb[y * NYAN_W + x]];
+            int px = nyan_ox + x * nyan_scale;
+            int py = nyan_oy + y * nyan_scale;
+            for (int dy = 0; dy < nyan_scale; dy++) {
+                for (int dx = 0; dx < nyan_scale; dx++) {
+                    put_pixel_direct(px + dx, py + dy, color);
+                }
+            }
+        }
+    }
+}
+
+// Проигрываем гифку заданное время (мс), синхронно с темпом исходного gif
+// (8 кадров по 100 мс). Используется как "заставка" во время загрузки.
+static void nyan_play(uint32_t duration_ms) {
+    uint32_t start = tick;
+    int frame = 0;
+    while ((tick - start) < duration_ms) {
+        nyan_draw_frame(frame);
+        frame++;
+        kernel_sleep_ms(100); // 100 мс на кадр = темп исходной гифки
     }
 }
 
@@ -86,6 +143,11 @@ bool eqstart_perform_tests() {
   draw_rect_direct(0, 0, screen_width, screen_height, 0x000000);
   tty_row = 0;
 
+  // Готовим геометрию nyan-кадра и сразу показываем первый кадр под логом,
+  // чтобы гифка была видна уже во время прохождения тестов.
+  nyan_init_geometry();
+  nyan_draw_frame(0);
+
   tty_print("Equinox OS Boot Diagnostics Protocol v2.1", 0xFFFFFF);
   tty_print("--------------------------------------------------", 0x555555);
 
@@ -136,8 +198,9 @@ bool eqstart_perform_tests() {
 
   tty_print("--------------------------------------------------", 0x555555);
   tty_print("All diagnostics PASSED. Launching Equinox GUI Subsystem...", 0x00FFFF);
-  
-  // Безопасный сон ядра перед передачей управления композитору
-  kernel_sleep_ms(150); 
+
+  // Проигрываем Nyan Cat в обведённой зоне, пока идёт загрузка, перед
+  // передачей управления GUI-подсистеме (~4 секунды = 5 петель гифки).
+  nyan_play(4000);
   return true;
 }
