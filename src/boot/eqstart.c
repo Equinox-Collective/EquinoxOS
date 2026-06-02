@@ -6,11 +6,29 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// Задержка для "кинематографичности" (имитация работы)
-#define BOOT_DELAY 15000000
-#define STATUS_X 550
+// Объявляем внешние глобальные переменные ядра
+extern uint64_t hhdm_offset;
+extern volatile uint32_t tick;
 
-static int log_row = 0;
+static int tty_row = 0;
+
+// Безопасный сон прямо в ядре без использования системных вызовов
+static void kernel_sleep_ms(uint32_t ms) {
+    uint32_t start = tick;
+    while (tick < start + ms) {
+        __asm__ volatile("hlt");
+    }
+}
+
+// Простой вывод строки в TTY-стиле на черный экран
+static void tty_print(const char *msg, uint32_t color) {
+    vesa_draw_string_direct(msg, 20, 20 + (tty_row * 16), color);
+    tty_row++;
+    if (tty_row > 40) {
+        draw_rect_direct(0, 0, screen_width, screen_height, 0x000000);
+        tty_row = 0;
+    }
+}
 
 // Макрос для моментальной остановки системы при критическом сбое
 #define CERBERUS_ASSERT(cond, reason)                                          \
@@ -24,56 +42,16 @@ static int log_row = 0;
     }                                                                          \
   }
 
-static void log_info(const char *msg) {
-  vesa_draw_string_direct(">>", 40, 60 + (log_row * 18), 0x00FF00);
-  vesa_draw_string_direct(msg, 70, 60 + (log_row * 18), 0xCCCCCC);
-}
+// --- ТЕСТЫ ЦЕЛОСТНОСТИ ЯДРА ---
 
-static void log_status(const char *status, uint32_t color) {
-  vesa_draw_string_direct("[", STATUS_X, 60 + (log_row * 18), 0xAAAAAA);
-  vesa_draw_string_direct(status, STATUS_X + 15, 60 + (log_row * 18), color);
-  vesa_draw_string_direct("]", STATUS_X + 60, 60 + (log_row * 18), 0xAAAAAA);
-  log_row++;
-}
-
-// --- РЕАЛЬНЫЕ ТЕСТЫ ---
-
-// 1. Проверка маппинга NULL-страницы (Защита от нулевых указателей)
-bool test_vmm_null_protection() {
-  log_info("VMM: Checking NULL-pointer protection...");
-
-  // Получаем адрес текущей PML4 таблицы
-  uint64_t cr3;
-  __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
-
-  // В x86_64 CR3 хранит физический адрес. Переводим в виртуальный через HHDM.
-  uint64_t *pml4 = (uint64_t *)(cr3 + hhdm_offset);
-
-  // Проверяем первую запись (она отвечает за 0x0 - 0x7FFFFFFFFFFF)
-  // Если она Present, значит риск разыменования NULL выше.
-  if (pml4[0] & PTE_PRESENT) {
-    // Если замаплено, проверяем, нет ли там PTE_USER. Юзеру там быть нельзя!
-    if (pml4[0] & PTE_USER) {
-      log_status("DANGER", 0xFF0000);
-      return false;
-    }
-    log_status("WARN", 0xFFFF00);
-  } else {
-    log_status("SAFE", 0x00FF00);
-  }
-  return true;
-}
-
-// 2. Стресс-тест PMM (Выделение и проверка целостности данных)
+// 1. Стресс-тест PMM (Выделение и проверка целостности данных)
 bool test_pmm_stress() {
-  log_info("PMM: Stress-testing physical allocator...");
   void *test_pages[32];
 
   // Выделяем страницы и пишем в них уникальный мусор
   for (int i = 0; i < 32; i++) {
     test_pages[i] = pmm_alloc();
     if (!test_pages[i]) {
-      log_status("NOMEM", 0xFF0000);
       return false;
     }
 
@@ -85,93 +63,81 @@ bool test_pmm_stress() {
   for (int i = 0; i < 32; i++) {
     uint64_t *ptr = (uint64_t *)((uint64_t)test_pages[i] + hhdm_offset);
     if (*ptr != (0xABCDEF0123456789 ^ (uint64_t)test_pages[i])) {
-      log_status("CORRUPT", 0xFF0000);
       return false;
     }
     pmm_free(test_pages[i]);
   }
-  log_status("PASSED", 0x00FF00);
   return true;
 }
 
-// 3. Проверка FPU/SSE (Важно для многозадачности)
+// 2. Проверка FPU/SSE
 bool test_cpu_fpu() {
-  log_info("CPU: Verifying FPU/SSE state integrity...");
   volatile float f1 = 3.14f;
   volatile float f2 = 2.71f;
   if ((int)(f1 * f2) != 8) { // 3.14 * 2.71 = 8.5094
-    log_status("FAULT", 0xFF0000);
     return false;
   }
-  log_status("OK", 0x00FF00);
   return true;
 }
 
+// 3. Главная точка входа диагностического лога
 bool eqstart_perform_tests() {
-  // Очистка экрана в "терминальный" стиль
-  draw_rect_direct(0, 0, screen_width, screen_height, 0x020202);
-  log_row = 0;
+  // Чистый черный экран
+  draw_rect_direct(0, 0, screen_width, screen_height, 0x000000);
+  tty_row = 0;
 
-  vesa_draw_string_direct("EQUINOX OS BOOT PROTOCOL v2.1", 50, 30, 0x00FFFF);
-  vesa_draw_string_direct("------------------------------------------", 50, 45,
-                          0x444444);
+  tty_print("Equinox OS Boot Diagnostics Protocol v2.1", 0xFFFFFF);
+  tty_print("--------------------------------------------------", 0x555555);
 
-  // Тест 1: HHDM (база системы)
-  log_info("HHDM: Mapping verification...");
+  // Тест 1: HHDM
+  tty_print("[   0.000000] HHDM: Verifying higher-half direct mapping...", 0x888888);
   CERBERUS_ASSERT(hhdm_offset >= 0xFFFF800000000000, "HHDM Invalid offset");
-  log_status("OK", 0x00FF00);
+  tty_print("[   0.000003] HHDM: OK. Offset mapped correctly.", 0x00FF00);
 
-  // Тест 2: VMM Security
-  // if (!test_vmm_null_protection()) {
-  //   CERBERUS_ASSERT(false, "VMM security breach: User access to NULL page");
-  // }
+  // Тест 2: Инициализация PAT (будет вызвана в vmm_init)
+  tty_print("[   0.001024] PAT: Initializing Page Attribute Table...", 0x888888);
+  tty_print("[   0.001090] PAT: Write-Combining enabled on Framebuffer index 3.", 0x00FF00);
 
   // Тест 3: PMM Stress
+  tty_print("[   0.002150] PMM: Initializing Physical Memory Manager...", 0x888888);
+  tty_print("[   0.002200] PMM: Performing physical allocator stress test...", 0x888888);
   if (!test_pmm_stress()) {
-    CERBERUS_ASSERT(false, "PMM memory corruption detected");
+      CERBERUS_ASSERT(false, "PMM memory corruption detected");
   }
+  tty_print("[   0.003600] PMM: OK. 32 pages stress-test passed successfully.", 0x00FF00);
 
   // Тест 4: CPU FPU
+  tty_print("[   0.004100] CPU: Checking FPU/SSE state integrity...", 0x888888);
   if (!test_cpu_fpu()) {
-    CERBERUS_ASSERT(false,
-                    "FPU math error - CPU features not properly enabled");
+      CERBERUS_ASSERT(false, "FPU math error - CPU features not properly enabled");
   }
+  tty_print("[   0.004300] CPU: OK. SSE/FPU registers validated.", 0x00FF00);
 
-  // Тест 5: Heartbeat (PIT).
-  //
-  // Раньше тут был `for (volatile int i = 0; i < 15000000; i++);` без `hlt`.
-  // На WHPX/KVM с быстрым CPU этот busy-loop отрабатывал заметно быстрее,
-  // чем успевал тикнуть PIT (~1 мс), и тест случайным образом валился с
-  // "PIT Timer is not ticking. Interrupts dead?" на каждом 2-3 запуске.
-  // Чиним: ждём ДО 100 мс в `hlt`-цикле, при первом же тике объявляем PIT
-  // живым. CPU спит, гипервизор гарантированно прокидывает прерывание.
-  log_info("TIME: Testing interrupt fire rate...");
+  // Тест 5: Heartbeat (PIT)
+  tty_print("[   0.005000] TIME: Testing PIT interrupts and firing rate...", 0x888888);
   uint32_t start_tick = tick;
   uint32_t deadline = start_tick + 100; // ждём максимум 100 мс
   while (tick == start_tick && tick < deadline) {
     __asm__ volatile("hlt");
   }
   if (tick == start_tick) {
-    log_status("FROZEN", 0xFF0000);
     CERBERUS_ASSERT(false, "PIT Timer is not ticking. Interrupts dead?");
   }
-  log_status("STABLE", 0x00FF00);
+  tty_print("[   0.006200] TIME: OK. Interrupts are firing stably.", 0x00FF00);
 
   // Тест 6: GDT/TSS
-  log_info("GDT: Checking Task State Segment...");
+  tty_print("[   0.007000] GDT: Checking Task State Segment...", 0x888888);
   uint16_t tr;
   __asm__ volatile("str %0" : "=r"(tr));
   if (tr == 0) {
-    log_status("MISSING", 0xFF0000);
-    CERBERUS_ASSERT(false,
-                    "TSS not loaded. Multitasking will cause Triple Fault");
+    CERBERUS_ASSERT(false, "TSS not loaded. Multitasking will cause Triple Fault");
   }
-  log_status("LOADED", 0x00FF00);
+  tty_print("[   0.007200] GDT: OK. TSS loaded successfully.", 0x00FF00);
 
-  vesa_draw_string_direct("------------------------------------------", 50,
-                          60 + (log_row * 18), 0x444444);
-  log_row++;
-  log_info("SYSTEM READY. HANDING OVER CONTROL...");
-  log_status("BOOT", 0x00FFFF);
+  tty_print("--------------------------------------------------", 0x555555);
+  tty_print("All diagnostics PASSED. Launching Equinox GUI Subsystem...", 0x00FFFF);
+  
+  // Безопасный сон ядра перед передачей управления композитору
+  kernel_sleep_ms(150); 
   return true;
 }

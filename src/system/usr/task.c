@@ -128,36 +128,32 @@ void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2, uint64_t cr3) {
 }
 
 // task.c
-// В task.c
 uint64_t schedule(uint64_t current_rsp) {
-    // tick++;
     if (!current_task) return current_rsp;
 
     current_task->rsp = current_rsp;
 
-    // Защита от поврежденного ring-list: если у кого-то next == NULL
-    // (или мы как-то выпали из круга), сбрасываемся на task_list, чтобы
-    // не словить #PF на чтении task->running по NULL+0x30.
     task_t* start = current_task;
     int hops = 0;
     do {
         task_t* next = current_task->next;
         if (!next) {
-            if (task_list) {
-                current_task = task_list;
-            } else {
-                return current_rsp;
-            }
+            current_task = task_list ? task_list : start;
         } else {
             current_task = next;
         }
-        // Сторож от вечного цикла в пустом ring-е: если за >2*tasks хопов
-        // не нашли ни одной RUNNING задачи — возвращаемся в idle/kernel.
+
+        // Если время сна вышло, сбрасываем таймер сна
+        if (current_task->sleep_until != 0 && tick >= current_task->sleep_until) {
+            current_task->sleep_until = 0;
+        }
+
         if (++hops > 4096) {
             current_task = (task_list && task_list->running) ? task_list : start;
             break;
         }
-    } while (!current_task->running);
+    // Крутимся в цикле, если задача не готова к работе ИЛИ всё ещё спит
+    } while (!current_task->running || current_task->sleep_until != 0);
 
     uint64_t new_cr3 = (current_task->cr3 == 0) ? kernel_cr3 : current_task->cr3;
     __asm__ volatile("mov %0, %%cr3" : : "r"(new_cr3) : "memory");
@@ -170,6 +166,7 @@ uint64_t schedule(uint64_t current_rsp) {
     
     return current_task->rsp;
 }
+
 void yield(void) {
     __asm__ volatile ("int $32");
 }
