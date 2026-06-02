@@ -3,6 +3,7 @@
 #include "../../../mem/pmm.h"
 #include "../../../mem/vmm.h"
 #include "../../../misc/timer.h"
+#include <stddef.h>
 
 extern void term_print(const char* str); 
 
