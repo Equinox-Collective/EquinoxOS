@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+<head>
+  <title>F1 input test</title>
+</head>
+<body>
+  <h2>F1 input test</h2>
+  <p>Type below. The mirror updates on every keystroke.</p>
+  <input id="name" type="text" value="hi">
+  <p>You typed: <span id="mirror">hi</span></p>
+  <p>Chars: <span id="count">2</span></p>
+  <button id="clear">Clear</button>
+  <script>
+    var inp    = document.getElementById('name');
+    var mirror = document.getElementById('mirror');
+    var count  = document.getElementById('count');
+    var clrBtn = document.getElementById('clear');
+
+    inp.addEventListener('input', function() {
+      mirror.textContent = inp.value;
+      count.textContent  = String(inp.value.length);
+    });
+
+    clrBtn.addEventListener('click', function() {
+      inp.value = '';
+      mirror.textContent = '';
+      count.textContent  = '0';
+    });
+  </script>
+</body>
+</html>

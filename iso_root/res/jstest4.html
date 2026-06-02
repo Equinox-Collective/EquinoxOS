@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+<head><title>F0 button click</title></head>
+<body>
+  <h1 id="title">Click the button</h1>
+  <p id="count">Clicks: 0</p>
+
+  <button id="b1">Press me</button>
+
+  <script>
+    var n = 0;
+    document.getElementById("b1").addEventListener("click", function(ev){
+      n++;
+      document.getElementById("count").textContent = "Clicks: " + n;
+      if (n >= 3) {
+        document.getElementById("title").textContent = "Thanks!";
+      }
+      console.log("[click] count=" + n + " type=" + ev.type);
+    });
+  </script>
+</body>
+</html>

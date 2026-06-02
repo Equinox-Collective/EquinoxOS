@@ -136,6 +136,45 @@ $(BEARSSL_LIB): $(BEARSSL_OBJS)
 
 libbearssl: $(BEARSSL_LIB)
 
+# --- QUICKJS (vendored under third_party/quickjs) -----------------------------
+# Built once as a static library; userspace apps link against it to execute
+# JavaScript. Sources are NEVER patched — all EquinoxOS adaptation happens
+# through SDK headers (sdk/include/pthread.h, alloca.h, sys/time.h),
+# sdk/lib/qjs_time.c (gettimeofday + clock_gettime + gmtime_r), and the
+# -D defines below. See third_party/quickjs/README.equos.md.
+QUICKJS_DIR     := third_party/quickjs
+QUICKJS_INC     := -I./$(QUICKJS_DIR)
+QUICKJS_C_SRCS  := $(QUICKJS_DIR)/quickjs.c \
+                   $(QUICKJS_DIR)/dtoa.c \
+                   $(QUICKJS_DIR)/libregexp.c \
+                   $(QUICKJS_DIR)/libunicode.c
+QUICKJS_OBJS    := $(QUICKJS_C_SRCS:.c=.o)
+QUICKJS_LIB     := $(QUICKJS_DIR)/libquickjs.a
+
+# NO_TM_GMTOFF      : our struct tm has no tm_gmtoff field — fall back to
+#                     the mktime(gmtime_r) - mktime(localtime_r) path
+#                     (both return UTC on EquinoxOS, so offset = 0).
+# _GNU_SOURCE       : enables a few GNU-isms QuickJS' cutils.h expects.
+# -Wno-*            : QuickJS upstream is warning-clean on its own
+#                     toolchain but not against -Wall -Wextra of our
+#                     freestanding cross; silence the noise without
+#                     patching sources.
+QUICKJS_CFLAGS  := $(USER_CFLAGS) $(QUICKJS_INC) \
+                   -DNO_TM_GMTOFF -D_GNU_SOURCE \
+                   -Wno-unused -Wno-sign-compare -Wno-pointer-sign \
+                   -Wno-implicit-fallthrough -Wno-unused-parameter \
+                   -Wno-format -Wno-format-extra-args -Wno-cast-function-type \
+                   -Os
+
+$(QUICKJS_DIR)/%.o: $(QUICKJS_DIR)/%.c
+	$(CC) $(QUICKJS_CFLAGS) -c $< -o $@
+
+$(QUICKJS_LIB): $(QUICKJS_OBJS)
+	@echo === Building libquickjs.a ===
+	$(AR) -rcs $@ $(QUICKJS_OBJS)
+
+libquickjs: $(QUICKJS_LIB)
+
 # --- DOOM ---
 DOOM_DIR = app/doom
 DOOM_SRCS = $(wildcard $(DOOM_DIR)/*.c)
@@ -162,9 +201,15 @@ endif
 ifeq ($(SKIP_BEARSSL),1)
   BEARSSL_DEP =
   TLS_APPS_DEP =
+  # The browser + JS-fetch apps need BearSSL, so the whole QuickJS app set
+  # rides on the same switch: SKIP=bearssl yields a minimal no-TLS build.
+  QUICKJS_DEP =
+  QJS_APPS_DEP =
 else
   BEARSSL_DEP = $(BEARSSL_LIB)
   TLS_APPS_DEP = $(APP_ELFS_TLS)
+  QUICKJS_DEP = $(QUICKJS_LIB)
+  QJS_APPS_DEP = $(APP_ELFS_QJS)
 endif
 
 
@@ -234,6 +279,14 @@ APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_RO
 # explicit rules below because they need (a) BearSSL public headers in the
 # include path and (b) libbearssl.a appended at link time.
 APP_ELFS_TLS    = $(ISO_ROOT)/bin/tlsboot.elf $(ISO_ROOT)/bin/tlstest.elf $(ISO_ROOT)/bin/catest.elf $(ISO_ROOT)/bin/httpsget.elf $(ISO_ROOT)/bin/urlget.elf $(ISO_ROOT)/bin/browser.elf
+APP_ELFS_QJS    = $(ISO_ROOT)/bin/jstest.elf $(ISO_ROOT)/bin/domtest.elf $(ISO_ROOT)/bin/jsdomtest.elf $(ISO_ROOT)/bin/jsfetchtest.elf $(ISO_ROOT)/bin/jspagetest.elf
+
+# DOM tree library — used by domtest, htmlview, browser, and (later) the
+# JS DOM bindings. Lives in its own directory so it isn't auto-folded
+# into $(SDK_OBJS); apps opt in by linking $(DOM_OBJ). Defined here
+# (above the htmlview/browser rules) so make can see it during rule
+# expansion.
+DOM_OBJ := sdk/lib_dom/dom.o
 
 # Phase 5: HTTP/HTTPS client library. Lives in its own directory so it
 # isn't auto-folded into $(SDK_OBJS) — apps that need it append
@@ -245,8 +298,9 @@ HTTP_CLIENT_OBJ := sdk/lib_http/http_client.o
 # this matters when users run `make -j`.
 $(KERNEL_OBJS) $(SDK_OBJS) $(APP_OBJS) $(DOOM_OBJS): | setup
 
-# Заменяем жесткие зависимости BearSSL и TLS-приложений на динамические переменные
-apps: setup $(SDK_OBJS) $(BEARSSL_DEP) $(APP_ELFS_SIMPLE) $(TLS_APPS_DEP) sysgui_app
+# BearSSL / TLS / QuickJS deps are dynamic (see SKIP= switch above) so a
+# `make SKIP=bearssl` minimal build drops them cleanly.
+apps: setup $(SDK_OBJS) $(BEARSSL_DEP) $(QUICKJS_DEP) $(APP_ELFS_SIMPLE) $(TLS_APPS_DEP) $(QJS_APPS_DEP) sysgui_app
 
 $(ISO_ROOT)/bin/%.elf: app/%.o $(SDK_OBJS)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< -o $@
@@ -298,11 +352,103 @@ $(ISO_ROOT)/bin/urlget.elf: app/urlget.o $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(BEARSS
 # variant (full HTTP/HTTPS via the phase-5 client). htmlview.elf is built
 # from the same source without the define and keeps its original local-file
 # loading path, so both binaries coexist.
-app/htmlview_browser.o: app/htmlview.c sdk/include/http_client.h sdk/include/url.h third_party/ca_bundle/ca_bundle.h
-	$(CC) $(USER_CFLAGS) -DBROWSER_BUILD -I./third_party/bearssl/inc -c $< -o $@
+app/htmlview_browser.o: app/htmlview.c sdk/include/http_client.h sdk/include/url.h sdk/include/dom.h third_party/ca_bundle/ca_bundle.h sdk/include/qjs_page.h
+	$(CC) $(USER_CFLAGS) -DBROWSER_BUILD -I./third_party/bearssl/inc -I./third_party/quickjs -c $< -o $@
 
-$(ISO_ROOT)/bin/browser.elf: app/htmlview_browser.o $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(HTTP_CLIENT_OBJ) $(BEARSSL_LIB) -o $@
+# browser.elf links the full QuickJS + DOM-bindings + fetch stack so
+# inline <script> on a loaded page runs through phase J6a / J7.
+#
+# NOTE: prerequisites use immediate variable expansion, so every
+# variable referenced in the browser.elf rule's deps list must be
+# defined ABOVE this point. QJS_HELPERS_OBJ / DOM_JS_OBJ / QJS_FETCH_OBJ
+# (further down) are forward-declared here so the rule below sees them;
+# their recipes still live next to the matching test-app rules to keep
+# the per-phase grouping readable.
+QJS_PAGE_OBJ    := sdk/lib_qjs/qjs_page.o
+QJS_WINDOW_OBJ  := sdk/lib_qjs/qjs_window.o
+QJS_HELPERS_OBJ := sdk/lib_qjs/qjs_helpers.o
+DOM_JS_OBJ      := sdk/lib_qjs/dom_js.o
+QJS_FETCH_OBJ   := sdk/lib_qjs/qjs_fetch.o
+IMAGE_DECODE_OBJ := sdk/lib_image/image_decode.o
+
+sdk/lib_image/image_decode.o: sdk/lib_image/image_decode.c sdk/include/image_decode.h third_party/stb_image/stb_image.h
+	$(CC) $(USER_CFLAGS) -I./third_party/stb_image -Wno-unused-function -Wno-implicit-fallthrough -c $< -o $@
+
+sdk/lib_qjs/qjs_page.o: sdk/lib_qjs/qjs_page.c sdk/include/qjs_page.h sdk/include/qjs_fetch.h sdk/include/qjs_helpers.h sdk/include/dom_js.h sdk/include/qjs_window.h sdk/include/dom.h
+	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -I./third_party/bearssl/inc -c $< -o $@
+
+sdk/lib_qjs/qjs_window.o: sdk/lib_qjs/qjs_window.c sdk/include/qjs_window.h sdk/include/qjs_helpers.h
+	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
+
+$(ISO_ROOT)/bin/browser.elf: app/htmlview_browser.o $(HTTP_CLIENT_OBJ) $(DOM_OBJ) $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(IMAGE_DECODE_OBJ) $(SDK_OBJS) $(QUICKJS_LIB) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(HTTP_CLIENT_OBJ) $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(IMAGE_DECODE_OBJ) $(DOM_OBJ) $(QUICKJS_LIB) $(BEARSSL_LIB) -o $@
+
+# htmlview.elf — explicit rule (overrides the generic %.elf one) so we
+# can link the DOM library. The compile rule for app/htmlview.o still
+# comes from the generic app/%.o pattern.
+app/htmlview.o: app/htmlview.c sdk/include/dom.h
+
+$(ISO_ROOT)/bin/htmlview.elf: app/htmlview.o $(DOM_OBJ) $(SDK_OBJS)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(DOM_OBJ) -o $@
+
+# jstest — smoke test for the vendored QuickJS engine. Covers phases
+# J1 (bytecode + string allocator) and J2 (console.log + Math/Date/JSON).
+#
+# sdk/lib_qjs/qjs_helpers.c lives in its own directory so it isn't
+# auto-folded into $(SDK_OBJS) — apps that don't embed QuickJS shouldn't
+# pay for these helpers. Same pattern as sdk/lib_http/http_client.o.
+# QJS_HELPERS_OBJ is forward-declared near the browser.elf rule above.
+sdk/lib_qjs/qjs_helpers.o: sdk/lib_qjs/qjs_helpers.c sdk/include/qjs_helpers.h
+	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
+
+app/jstest.o: app/jstest.c sdk/include/qjs_helpers.h
+	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
+
+$(ISO_ROOT)/bin/jstest.elf: app/jstest.o $(QJS_HELPERS_OBJ) $(SDK_OBJS) $(QUICKJS_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(QJS_HELPERS_OBJ) $(QUICKJS_LIB) -o $@
+
+# jsdomtest — phase J4: DOM bindings over QuickJS. Pulls together the
+# DOM library, the QuickJS helpers, the DOM<->JS bridge, and QuickJS
+# itself. DOM_JS_OBJ is forward-declared near the browser.elf rule above.
+sdk/lib_qjs/dom_js.o: sdk/lib_qjs/dom_js.c sdk/include/dom_js.h sdk/include/dom.h sdk/include/qjs_helpers.h
+	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
+
+app/jsdomtest.o: app/jsdomtest.c sdk/include/qjs_helpers.h sdk/include/dom_js.h sdk/include/dom.h
+	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
+
+$(ISO_ROOT)/bin/jsdomtest.elf: app/jsdomtest.o $(QJS_HELPERS_OBJ) $(DOM_JS_OBJ) $(DOM_OBJ) $(SDK_OBJS) $(QUICKJS_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(QJS_HELPERS_OBJ) $(DOM_JS_OBJ) $(DOM_OBJ) $(QUICKJS_LIB) -o $@
+
+# jsfetchtest — phase J5: fetch + Promise + microtask pump. Links
+# the http_client + BearSSL chain so the same `fetch` binding can be
+# reused later for real http(s). QJS_FETCH_OBJ is forward-declared near
+# the browser.elf rule above.
+sdk/lib_qjs/qjs_fetch.o: sdk/lib_qjs/qjs_fetch.c sdk/include/qjs_fetch.h sdk/include/http_client.h
+	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -I./third_party/bearssl/inc -c $< -o $@
+
+app/jsfetchtest.o: app/jsfetchtest.c sdk/include/qjs_helpers.h sdk/include/qjs_fetch.h
+	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
+
+$(ISO_ROOT)/bin/jsfetchtest.elf: app/jsfetchtest.o $(QJS_HELPERS_OBJ) $(QJS_FETCH_OBJ) $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(QUICKJS_LIB) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(QJS_HELPERS_OBJ) $(QJS_FETCH_OBJ) $(HTTP_CLIENT_OBJ) $(QUICKJS_LIB) $(BEARSSL_LIB) -o $@
+
+# jspagetest — phase J6a: dom_parse → qjs_run_page_scripts pipeline,
+# without renderer or network. Loads res/jstest.html (an inline-
+# script-bearing page) so the on-load script path is testable offline.
+app/jspagetest.o: app/jspagetest.c sdk/include/qjs_page.h sdk/include/dom.h
+	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
+
+$(ISO_ROOT)/bin/jspagetest.elf: app/jspagetest.o $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(DOM_OBJ) $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(QUICKJS_LIB) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(DOM_OBJ) $(HTTP_CLIENT_OBJ) $(QUICKJS_LIB) $(BEARSSL_LIB) -o $@
+
+sdk/lib_dom/dom.o: sdk/lib_dom/dom.c sdk/include/dom.h
+	$(CC) $(USER_CFLAGS) -c $< -o $@
+
+app/domtest.o: app/domtest.c sdk/include/dom.h
+	$(CC) $(USER_CFLAGS) -c $< -o $@
+
+$(ISO_ROOT)/bin/domtest.elf: app/domtest.o $(DOM_OBJ) $(SDK_OBJS)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(DOM_OBJ) -o $@
 
 # enGUI's app/sysgui/Makefile links sysgui.elf via `$(wildcard ../../sdk/lib/*.o)`,
 # so under parallel make (`make -j` on Linux CI) sysgui_app would race against the
@@ -330,6 +476,12 @@ clean:
 	@if exist $(OBJ_DIR) rmdir /s /q $(OBJ_DIR)
 	@if exist sdk\lib\*.o del /q sdk\lib\*.o
 	@if exist sdk\lib\*.d del /q sdk\lib\*.d
+	@if exist sdk\lib_qjs\*.o del /q sdk\lib_qjs\*.o
+	@if exist sdk\lib_qjs\*.d del /q sdk\lib_qjs\*.d
+	@if exist sdk\lib_dom\*.o del /q sdk\lib_dom\*.o
+	@if exist sdk\lib_dom\*.d del /q sdk\lib_dom\*.d
+	@if exist sdk\lib_http\*.o del /q sdk\lib_http\*.o
+	@if exist sdk\lib_http\*.d del /q sdk\lib_http\*.d
 	@if exist app\*.o del /q app\*.o
 	@if exist app\*.d del /q app\*.d
 	@if exist app\sysgui\*.d del /q app\sysgui\*.d
@@ -345,6 +497,9 @@ else
 clean:
 	@rm -rf $(OBJ_DIR)
 	@rm -f sdk/lib/*.o sdk/lib/*.d
+	@rm -f sdk/lib_qjs/*.o sdk/lib_qjs/*.d
+	@rm -f sdk/lib_dom/*.o sdk/lib_dom/*.d
+	@rm -f sdk/lib_http/*.o sdk/lib_http/*.d
 	@rm -f app/*.o app/*.d
 	@rm -f kernel.elf equos.iso
 	@rm -f app/sysgui/sysgui.elf
@@ -360,7 +515,7 @@ create_hdd: kernel.elf apps $(DOOM_DEP)
 # Переменная DOOM_DEP подставляется динамически
 iso: kernel.elf apps $(DOOM_DEP)
 	@$(call RM_F,equos.iso)
-	xorriso -as mkisofs -b boot/limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table --efi-boot EFI/BOOT/limine-bios-cd.bin -efi-boot-part --efi-boot-image -o equos.iso $(ISO_ROOT)
+	xorriso -as mkisofs -no-pad -b boot/limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table --efi-boot EFI/BOOT/limine-bios-cd.bin -efi-boot-part --efi-boot-image -o equos.iso $(ISO_ROOT)
 
 # --- QEMU ---
 #

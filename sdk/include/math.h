@@ -35,4 +35,44 @@ double modf(double x, double *iptr);
 double fmod(double x, double y);
 double fabs(double x);
 
+/* C99 classification macros — QuickJS uses these in its number /
+ * Math.* code. Map to GCC built-ins; they're constant-foldable and
+ * don't require any libm symbol. */
+#ifndef isnan
+#define isnan(x)     __builtin_isnan(x)
+#endif
+#ifndef isinf
+#define isinf(x)     __builtin_isinf(x)
+#endif
+#ifndef isfinite
+#define isfinite(x)  __builtin_isfinite(x)
+#endif
+#ifndef signbit
+#define signbit(x)   __builtin_signbit(x)
+#endif
+#ifndef copysign
+#define copysign(x,y) __builtin_copysign((x),(y))
+#endif
+
+/* Additional functions QuickJS' Math.* surface needs. Implementations
+ * live in sdk/lib/qjs_math.c (simple but spec-correct). */
+double trunc(double x);
+double round(double x);
+double scalbn(double x, int n);
+long   lrint(double x);
+double hypot(double x, double y);
+double cbrt(double x);
+double exp2(double x);
+double log2(double x);
+double log1p(double x);
+double expm1(double x);
+double sinh(double x);
+double cosh(double x);
+double tanh(double x);
+double asinh(double x);
+double acosh(double x);
+double atanh(double x);
+double fmin(double x, double y);
+double fmax(double x, double y);
+
 #endif
