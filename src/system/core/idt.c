@@ -34,9 +34,23 @@ void init_idt() {
   set_idt_gate(33, (uint64_t)keyboard_handler, sel);
   set_idt_gate(44, (uint64_t)mouse_handler, sel);
   
-  // Системный вызов (с разрешением для Ring 3)
+  // Системный вызов (с разрешением для Ring 3).
+  // На время boot-анимации Nyan Cat ставим ШЛЮЗ-ЛОВУШКУ (trap gate, 0xEF)
+  // вместо interrupt gate (0xEE). Разница только в одном: trap gate НЕ гасит
+  // флаг IF при входе в сискол, поэтому PIT-таймер продолжает тикать даже во
+  // время блокирующих сисколлов (чтения с диска / serial), и анимация не
+  // «замерзает». Как только GUI показал первый кадр (syscall 88), мы вернём
+  // обычный interrupt gate (см. idt_set_syscall_trap_gate(0)), чтобы не менять
+  // модель параллелизма ядра после загрузки.
   set_idt_gate(0x80, (uint64_t)syscall_interrupt_asm, sel);
-  idt[0x80].flags = 0xEE; 
+  idt[0x80].flags = 0xEF;
 
   __asm__ __volatile__("lidt %0" : : "m"(idt_reg));
+}
+
+// Переключение шлюза сискола между trap gate (on=1, IF не гасится) и
+// interrupt gate (on=0, штатное поведение). Запись в уже загруженную IDT
+// действует сразу — CPU читает дескриптор при каждом int 0x80, lidt не нужен.
+void idt_set_syscall_trap_gate(int on) {
+  idt[0x80].flags = on ? 0xEF : 0xEE;
 }

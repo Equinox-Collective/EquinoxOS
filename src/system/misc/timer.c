@@ -11,8 +11,19 @@ volatile uint32_t tick = 0;
  * a header) to avoid pulling the whole net stack into the timer TU. */
 void tcp_tick_with_iface(uint32_t now_ms);
 
+/* Boot-анимация Nyan Cat (см. src/boot/eqstart.c). Пока nyan_boot_active != 0,
+ * крутим гифку прямо из PIT-обработчика, чтобы она не «замирала» во время
+ * блокирующих этапов загрузки. nyan_boot_anim_frame() перерисовывает кадр
+ * только при его смене (раз в ~100 мс), так что нагрузка на IRQ минимальна. */
+extern volatile int nyan_boot_active;
+extern void nyan_boot_anim_frame(void);
+
 void timer_callback() {
   tick++;
+
+  if (nyan_boot_active) {
+    nyan_boot_anim_frame();
+  }
   /* Run the TCP tick at ~100 Hz instead of every PIT IRQ — touching all
    * TCBs every millisecond would be wasteful at 1 kHz. The granularity
    * still gives ~10 ms RTO precision, which is well below the 500 ms

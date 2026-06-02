@@ -5,7 +5,14 @@
 #include "../../../misc/timer.h"
 #include <stddef.h>
 
-extern void term_print(const char* str); 
+extern void term_print(const char* str);
+
+// --- Графический вывод поверх фреймбуфера во время boot ---
+// (объявлено в vesa.h / eqstart.h, но драйвер USB их не инклюдит — берём extern)
+extern uint32_t screen_width;
+extern uint32_t screen_height;
+extern void vesa_draw_string_direct(const char* s, int x, int y, uint32_t fg);
+extern void draw_rect_direct(int x, int y, int w, int h, uint32_t color);
 
 // --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ УСТРОЙСТВА ---
 static uint32_t *virt_frame_list = NULL;
@@ -222,6 +229,18 @@ void uhci_get_device_descriptor(uint32_t io_base) {
 void uhci_test_mouse(uint32_t io_base, uint8_t dev_addr, uint8_t endpoint) {
     term_print("[UHCI] Starting mouse test! Move your mouse in QEMU window...\n");
 
+    // --- Экранная подсказка пользователю на время теста мыши ---
+    // term_print уходит только в serial, поэтому отдельно рисуем крупную
+    // надпись прямо во фронтбуфер по центру сверху. Подложку рисуем тёмной
+    // плашкой, чтобы текст читался поверх диагностического лога.
+    const char *prompt = "MOVE YOUR MOUSE";
+    int prompt_chars = 15;                 // длина строки в символах (8px/символ)
+    int prompt_w = prompt_chars * 8;
+    int prompt_x = (int)screen_width / 2 - prompt_w / 2;
+    int prompt_y = (int)screen_height / 6; // верхняя треть, выше зоны Nyan Cat
+    draw_rect_direct(prompt_x - 12, prompt_y - 8, prompt_w + 24, 32, 0x101830);
+    vesa_draw_string_direct(prompt, prompt_x, prompt_y, 0x00FFFF);
+
     // Выделяем страницу под один TD опроса и буфер
     void *phys_block = pmm_alloc();
     if (!phys_block) return;
@@ -237,6 +256,8 @@ void uhci_test_mouse(uint32_t io_base, uint8_t dev_addr, uint8_t endpoint) {
     int packets_received = 0;
 
     // Считываем 100 успешных перемещений мыши
+    // (Nyan Cat при этом крутится сам — его подрисовывает PIT-таймер, пока
+    //  активен флаг nyan_boot_active, см. src/system/misc/timer.c.)
     while (packets_received < 100) {
         // Конфигурируем TD прерывания на опрос
         virt_td->link_ptr = 1; // Конец списка
@@ -289,6 +310,25 @@ void uhci_test_mouse(uint32_t io_base, uint8_t dev_addr, uint8_t endpoint) {
         }
 
         sleep(10); // Опрос каждые 10 мс
+    }
+
+    // Убираем экранную подсказку — дальше управление уходит к GUI.
+    draw_rect_direct(prompt_x - 12, prompt_y - 8, prompt_w + 24, 32, 0x000000);
+
+    // ВАЖНО: освобождаем USB-мышь (SET_CONFIGURATION 0 = unconfigure). Пока
+    // устройство сконфигурировано, QEMU считает USB-мышь активным указателем
+    // и шлёт движения именно ей, а её после теста уже никто не опрашивает ->
+    // курсор в GUI (он работает от PS/2-мыши, IRQ12) НЕ двигается. После
+    // unconfigure QEMU возвращает фокус указателя на PS/2-мышь.
+    {
+        struct usb_setup_packet release;
+        release.request_type = 0x00; // Host->Device, Standard, Device
+        release.request      = 0x09; // SET_CONFIGURATION
+        release.value        = 0;    // 0 = unconfigure (отпускаем устройство)
+        release.index        = 0;
+        release.length       = 0;
+        uhci_control_transfer(io_base, dev_addr, &release, NULL, 0);
+        term_print("[UHCI] USB Mouse released (unconfigured); PS/2 regains pointer.\n");
     }
 
     term_print("[UHCI] Mouse test completed successfully. Booting to GUI...\n");
@@ -357,7 +397,7 @@ void uhci_configure_mouse(uint32_t io_base) {
 
     // 4. Запускаем тест циклического опроса мыши
     // В QEMU стандартная мышь находится на Endpoint 1 (IN)
-    // uhci_test_mouse(io_base, 1, 1);
+    uhci_test_mouse(io_base, 1, 1);
 }
 
 // --- ИНИЦИАЛИЗАЦИЯ КОНТРОЛЛЕРА ---

@@ -1026,6 +1026,33 @@ void syscall_handler(syscall_regs_t *regs)
     break;
   }
 
+  case 88:
+  { // SYS_BOOT_ANIM_DONE — sysgui сообщает, что первый кадр рабочего стола
+    // уже на экране. Гасим kernel-side boot-анимацию Nyan Cat: дальше
+    // фреймбуфером владеет GUI, и подрисовка гифки из PIT-таймера затирала
+    // бы его. Вызывается ровно при первом present (см. enGUI main.c,
+    // copy_dirty_to_vram). Делать это раньше (в kmain или на GET_VESA_INFO)
+    // нельзя — гифка замёрзнет в зазоре до первого кадра GUI.
+    extern volatile int nyan_boot_active;
+    extern void idt_set_syscall_trap_gate(int on);
+    // Засекаем РЕАЛЬНОЕ время загрузки (tick == мс, PIT 1 кГц) в момент
+    // первого кадра GUI. kmain сохранит его в /boottime для самоподстройки
+    // прогресс-бара на следующем запуске.
+    extern volatile uint32_t tick;
+    extern volatile uint32_t boot_measured_ms;
+    if (boot_measured_ms == 0) {
+      boot_measured_ms = tick;
+    }
+    nyan_boot_active = 0;
+    // Анимация закончилась — возвращаем int 0x80 в режим interrupt gate,
+    // чтобы после загрузки модель параллелизма ядра была прежней (IF=0 во
+    // время сисколлов). На время boot-анимации он был trap gate, чтобы PIT
+    // мог крутить гифку даже во время блокирующих сисколлов.
+    idt_set_syscall_trap_gate(0);
+    regs->rax = 0;
+    break;
+  }
+
   default:
     break;
   }

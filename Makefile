@@ -545,13 +545,27 @@ QEMU_BASE  := -m 512M -boot d \
               -serial stdio \
               -netdev user,id=n0,hostfwd=tcp::2222-:22 \
               -device rtl8139,netdev=n0 \
-			  -usb -device usb-mouse \
+              -device piix3-usb-uhci,id=uhci \
+              -device pci-ohci,id=ohci \
+              -device usb-ehci,id=ehci \
+              -device qemu-xhci,id=xhci \
               -device ac97,audiodev=snd0 -audiodev dsound,id=snd0
 # Перебор акселераторов: первый рабочий используется, иначе TCG.
 QEMU_ACCEL := -accel whpx,kernel-irqchip=off -accel kvm -accel hvf -accel tcg
 
 run:
 	$(QEMU) $(QEMU_BASE) $(QEMU_ACCEL)
+
+# Загрузка С USB-мышью на UHCI: запускает загрузочный тест мыши
+# ("MOVE YOUR MOUSE" + dX/dY). ВАЖНО: пока гостевая ОС конфигурирует
+# USB-мышь, QEMU делает её активным указателем и шлёт движения ЕЙ, а не
+# PS/2 -> курсор в GUI после теста не двигается. Это ограничение QEMU,
+# гость не может вернуть фокус. Чтобы вернуть курсор: монитор Ctrl+Alt+2,
+# `info mice`, `mouse_set <номер PS/2-мыши>`, затем Ctrl+Alt+1.
+# Поэтому обычный `make run` идёт БЕЗ USB-мыши (рабочий курсор в десктопе),
+# а тест мыши смотри здесь.
+run-usb:
+	$(QEMU) $(QEMU_BASE) -device usb-mouse,bus=uhci.0 $(QEMU_ACCEL)
 
 # Run with pure software emulation (no hypervisor). Slower but more
 # deterministic — useful when WHPX/KVM behave oddly with network I/O.

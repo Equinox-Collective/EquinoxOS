@@ -175,8 +175,15 @@ void sys_draw_app_buffer(int x, int y, int w, int h, uint32_t *buffer) {
 // =========================================================================
 
 void network_thread() {
+  extern volatile int nyan_boot_active;
   while (1) {
-    if (!rtl8139_has_data()) { // Если есть такая проверка
+    // Пока крутится boot-анимация Nyan Cat, int 0x80 работает как trap gate
+    // (прерывания не гасятся в сисколлах, чтобы PIT крутил гифку). В этот
+    // момент sysgui может быть прерван таймером посреди kmalloc, поэтому НЕ
+    // трогаем кучу из network_thread — иначе параллельный rtl8139_receive()
+    // (тоже зовёт kmalloc) мог бы её испортить. Пакеты просто копятся в
+    // кольце RTL8139 и будут разобраны после первого кадра GUI.
+    if (nyan_boot_active || !rtl8139_has_data()) {
       yield();
       continue;
     }
@@ -452,6 +459,21 @@ void kmain(void) {
   vfs_register_device(ext2_get_root_node());
   vfs_register_device(fat32_get_root_node());
   serial_puts(COM1, "EXT2 initialized\n");
+
+  // САМОПОДСТРОЙКА прогресс-бара: если в /boottime есть сохранённое с прошлого
+  // запуска реальное время загрузки — используем его как ETA (точнее таймера).
+  // На первом запуске файла нет -> остаётся стартовое BOOT_ETA_MS (48 c).
+  {
+    extern void boot_eta_set(uint32_t ms);
+    uint32_t bt_ino = ext2_resolve_path("/boottime");
+    if (bt_ino) {
+      uint32_t saved = 0;
+      if (ext2_read(bt_ino, 0, sizeof(saved), (uint8_t *)&saved) >= sizeof(saved)) {
+        boot_eta_set(saved);
+        serial_puts(COM1, "Boot ETA loaded from /boottime\n");
+      }
+    }
+  }
   ext2_stress_test_phase1();
   ext2_stress_test_phase2();
   ext2_stress_test_phase3();
@@ -481,9 +503,27 @@ void kmain(void) {
                                     в user-space все страницы шрифта, а не
                                     только первые 4 KiB (см. syscall.c) */
   serial_puts(COM1, "=== EquinoxOS Ready ===\n");
+  // ПРИМЕЧАНИЕ: boot-анимацию Nyan Cat НЕ выключаем здесь — иначе гифка
+  // замёрзнет в промежутке между exec sysgui и первым кадром GUI. Флаг
+  // nyan_boot_active сбрасывается, когда sysgui нарисовал первый кадр рабочего
+  // стола (syscall 88 = SYS_BOOT_ANIM_DONE, см. src/system/usr/syscall.c).
   exec_from_disk("bin/sysgui.elf"); // Загружаем ELF с диска и отдаем планировщику
   serial_puts(COM1, "enGUI spawned as Ring 3 init process\n");
   while (1) {
+    // САМОПОДСТРОЙКА: как только GUI нарисовал первый кадр (syscall 88 выставил
+    // boot_measured_ms = реальное время загрузки в мс), сохраняем его в
+    // /boottime на EXT2-диске — один раз, из нормального контекста. На
+    // следующем запуске это время станет ETA прогресс-бара.
+    {
+      extern volatile uint32_t boot_measured_ms;
+      static int boottime_saved = 0;
+      if (!boottime_saved && boot_measured_ms != 0) {
+        boottime_saved = 1;
+        uint32_t v = boot_measured_ms;
+        ext2_overwrite("/boottime", (const char *)&v, sizeof(v));
+        serial_puts(COM1, "Boot time saved to /boottime\n");
+      }
+    }
     // update_gui();
     if (should_run_app) {
       should_run_app = false;

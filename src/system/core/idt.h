@@ -23,5 +23,7 @@ typedef struct {
 // ВАЖНО: Добавлен третий аргумент uint16_t sel
 void set_idt_gate(int n, uint64_t handler, uint16_t sel);
 void init_idt();
+// on=1 -> trap gate (IF не гасится в сисколле), on=0 -> штатный interrupt gate.
+void idt_set_syscall_trap_gate(int on);
 
 #endif
