@@ -5608,14 +5608,6 @@ int main(int argc, char **argv) {
   for (int i = 0; i < WIN_W * WIN_H; i++)
     fb[i] = CLR_BG;
 
-  /* New sysgui window model: SYS_DRAW_BUFFER is a no-op until the kernel's
-   * k_app_win_active flag is set, and that flag is only raised by
-   * SYS_SET_WINDOW_POS (the WM does this for its own app-containers, but not
-   * for an app launched from the terminal `run`). Register our own window
-   * rect once so the compositor lets our frames reach the screen. Keep it in
-   * sync with the eid_end() blit offset (120,90) below. */
-  _syscall(SYS_SET_WINDOW_POS, 120, 90, WIN_W, WIN_H, 0);
-
   load_page(current_url);
 
   while (1) {
@@ -5761,6 +5753,16 @@ int main(int argc, char **argv) {
     }
 
     render(current_url);
+    /* New sysgui window model: SYS_DRAW_BUFFER is a no-op unless the kernel's
+     * k_app_win_active flag is set, and that flag is only raised by
+     * SYS_SET_WINDOW_POS. The WM raises it for its own app-containers; an app
+     * launched from the terminal `run` must do it itself. We re-assert it
+     * every frame because while we're NOT yet the foreground app sysgui keeps
+     * resetting it to false (setAppWindowPos(0,0,0,0) per frame). Once our
+     * first frame lands we become fg_app_pid and sysgui pauses (it no longer
+     * touches k_app_win_active), so this just wins the initial bootstrap.
+     * Keep the rect in sync with the eid_end() blit offset (120,90). */
+    _syscall(SYS_SET_WINDOW_POS, 120, 90, WIN_W, WIN_H, 0);
     eid_end(&ui, 120, 90);
     sleep(20);
   }
