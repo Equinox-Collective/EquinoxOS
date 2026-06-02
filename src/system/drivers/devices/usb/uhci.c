@@ -357,7 +357,7 @@ void uhci_configure_mouse(uint32_t io_base) {
 
     // 4. Запускаем тест циклического опроса мыши
     // В QEMU стандартная мышь находится на Endpoint 1 (IN)
-    uhci_test_mouse(io_base, 1, 1);
+    // uhci_test_mouse(io_base, 1, 1);
 }
 
 // --- ИНИЦИАЛИЗАЦИЯ КОНТРОЛЛЕРА ---
