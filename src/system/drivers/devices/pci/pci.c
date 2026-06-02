@@ -2,9 +2,15 @@
 #include "../../../core/io.h"
 #include "../../../drivers/hardware/net/rtl8139.h"
 #include "../../../drivers/devices/audio/ac97.h"
+#include "../../../mem/vmm.h" // Для vmm_map и флагов страниц
 
-extern void uhci_init(uint8_t bus, uint8_t slot, uint8_t func, uint32_t io_base);
 extern void term_print(const char* str); 
+
+// Импортируем точки входа для всех USB-контроллеров
+extern void uhci_init(uint8_t bus, uint8_t slot, uint8_t func, uint32_t io_base);
+extern void ohci_init(uint8_t bus, uint8_t slot, uint8_t func, uintptr_t mmio_base);
+extern void ehci_init(uint8_t bus, uint8_t slot, uint8_t func, uintptr_t mmio_base);
+extern void xhci_init(uint8_t bus, uint8_t slot, uint8_t func, uintptr_t mmio_base);
 
 // --- ПОРТЫ PCI ---
 #define PCI_CONFIG_ADDRESS 0xCF8
@@ -43,7 +49,6 @@ void pci_write_word(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset, uin
     outw(PCI_CONFIG_DATA + (offset & 2), val);
 }
 
-// Вспомогательный хелпер для безопасного вывода 16-битных HEX-чисел в лог
 static void print_hex_16(uint16_t val) {
     char buf[5];
     const char* hex = "0123456789ABCDEF";
@@ -53,6 +58,32 @@ static void print_hex_16(uint16_t val) {
     }
     buf[4] = '\0';
     term_print(buf);
+}
+
+// =========================================================================
+//              УНИВЕРСАЛЬНЫЙ ТРАНСЛЯТОР MMIO БЕЗ КЭШИРОВАНИЯ
+// =========================================================================
+
+void *pci_map_mmio(uint64_t phys_addr, uint32_t size) {
+    uint64_t cr3_val;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3_val));
+    page_table_t *pml4 = (page_table_t *)VIRT(cr3_val & ~0xFFFULL);
+
+    // Свободный виртуальный диапазон в верхней половине ядра под MMIO
+    static uint64_t mmio_virt_ptr = 0xFFFFC20000000000;
+    uint64_t virt_start = mmio_virt_ptr;
+    
+    uint32_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    mmio_virt_ptr += (pages * PAGE_SIZE);
+
+    // Мапим физику на виртуальные адреса с отключенным кэшем (PCD | PWT)
+    for (uint32_t i = 0; i < pages; i++) {
+        vmm_map(pml4, virt_start + (i * PAGE_SIZE), (phys_addr & ~0xFFFULL) + (i * PAGE_SIZE),
+                PTE_PRESENT | PTE_WRITABLE | PTE_PCD | PTE_PWT);
+    }
+
+    // Возвращаем виртуальный адрес с сохранением смещения внутри страницы
+    return (void *)(virt_start + (phys_addr & 0xFFF));
 }
 
 // =========================================================================
@@ -71,9 +102,8 @@ static void pci_check_function(uint8_t bus, uint8_t slot, uint8_t func) {
     uint8_t subclass   = (class_rev >> 16) & 0xFF;
     uint8_t prog_if    = (class_rev >> 8)  & 0xFF;
 
-    // ВЫВОДИМ КАЖДОЕ НАЙДЕННОЕ УСТРОЙСТВО НА ШИНЕ PCI
     term_print("[PCI Dev] BDF: ");
-    print_hex_16((bus << 8) | (slot << 3) | func); // Bus:Device:Func
+    print_hex_16((bus << 8) | (slot << 3) | func);
     term_print(" | Ven:Dev ");
     print_hex_16(vendor);
     term_print(":");
@@ -84,7 +114,7 @@ static void pci_check_function(uint8_t bus, uint8_t slot, uint8_t func) {
     print_hex_16(prog_if);
     term_print("\n");
 
-    // --- 1. Realtek RTL8139 ---
+    // --- Realtek RTL8139 ---
     if (vendor == 0x10EC && device == 0x8139) {
         term_print("[PCI] Initializing RTL8139...\n");
         uint16_t command = pci_read_dword(bus, slot, func, PCI_REG_COMMAND) & 0xFFFF;
@@ -95,7 +125,7 @@ static void pci_check_function(uint8_t bus, uint8_t slot, uint8_t func) {
         return;
     }
 
-    // --- 2. Intel AC'97 Audio ---
+    // --- Intel AC'97 Audio ---
     if (vendor == 0x8086 && (device == 0x2415 || device == 0x2425)) {
         term_print("[PCI] Initializing AC'97 Audio...\n");
         uint16_t command = pci_read_dword(bus, slot, func, PCI_REG_COMMAND) & 0xFFFF;
@@ -108,12 +138,12 @@ static void pci_check_function(uint8_t bus, uint8_t slot, uint8_t func) {
         return;
     }
 
-    // --- 3. USB Хост-Контроллеры ---
+    // --- USB Хост-Контроллеры ---
     if (class_code == 0x0C && subclass == 0x03) {
         uint16_t command = pci_read_dword(bus, slot, func, PCI_REG_COMMAND) & 0xFFFF;
         command |= PCI_CMD_BUS_MASTER;
 
-        if (prog_if == 0x00) { // UHCI использует IO-порты
+        if (prog_if == 0x00) { // UHCI (IO-порты)
             command |= PCI_CMD_IO_SPACE;
             pci_write_word(bus, slot, func, PCI_REG_COMMAND, command);
 
@@ -123,20 +153,36 @@ static void pci_check_function(uint8_t bus, uint8_t slot, uint8_t func) {
             term_print("[PCI] Found USB UHCI Controller (USB 1.1)!\n");
             uhci_init(bus, slot, func, io_base);
 
-        } else if (prog_if == 0x10) { // OHCI
+        } else if (prog_if == 0x10) { // OHCI (MMIO, BAR0)
             command |= PCI_CMD_MEM_SPACE;
             pci_write_word(bus, slot, func, PCI_REG_COMMAND, command);
-            term_print("[PCI] Found USB OHCI Controller (USB 1.1) [Not implemented].\n");
 
-        } else if (prog_if == 0x20) { // EHCI
-            command |= PCI_CMD_MEM_SPACE;
-            pci_write_word(bus, slot, func, PCI_REG_COMMAND, command);
-            term_print("[PCI] Found USB EHCI Controller (USB 2.0) [Not implemented].\n");
+            uint32_t bar0 = pci_read_dword(bus, slot, func, PCI_REG_BAR0);
+            void *mapped_mmio = pci_map_mmio(bar0, 4096); // мапим 4 КБ под регистры
 
-        } else if (prog_if == 0x30) { // xHCI
+            term_print("[PCI] Found USB OHCI Controller (USB 1.1)!\n");
+            ohci_init(bus, slot, func, (uintptr_t)mapped_mmio);
+
+        } else if (prog_if == 0x20) { // EHCI (MMIO, BAR0)
             command |= PCI_CMD_MEM_SPACE;
             pci_write_word(bus, slot, func, PCI_REG_COMMAND, command);
-            term_print("[PCI] Found USB xHCI Controller (USB 3.0) [Not implemented].\n");
+
+            uint32_t bar0 = pci_read_dword(bus, slot, func, PCI_REG_BAR0);
+            void *mapped_mmio = pci_map_mmio(bar0, 4096);
+
+            term_print("[PCI] Found USB EHCI Controller (USB 2.0)!\n");
+            ehci_init(bus, slot, func, (uintptr_t)mapped_mmio);
+
+        } else if (prog_if == 0x30) { // xHCI (MMIO, BAR0)
+            command |= PCI_CMD_MEM_SPACE;
+            pci_write_word(bus, slot, func, PCI_REG_COMMAND, command);
+
+            uint32_t bar0 = pci_read_dword(bus, slot, func, PCI_REG_BAR0);
+            // xHCI требует больше адресного пространства под регистры (обычно мапят 64 КБ)
+            void *mapped_mmio = pci_map_mmio(bar0, 65536);
+
+            term_print("[PCI] Found USB xHCI Controller (USB 3.0)!\n");
+            xhci_init(bus, slot, func, (uintptr_t)mapped_mmio);
         }
     }
 }
