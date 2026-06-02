@@ -180,6 +180,39 @@ DOOM_DIR = app/doom
 DOOM_SRCS = $(wildcard $(DOOM_DIR)/*.c)
 DOOM_OBJS = $(patsubst $(DOOM_DIR)/%.c, $(OBJ_DIR)/doom/%.o, $(DOOM_SRCS))
 
+
+# --- OPTIONAL COMPONENT SKIPS ---
+# Позволяет пропускать тяжелые компоненты при разработке (например, при cleanrun).
+# Поддерживает синтаксис SKIP=doom,bearssl или отдельные флаги SKIP_DOOM=1 / SKIP_BEARSSL=1.
+ifneq ($(findstring doom,$(SKIP)),)
+  SKIP_DOOM = 1
+endif
+ifneq ($(findstring bearssl,$(SKIP)),)
+  SKIP_BEARSSL = 1
+endif
+
+# Определение зависимостей на основе флагов пропуска
+ifeq ($(SKIP_DOOM),1)
+  DOOM_DEP =
+else
+  DOOM_DEP = doom.elf
+endif
+
+ifeq ($(SKIP_BEARSSL),1)
+  BEARSSL_DEP =
+  TLS_APPS_DEP =
+  # The browser + JS-fetch apps need BearSSL, so the whole QuickJS app set
+  # rides on the same switch: SKIP=bearssl yields a minimal no-TLS build.
+  QUICKJS_DEP =
+  QJS_APPS_DEP =
+else
+  BEARSSL_DEP = $(BEARSSL_LIB)
+  TLS_APPS_DEP = $(APP_ELFS_TLS)
+  QUICKJS_DEP = $(QUICKJS_LIB)
+  QJS_APPS_DEP = $(APP_ELFS_QJS)
+endif
+
+
 # --- MAIN RULES ---
 
 # Full local build: compile everything, generate hdd.img, then build the ISO.
@@ -265,7 +298,9 @@ HTTP_CLIENT_OBJ := sdk/lib_http/http_client.o
 # this matters when users run `make -j`.
 $(KERNEL_OBJS) $(SDK_OBJS) $(APP_OBJS) $(DOOM_OBJS): | setup
 
-apps: setup $(SDK_OBJS) $(BEARSSL_LIB) $(QUICKJS_LIB) $(APP_ELFS_SIMPLE) $(APP_ELFS_TLS) $(APP_ELFS_QJS) sysgui_app
+# BearSSL / TLS / QuickJS deps are dynamic (see SKIP= switch above) so a
+# `make SKIP=bearssl` minimal build drops them cleanly.
+apps: setup $(SDK_OBJS) $(BEARSSL_DEP) $(QUICKJS_DEP) $(APP_ELFS_SIMPLE) $(TLS_APPS_DEP) $(QJS_APPS_DEP) sysgui_app
 
 $(ISO_ROOT)/bin/%.elf: app/%.o $(SDK_OBJS)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< -o $@
@@ -432,6 +467,8 @@ sysgui_app: $(SDK_OBJS)
 	@$(call CP_F,app/sysgui/scripts/paint.lua,iso_root/res/sysgui/paint.lua)
 	@$(call CP_F,app/sysgui/scripts/explorer.lua,iso_root/res/sysgui/explorer.lua)
 	@$(call CP_F,app/sysgui/scripts/notepad.lua,iso_root/res/sysgui/notepad.lua)
+	@$(call CP_F,app/sysgui/scripts/BOOTSOUND.wav,iso_root/res/sysgui/BOOTSOUND.wav)
+	@$(call CP_F,app/sysgui/scripts/bootvid.lua,iso_root/res/sysgui/bootvid.lua)
 
 # --- SYSTEM RULES ------------------------------------------------------------
 ifeq ($(OS),Windows_NT)
@@ -447,6 +484,10 @@ clean:
 	@if exist sdk\lib_http\*.d del /q sdk\lib_http\*.d
 	@if exist app\*.o del /q app\*.o
 	@if exist app\*.d del /q app\*.d
+	@if exist app\sysgui\*.d del /q app\sysgui\*.d
+	@if exist app\sysgui\*.o del /q app\sysgui\*.o
+	@if exist app\sysgui\lua\*.o del /q app\sysgui\lua\*.o
+	@if exist app\sysgui\lua\*.d del /q app\sysgui\lua\*.d
 	@if exist kernel.elf del /q kernel.elf
 	@if exist equos.iso del /q equos.iso
 	@if exist app\sysgui\sysgui.elf del /q app\sysgui\sysgui.elf
@@ -466,11 +507,13 @@ clean:
 	@rm -f third_party/bearssl/libbearssl.a
 endif
 
-create_hdd: kernel.elf apps doom.elf
+# Переменная DOOM_DEP подставляется динамически
+create_hdd: kernel.elf apps $(DOOM_DEP)
 	@echo --- Generating EXT2 hdd.img ---
 	python WINDOWS_ext2.py
 
-iso: kernel.elf apps doom.elf
+# Переменная DOOM_DEP подставляется динамически
+iso: kernel.elf apps $(DOOM_DEP)
 	@$(call RM_F,equos.iso)
 	xorriso -as mkisofs -no-pad -b boot/limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table --efi-boot EFI/BOOT/limine-bios-cd.bin -efi-boot-part --efi-boot-image -o equos.iso $(ISO_ROOT)
 
