@@ -155,6 +155,8 @@ The OS ships a full desktop environment with the following apps:
 run bin/browser.elf https://equinoxos.duckdns.org/
 ```
 
+> ⚠️ **Known limitation:** some websites can still bring the OS down with a kernel panic. This is a known issue and is being actively worked on — it will be fixed soon.
+
 ---
 
 ## ⌨️ Developer API (EquinoxOS SDK)
