@@ -514,6 +514,11 @@ typedef struct {
   uint8_t  color_run_count;
   uint16_t color_run_start[MAX_COLOR_RUNS];
   uint32_t color_run_color[MAX_COLOR_RUNS];
+  /* R6/B7b: per-run inline BACKGROUND (0 = none). Lets an inline
+   * <code> chip paint a tight box around just its own characters
+   * instead of the whole mixed line getting one greedy STYLE_CODE
+   * box (or none). Runs share the boundaries of color_run_start[]. */
+  uint32_t color_run_bg[MAX_COLOR_RUNS];
 } line_t;
 
 static uint32_t fb[WIN_W * WIN_H];
@@ -1970,6 +1975,7 @@ static int decode_entity(const char *src, char *out) {
  * many direct push_line() callers (headings, blank lines, image rows) are
  * never affected and keep the single-css_color path. */
 static uint32_t g_inline_colors[LINE_BYTES];
+static uint32_t g_inline_bg[LINE_BYTES];   /* parallel per-byte inline bg (0=none) */
 static bool     g_inline_colors_active = false;
 
 /* Like utf8_to_ascii but also carries a per-byte colour. in_col is indexed
@@ -1979,7 +1985,8 @@ static bool     g_inline_colors_active = false;
  * Cyrillic, etc.). */
 static int utf8_to_ascii_col(const char *in, int in_len, char *out,
                              int out_cap, const uint32_t *in_col,
-                             uint32_t *out_col) {
+                             uint32_t *out_col, const uint32_t *in_bg,
+                             uint32_t *out_bg) {
   if (out_cap <= 0) return 0;
   int w = 0;
   const unsigned char *p = (const unsigned char *)in;
@@ -1989,23 +1996,26 @@ static int utf8_to_ascii_col(const char *in, int in_len, char *out,
     uint32_t cp = 0;
     int n = utf8_decode_one(p, rem, &cp);
     if (n <= 0) break;
-    uint32_t c = in_col ? in_col[off] : 0;
+    uint32_t c  = in_col ? in_col[off] : 0;
+    uint32_t cb = in_bg  ? in_bg[off]  : 0;
     p += n; rem -= n; off += n;
 
     if (cp < 0x80) {
-      out[w] = (char)cp; out_col[w] = c; w++;
+      out[w] = (char)cp; out_col[w] = c; out_bg[w] = cb; w++;
       continue;
     }
     if (cp >= 0x0400 && cp <= 0x04FF) {
       if (w + 2 >= out_cap) break;
-      out[w] = (char)(0xC0 | (cp >> 6)); out_col[w] = c; w++;
-      out[w] = (char)(0x80 | (cp & 0x3F)); out_col[w] = c; w++;
+      out[w] = (char)(0xC0 | (cp >> 6)); out_col[w] = c; out_bg[w] = cb; w++;
+      out[w] = (char)(0x80 | (cp & 0x3F)); out_col[w] = c; out_bg[w] = cb; w++;
       continue;
     }
     const char *sub = cp_to_ascii_fallback(cp);
     if (!sub) sub = cp_to_translit(cp);
     if (!sub) continue;
-    while (*sub && w < out_cap - 1) { out[w] = *sub++; out_col[w] = c; w++; }
+    while (*sub && w < out_cap - 1) {
+      out[w] = *sub++; out_col[w] = c; out_bg[w] = cb; w++;
+    }
   }
   out[w] = 0;
   return w;
@@ -2035,17 +2045,20 @@ static void push_line(const char *text, int len, line_style_t style,
   if (len > 0) g_inline_colors_active = false;
 
   char norm_buf[LINE_BYTES];
-  /* static (not stack): push_line is never reentrant, and three LINE_BYTES
-   * arrays on the stack would add ~2.5 KB to a deeply-recursive walk. */
+  /* static (not stack): push_line is never reentrant, and these LINE_BYTES
+   * arrays on the stack would add ~5 KB to a deeply-recursive walk. */
   static uint32_t norm_cols[LINE_BYTES];
+  static uint32_t norm_bg[LINE_BYTES];
   int  norm_len;
   if (inline_cols)
     norm_len = utf8_to_ascii_col(text, len, norm_buf, sizeof(norm_buf),
-                                 g_inline_colors, norm_cols);
+                                 g_inline_colors, norm_cols,
+                                 g_inline_bg, norm_bg);
   else
     norm_len = utf8_to_ascii(text, len, norm_buf, sizeof(norm_buf));
 
   static uint32_t text_cols[LINE_BYTES];
+  static uint32_t text_bg[LINE_BYTES];
   int  out_w = 0, cols = 0;
   for (int i = 0; i < norm_len && cols < LINE_CHARS; ) {
     unsigned char b = (unsigned char)norm_buf[i];
@@ -2056,7 +2069,8 @@ static void push_line(const char *text, int len, line_style_t style,
     if (i + adv > norm_len) break;
     if (out_w + adv >= (int)sizeof(lines[line_count].text)) break;
     for (int k = 0; k < adv; k++) {
-      if (inline_cols) text_cols[out_w] = norm_cols[i + k];
+      if (inline_cols) { text_cols[out_w] = norm_cols[i + k];
+                         text_bg[out_w]   = norm_bg[i + k]; }
       lines[line_count].text[out_w++] = norm_buf[i + k];
     }
     i += adv; cols++;
@@ -2093,16 +2107,19 @@ static void push_line(const char *text, int len, line_style_t style,
   lines[line_count].color_run_count = 0;
   if (inline_cols && out_w > 0) {
     uint8_t rc = 0;
-    uint32_t prev = 0x01000000;  /* sentinel; no 0x00RRGGBB equals this */
+    uint32_t prev    = 0x01000000;  /* sentinel; no 0x00RRGGBB equals this */
+    uint32_t prev_bg = 0x01000000;  /* sentinel bg */
     bool overflow = false;
     for (int i = 0; i < out_w; ) {
-      uint32_t c = text_cols[i];
-      if (c != prev) {
+      uint32_t c  = text_cols[i];
+      uint32_t cb = text_bg[i];
+      if (c != prev || cb != prev_bg) {
         if (rc >= MAX_COLOR_RUNS) { overflow = true; break; }
         lines[line_count].color_run_start[rc] = (uint16_t)i;
         lines[line_count].color_run_color[rc] = c;
+        lines[line_count].color_run_bg[rc]    = cb;
         rc++;
-        prev = c;
+        prev = c; prev_bg = cb;
       }
       unsigned char b = (unsigned char)lines[line_count].text[i];
       int adv = (b < 0x80) ? 1 : ((b & 0xE0) == 0xC0) ? 2
@@ -2110,9 +2127,15 @@ static void push_line(const char *text, int len, line_style_t style,
       i += adv;
     }
     uint32_t def = lines[line_count].css_color;
+    bool has_bg_run = false;
+    for (int r = 0; r < rc; r++)
+      if (lines[line_count].color_run_bg[r]) { has_bg_run = true; break; }
+    /* Keep the runs when they add info: any inline bg (a <code> chip), or
+     * >1 run, or a single run whose colour differs from the line default. */
     if (!overflow && rc >= 1 &&
-        !(rc == 1 && (lines[line_count].color_run_color[0] == def ||
-                      lines[line_count].color_run_color[0] == 0)))
+        (has_bg_run || rc > 1 ||
+         !(lines[line_count].color_run_color[0] == def ||
+           lines[line_count].color_run_color[0] == 0)))
       lines[line_count].color_run_count = rc;
   }
 
@@ -2241,19 +2264,40 @@ static void append_word(char *line, int *len, const char *word, int word_len,
    * reconstruct colour runs. WCOL writes the colour for the byte about to
    * be appended at *len. */
   uint32_t wc = style_stack[style_depth].color;
+  /* Per-run inline background: an inline <code> paints a tight chip box.
+   * Only code carries a bg here (other inline bg, e.g. badges, keeps the
+   * existing whole-line / box_bg paths). */
+  uint32_t wbg = (style == STYLE_CODE) ? code_bg_for_theme(body_bg) : 0;
   g_inline_colors_active = true;
-#define WCOL() do { if ((unsigned)(*len) < LINE_BYTES) g_inline_colors[*len] = wc; } while (0)
+#define WCOL() do { if ((unsigned)(*len) < LINE_BYTES) { \
+                      g_inline_colors[*len] = wc; g_inline_bg[*len] = wbg; } \
+                  } while (0)
+
+  /* Short trailing punctuation (".", ",", ")", "!"...) takes no leading
+   * space — it hugs the preceding word (e.g. a closing </code> chip), so
+   * we don't get "equos.iso ." with a gap, and it no longer gets pushed
+   * onto its own line just because a separator space wouldn't fit. */
+  bool punct_only = (word_len > 0 && word_len <= 2);
+  if (punct_only)
+    for (int i = 0; i < word_len; i++) {
+      char c = word[i];
+      if (c != '.' && c != ',' && c != ';' && c != ':' && c != '!' &&
+          c != '?' && c != ')' && c != ']' && c != '}' && c != '\'' &&
+          c != '"') { punct_only = false; break; }
+    }
 
   int cur_cells  = utf8_cells_n(line, *len);
   int word_cells = utf8_cells_n(word, word_len);
+  int sep = (cur_cells > 0 && !punct_only) ? 1 : 0;  /* separator space? */
 
-  if (cur_cells > 0 && cur_cells + 1 + word_cells > max_cells) {
+  if (cur_cells > 0 && cur_cells + sep + word_cells > max_cells) {
     push_line(line, *len, style, indent);
     *len = 0;
     cur_cells = 0;
+    sep = 0;
   }
 
-  if (cur_cells > 0 && *len + 1 < LINE_BYTES) {
+  if (sep && *len + 1 < LINE_BYTES) {
     WCOL(); line[(*len)++] = ' ';
     cur_cells++;
   }
@@ -3341,9 +3385,18 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
     w_set_link_context(n);
     w->style = STYLE_LINK;
     style_stack[style_depth].underline = true;
-  } else if (tag_eq(tag, "code") || tag_eq(tag, "pre")) {
+  } else if (tag_eq(tag, "pre")) {
+    /* Block-level preformatted text: break the line and preserve
+     * internal whitespace/newlines. */
+    w_flush(w);
     w->style = STYLE_CODE;
     w->in_pre = true;
+  } else if (tag_eq(tag, "code")) {
+    /* Inline code chip: change style mid-line, do NOT flush (no forced
+     * line break around the chip) and leave in_pre as inherited. A tight
+     * per-run background is painted around just the code text at draw
+     * time, so it reads as an inline `code` chip inside flowing prose. */
+    w->style = STYLE_CODE;
 #ifdef BROWSER_BUILD
   } else if (tag_eq(tag, "button")) {
     /* R4/F0: emit a widget line. The button's label is its
@@ -3597,10 +3650,16 @@ static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
                   w->style, w->in_list);
       w->word_len = 0;
     }
-  } else if (tag_eq(tag, "code") || tag_eq(tag, "pre")) {
+  } else if (tag_eq(tag, "pre")) {
     w_flush(w);
     w->style = w->in_list ? STYLE_BULLET : STYLE_NORMAL;
     w->in_pre = false;
+  } else if (tag_eq(tag, "code")) {
+    /* Inline code close: just drop back to the surrounding text style,
+     * no flush (keep flowing on the same line). If we're inside a <pre>
+     * keep STYLE_CODE so the rest of the block stays code-styled. */
+    w->style = w->in_pre ? STYLE_CODE
+                         : (w->in_list ? STYLE_BULLET : STYLE_NORMAL);
   }
   (void)save;   /* most paths overwrite explicitly; struct kept for clarity */
 
@@ -4552,7 +4611,11 @@ static void draw_text_line(int x, int y, const line_t *ln) {
         bg_w = 24;
       eid_draw_rect(fb, WIN_W, WIN_H, x - 4, y - 2, bg_w, LINE_H, ln->css_bg);
     }
-  } else if (style == STYLE_CODE) {
+  } else if (style == STYLE_CODE && ln->color_run_count == 0) {
+    /* Pure code line (whole line is one <pre>/<code> run): paint the box
+     * edge to edge of the text. A *mixed* line (color_run_count > 0, e.g.
+     * inline <code> inside prose) instead paints a tight per-run chip box
+     * below, so the surrounding normal text doesn't get boxed too. */
     int bg_w = w + 8;
     if (bg_w < 24)
       bg_w = 24;
@@ -4597,12 +4660,18 @@ static void draw_text_line(int x, int y, const line_t *ln) {
       if (sl >= (int)sizeof(seg)) sl = (int)sizeof(seg) - 1;
       memcpy(seg, text + s, (size_t)sl);
       seg[sl] = '\0';
+      int seg_w = eid_text_width_utf8(seg);
+      /* R6/B7b: tight inline background (a <code> chip) behind just this
+       * run's characters, before the glyphs are drawn over it. */
+      if (ln->color_run_bg[r])
+        eid_draw_rect(fb, WIN_W, WIN_H, rx - 2, y - 2, seg_w + 4, LINE_H,
+                      ln->color_run_bg[r]);
       uint32_t rcol = ln->color_run_color[r] ? ln->color_run_color[r] : color;
       if (ln->css_bold)
         eid_draw_text_bold(fb, WIN_W, WIN_H, rx, y, seg, rcol);
       else
         eid_draw_text(fb, WIN_W, WIN_H, rx, y, seg, rcol);
-      rx += eid_text_width_utf8(seg);
+      rx += seg_w;
     }
   } else {
     /* Bitmap fallback: faux-bold via eid_draw_text_bold, which smears +1px

@@ -53,4 +53,15 @@
 
   <p>Проверка: заголовки фич переносятся внутри колонки (не налезают на соседнюю), текст абзацев виден целиком (не обрезан), кнопки показывают подпись полностью, лид-абзац переносится по ширине колонки.</p>
 
+  <h2>4 · Инлайн-код (чипы) в тексте</h2>
+  <div class="hero-grid">
+    <div>
+      <p>Everything is open source. Build the ISO with <code>make</code>, boot with <code>qemu-system-x86_64 -cdrom equos.iso</code>.</p>
+    </div>
+    <div>
+      <p>Полностью open source. Собери ISO через <code>make</code>, запусти <code>qemu-system-x86_64 -cdrom equos.iso</code>.</p>
+    </div>
+  </div>
+  <p>Проверка: фон-«квадрат» обнимает только сам код (<code>make</code> и команду qemu), а не всю строку с обычным текстом; точка после <code>equos.iso</code> остаётся на той же строке, а не уезжает вниз отдельно.</p>
+
 </body></html>
