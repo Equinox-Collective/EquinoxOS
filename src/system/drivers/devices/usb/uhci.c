@@ -226,7 +226,8 @@ void uhci_test_mouse(uint32_t io_base, uint8_t dev_addr, uint8_t endpoint) {
     void *phys_block = pmm_alloc();
     if (!phys_block) return;
 
-    struct uhci_td_t *virt_td = (struct uhci_td_t *)VIRT(phys_block);
+    // ИСПРАВЛЕНО: убран "struct", так как uhci_td_t — это typedef
+    uhci_td_t *virt_td = (uhci_td_t *)VIRT(phys_block);
     uint8_t *virt_buf = (uint8_t *)virt_td + 32; // Буфер прямо в той же странице за пределами TD
     
     uint32_t phys_td = (uint32_t)(uintptr_t)phys_block;
