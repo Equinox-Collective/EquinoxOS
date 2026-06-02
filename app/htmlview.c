@@ -5608,10 +5608,23 @@ int main(int argc, char **argv) {
   for (int i = 0; i < WIN_W * WIN_H; i++)
     fb[i] = CLR_BG;
 
+  /* New sysgui window model: SYS_DRAW_BUFFER is a no-op until the kernel's
+   * k_app_win_active flag is set, and that flag is only raised by
+   * SYS_SET_WINDOW_POS (the WM does this for its own app-containers, but not
+   * for an app launched from the terminal `run`). Register our own window
+   * rect once so the compositor lets our frames reach the screen. Keep it in
+   * sync with the eid_end() blit offset (120,90) below. */
+  _syscall(SYS_SET_WINDOW_POS, 120, 90, WIN_W, WIN_H, 0);
+
   load_page(current_url);
 
   while (1) {
     eid_begin(&ui, fb, WIN_W, WIN_H);
+    /* eid_begin() no longer polls the keyboard itself (sysgui now owns the
+     * scancode FIFO and only feeds its own Lua apps). As a standalone app we
+     * pull the scancode directly; once we've blitted a frame we are the
+     * foreground app (fg_app_pid), so SYS_GET_SCANCODE returns our keys. */
+    ui.last_key = (uint8_t)_syscall(SYS_GET_SCANCODE, 0, 0, 0, 0, 0);
     ui.mx -= 120;
     ui.my -= 90;
 
