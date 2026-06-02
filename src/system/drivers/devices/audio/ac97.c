@@ -52,10 +52,13 @@ void ac97_init(uint32_t nam, uint32_t nab) {
     bdl = (ac97_bdl_t*)(bdl_phys + hhdm_offset);
     memset(bdl, 0, 4096);
     
-    // Заполняем BDL пустышками, чтобы не было паник
+    // Выделяем одну страницу тишины для безопасной инициализации BDL
+    uint64_t silent_page_phys = (uintptr_t)pmm_alloc();
+    memset((void*)(silent_page_phys + hhdm_offset), 0, 4096);
+
     for(int i=0; i<32; i++) {
-        bdl[i].pointer = 0;
-        bdl[i].length = 0;
+        bdl[i].pointer = (uint32_t)silent_page_phys;
+        bdl[i].length = 4; 
         bdl[i].flags = (1 << 15); // Только прерывание
     }
 
@@ -65,17 +68,15 @@ void ac97_init(uint32_t nam, uint32_t nab) {
 
 // src/drivers/audio/ac97.c
 void ac97_play_at_idx(int idx, void* phys_addr, uint32_t len) {
+    // ФИКС МУТА: Снимаем аппаратный мут, который мог остаться после ac97_stop()
+    outw(bar_nam + 0x02, 0x0000); // Размутируем Master Volume (0x0000 = макс. громкость)
+
     bdl[idx].pointer = (uint32_t)(uintptr_t)phys_addr;
-    // ВАЖНО: len / 2 - это количество 16-битных отсчетов.
-    // Если Дум прислал 1372 кадра (стерео), то байт будет 1372 * 4 = 5488.
-    // bdl.length должен быть 2744.
     bdl[idx].length = (uint16_t)(len / 2); 
     bdl[idx].flags = (1 << 15); 
 
     outw(bar_nab + 0x16, 0x1C); // Чистим статус
     
-    // Ставим LVI на этот индекс. 
-    // Карта проиграет его и остановится, если мы не подкинем следующий.
     outb(bar_nab + 0x15, idx); 
 
     if (!(inb(bar_nab + 0x1B) & 0x01)) {
@@ -93,4 +94,10 @@ void ac97_set_rate(uint32_t rate) {
 void ac97_stop() {
     outb(bar_nab + 0x1B, 0x00); // Stop DMA
     outw(bar_nam + 0x02, 0x8000); // Mute
+}
+
+void ac97_set_bdl_entry(int idx, void* phys_addr) {
+    bdl[idx].pointer = (uint32_t)(uintptr_t)phys_addr;
+    bdl[idx].length = 4; // Плеер проиграет 4 семпла тишины
+    bdl[idx].flags = (1 << 15);
 }

@@ -7,6 +7,9 @@
 #include <stdio.h>
 #include "w_wad.h"
 #include "z_zone.h"
+#include <math.h>
+#include <stddef.h>
+#include <stdbool.h>
 
 // --- Заглушки для линкера (ресемплинг) ---
 int use_libsamplerate = 0;
@@ -22,26 +25,19 @@ static int dg_center_y = 0;
 static int dg_center_ready = 0;
 
 static void dg_compute_center(void) {
-    // RAX = phys_fb, RBX = screen_width, RCX = screen_height, RDX = pitch.
-    // _syscall возвращает только RAX, поэтому используем inline asm,
-    // как делает sdk при необходимости. Проще: вызвать syscall и
-    // забрать RBX/RCX через сохранённые регистры.
-    uint64_t w = 0, h = 0;
+    uint64_t phys_fb, w, h, pitch;
+    // Правильный способ забрать все регистры из syscall в GCC
     __asm__ volatile (
         "movq $32, %%rax\n\t"
         "int $0x80\n\t"
-        "movq %%rbx, %0\n\t"
-        "movq %%rcx, %1\n\t"
-        : "=r"(w), "=r"(h)
-        :
-        : "rax", "rbx", "rcx", "rdx", "memory"
+        : "=a"(phys_fb), "=b"(w), "=c"(h), "=d"(pitch)
+        : 
+        : "memory"
     );
-    int sw = (int)w, sh = (int)h;
-    if (sw <= 0 || sh <= 0) { sw = 1024; sh = 768; }  // fallback
-    dg_center_x = (sw - DOOMGENERIC_RESX) / 2;
-    dg_center_y = (sh - DOOMGENERIC_RESY) / 2;
-    if (dg_center_x < 0) dg_center_x = 0;
-    if (dg_center_y < 0) dg_center_y = 0;
+
+    if (w == 0 || h == 0) { w = 1024; h = 768; }
+    dg_center_x = (int)(w - DOOMGENERIC_RESX) / 2;
+    dg_center_y = (int)(h - DOOMGENERIC_RESY) / 2;
     dg_center_ready = 1;
 }
 
@@ -49,23 +45,29 @@ void DG_Init() {
     // Чистим буфер клавиатуры при старте
     for(int i = 0; i < 16; i++) _syscall(9, 0, 0, 0, 0, 0);
     dg_compute_center();
+
+    // ЖЕСТКИЙ ФОРС ЗВУКА: Перебиваем настройки из кривого default.cfg
+    // И гарантируем, что Chocolate Doom выберет наш звуковой модуль (SNDDEVICE_SB)
+    extern int snd_sfxdevice;
+    extern int snd_musicdevice;
+    snd_sfxdevice = 3;   // SNDDEVICE_SB
+    snd_musicdevice = 3; // SNDDEVICE_SB
 }
 
 void DG_DrawFrame() {
-  uint64_t win_x = 0, win_y = 0;
+    uint64_t win_x = 0, win_y = 0;
 
-  // Вызываем SYS_GET_WINDOW_POS (33), чтобы узнать, где Lua нарисовала окно
-  __asm__ volatile("movq $33, %%rax\n\t"
-                   "int $0x80\n\t"
-                   "movq %%rax, %0\n\t"
-                   "movq %%rbx, %1\n\t"
-                   : "=r"(win_x), "=r"(win_y)
-                   :
-                   : "rax", "rbx");
+    // Забираем координаты окна из ядра
+    __asm__ volatile (
+        "movq $33, %%rax\n\t"
+        "int $0x80\n\t"
+        : "=a"(win_x), "=b"(win_y)
+        : 
+        : "memory"
+    );
 
-  // Рисуем ПРЯМО ВНУТРЬ окна (с учетом заголовка, если нужно, прибавляем +0)
-  _syscall(SYS_DRAW_BUFFER, (int)win_x, (int)win_y, DOOMGENERIC_RESX,
-           DOOMGENERIC_RESY, (uintptr_t)DG_ScreenBuffer);
+    // Если координаты нулевые (игра в фоне), ядро само сделает break в SYS_DRAW_BUFFER
+    _syscall(SYS_DRAW_BUFFER, (int)win_x, (int)win_y, DOOMGENERIC_RESX, DOOMGENERIC_RESY, (uintptr_t)DG_ScreenBuffer);
 }
 
 void DG_SleepMs(uint32_t ms) {
@@ -107,11 +109,29 @@ typedef struct {
     int in_use;
 } sfx_channel_t;
 
-static sfx_channel_t channels[MAX_CHANNELS];
+typedef struct {
+    int channel;
+    int note;
+    uint32_t phase;
+    uint32_t phase_step;
+    int active;
+    int volume;
+} synth_voice_t;
 
+#define MAX_SYNTH_VOICES 16
 #define TARGET_FREQ 44100
 #define DOOM_FREQ 11025
 #define MIX_BUFFER_SIZE 1260 // 44100 / 35 fps (идеально для Doom)
+
+static sfx_channel_t channels[MAX_CHANNELS];
+static synth_voice_t synth_voices[MAX_SYNTH_VOICES];
+
+static uint8_t* mus_data = NULL;
+static uint32_t mus_pos = 0;
+static uint32_t mus_delay_ticks = 0;
+static boolean mus_playing = false;
+static boolean mus_looping = false;
+static int32_t mus_sample_counter = 0;
 
 static void I_Equos_UpdateSound(void) {
     static int16_t mixbuffer[MIX_BUFFER_SIZE * 2];
@@ -119,32 +139,172 @@ static void I_Equos_UpdateSound(void) {
 
     uint32_t step = (DOOM_FREQ << 16) / TARGET_FREQ;
 
-    for(int i = 0; i < MAX_CHANNELS; i++) {
-        if(!channels[i].in_use) continue;
-        sfx_channel_t* ch = &channels[i];
+    for (int j = 0; j < MIX_BUFFER_SIZE; j++) {
+        // --- 1. СЕКВЕНСОР MUS (140 Гц) ---
+        if (mus_playing && mus_data) {
+            if (mus_sample_counter <= 0) {
+                while (mus_delay_ticks == 0 && mus_playing) {
+                    uint8_t event = mus_data[mus_pos++];
+                    uint8_t type = (event >> 4) & 7;
+                    uint8_t chan = event & 15;
+                    bool last = (event & 128) != 0;
+                    
+                    if (type == 0) { // Note Off
+                        uint8_t note = mus_data[mus_pos++];
+                        for (int v = 0; v < MAX_SYNTH_VOICES; v++) {
+                            if (synth_voices[v].active && synth_voices[v].channel == chan && synth_voices[v].note == note) {
+                                synth_voices[v].active = 0;
+                            }
+                        }
+                    }
+                    else if (type == 1) { // Note On
+                        uint8_t note_data = mus_data[mus_pos++];
+                        uint8_t note = note_data & 127;
+                        uint8_t velocity = 64;
+                        if (note_data & 128) {
+                            velocity = mus_data[mus_pos++];
+                        }
+                        
+                        int best_voice = -1;
+                        for (int v = 0; v < MAX_SYNTH_VOICES; v++) {
+                            if (!synth_voices[v].active) {
+                                best_voice = v;
+                                break;
+                            }
+                        }
+                        if (best_voice == -1) best_voice = 0;
+                        
+                        synth_voices[best_voice].active = 1;
+                        synth_voices[best_voice].channel = chan;
+                        synth_voices[best_voice].note = note;
+                        synth_voices[best_voice].phase = 0;
+                        synth_voices[best_voice].volume = velocity;
+                        
+                        // Используем точный double для низких частот (баса)
+                        double freq = 440.0 * pow(2.0, (double)(note - 69) / 12.0);
+                        synth_voices[best_voice].phase_step = (uint32_t)((freq * 4294967296.0) / 44100.0);
+                    }
+                    else if (type == 2) { // Pitch bend
+                        uint8_t bend = mus_data[mus_pos++];
+                        double semitones = (double)(bend - 128) / 64.0;
+                        for (int v = 0; v < MAX_SYNTH_VOICES; v++) {
+                            if (synth_voices[v].active && synth_voices[v].channel == chan) {
+                                double freq = 440.0 * pow(2.0, (double)(synth_voices[v].note - 69 + semitones) / 12.0);
+                                synth_voices[v].phase_step = (uint32_t)((freq * 4294967296.0) / 44100.0);
+                            }
+                        }
+                    }
+                    else if (type == 3) { // System Event
+                        mus_pos++;
+                    }
+                    else if (type == 4) { // Controller Change
+                        mus_pos += 2;
+                    }
+                    else if (type == 6) { // Score end
+                        if (mus_looping) {
+                            uint16_t score_start = mus_data[6] | (mus_data[7] << 8);
+                            mus_pos = score_start;
+                        } else {
+                            mus_playing = false;
+                        }
+                    }
+                    
+                    if (last) {
+                        uint32_t delay = 0;
+                        while (1) {
+                            uint8_t byte = mus_data[mus_pos++];
+                            delay = (delay << 7) | (byte & 0x7F);
+                            if (!(byte & 0x80)) break;
+                        }
+                        mus_delay_ticks = delay;
+                    }
+                }
+                
+                // ЭФФЕКТ ГАСЯЩЕГОСЯ УДАРА ДЛЯ БАРАБАНОВ (Канал 9)
+                // Срезаем громкость шума на каждом 140 Гц тике
+                for (int v = 0; v < MAX_SYNTH_VOICES; v++) {
+                    if (synth_voices[v].active && synth_voices[v].channel == 9) {
+                        if (synth_voices[v].volume > 6) {
+                            synth_voices[v].volume -= 6; 
+                        } else {
+                            synth_voices[v].active = 0; // Полностью глушим
+                        }
+                    }
+                }
+
+                if (mus_delay_ticks > 0) {
+                    mus_delay_ticks--;
+                }
+                mus_sample_counter = 315;
+            }
+            mus_sample_counter--;
+        }
+
+        // --- 2. СИНТЕЗ ГОЛОСОВ ---
+        int32_t synth_left = 0;
+        int32_t synth_right = 0;
         
-        int32_t left_v = (254 - ch->sep) * ch->vol / 127;
-        int32_t right_v = ch->sep * ch->vol / 127;
-
-        for(int j = 0; j < MIX_BUFFER_SIZE; j++) {
-            uint32_t src_idx = (ch->pos >> 16);
-            if(src_idx >= ch->length) { ch->in_use = 0; break; }
-
-            // Делим звук на 2 (сдвиг >> 9 вместо >> 8), чтобы не было "перегруза"
-            int32_t sample = ((int32_t)ch->data[src_idx] - 128) << 8;
-            int32_t l = (int32_t)mixbuffer[j*2] + ((sample * left_v) >> 9);
-            int32_t r = (int32_t)mixbuffer[j*2+1] + ((sample * right_v) >> 9);
+        for (int v = 0; v < MAX_SYNTH_VOICES; v++) {
+            if (!synth_voices[v].active) continue;
             
-            // Клиппинг
-            if (l > 32767) l = 32767; else if (l < -32768) l = -32768;
-            if (r > 32767) r = 32767; else if (r < -32768) r = -32768;
+            int32_t val = 0;
+            if (synth_voices[v].channel == 9) { // Барабаны (Шум)
+                static uint32_t noise_seed = 1;
+                noise_seed = noise_seed * 1103515245 + 12345;
+                val = (int16_t)((noise_seed & 0xFFFF) - 32768) / 8; // Пониженная амплитуда шума
+            } else {
+                uint32_t phase = synth_voices[v].phase;
+                if (synth_voices[v].channel % 2 == 0) {
+                    // Четные каналы: Чистая треугольная волна (Громкость 12000)
+                    if (phase < 0x80000000) {
+                        val = -12000 + (int32_t)(((uint64_t)phase * 24000) / 0x80000000ULL);
+                    } else {
+                        val = 12000 - (int32_t)(((uint64_t)(phase - 0x80000000) * 24000) / 0x80000000ULL);
+                    }
+                } else {
+                    // Нечетные каналы: Чистая квадратная волна (Громкость 8000)
+                    val = (phase < 0x80000000) ? 8000 : -8000;
+                }
+                synth_voices[v].phase += synth_voices[v].phase_step;
+            }
+            
+            int32_t mixed = (val * synth_voices[v].volume) / 128;
+            synth_left += mixed;
+            synth_right += mixed;
+        }
 
-            mixbuffer[j*2] = (int16_t)l;
-            mixbuffer[j*2+1] = (int16_t)r;
+        // --- 3. МИКШИРОВАНИЕ ЭФФЕКТОВ (SFX) ---
+        int32_t sfx_left = 0;
+        int32_t sfx_right = 0;
+
+        for (int i = 0; i < MAX_CHANNELS; i++) {
+            if (!channels[i].in_use) continue;
+            sfx_channel_t* ch = &channels[i];
+            
+            int32_t left_v = (254 - ch->sep) * ch->vol / 127;
+            int32_t right_v = ch->sep * ch->vol / 127;
+
+            uint32_t src_idx = (ch->pos >> 16);
+            if (src_idx >= ch->length) { ch->in_use = 0; continue; }
+
+            int32_t sample = ((int32_t)ch->data[src_idx] - 128) << 8;
+            sfx_left += (sample * left_v) >> 9;
+            sfx_right += (sample * right_v) >> 9;
+            
             ch->pos += step;
         }
+
+        // --- 4. ОГРАНИЧЕНИЕ (CLIPPING) ---
+        int32_t l = sfx_left + (synth_left / 2);
+        int32_t r = sfx_right + (synth_right / 2);
+
+        if (l > 32767) l = 32767; else if (l < -32768) l = -32768;
+        if (r > 32767) r = 32767; else if (r < -32768) r = -32768;
+
+        mixbuffer[j * 2] = (int16_t)l;
+        mixbuffer[j * 2 + 1] = (int16_t)r;
     }
-    // Шлем РЕАЛЬНЫЙ размер (frames * 4 байта)
+
     DG_SubmitSamples(mixbuffer, MIX_BUFFER_SIZE);
 }
 
@@ -222,16 +382,52 @@ sound_module_t DG_sound_module = {
 };
 
 // Модуль музыки (заглушка)
-static boolean I_Equos_InitMusic(void) { return true; }
-static void I_Equos_ShutdownMusic(void) {}
+// Модуль музыки
+static boolean I_Equos_InitMusic(void) { 
+    return true; 
+}
+static void I_Equos_ShutdownMusic(void) { 
+    mus_playing = false; 
+}
 static void I_Equos_SetMusicVolume(int vol) {}
-static void I_Equos_PauseMusic(void) {}
-static void I_Equos_ResumeMusic(void) {}
-static void I_Equos_PlaySong(void* handle, boolean looping) {}
-static void I_Equos_StopSong(void) {}
-static void* I_Equos_RegisterSong(void* data, int len) { return (void*)1; }
+static void I_Equos_PauseMusic(void) { 
+    mus_playing = false; 
+}
+static void I_Equos_ResumeMusic(void) { 
+    if (mus_data) mus_playing = true; 
+}
+
+static void* I_Equos_RegisterSong(void* data, int len) { 
+    return data; // Возвращаем указатель на MUS-люмп из WAD
+}
 static void I_Equos_UnRegisterSong(void* handle) {}
-static boolean I_Equos_MusicIsPlaying(void) { return false; }
+
+static void I_Equos_PlaySong(void* handle, boolean looping) {
+    mus_data = (uint8_t*)handle;
+    if (!mus_data) return;
+    
+    // Проверка сигнатуры MUS-файла (0x1A53554D)
+    if (mus_data[0] != 'M' || mus_data[1] != 'U' || mus_data[2] != 'S' || mus_data[3] != 0x1A) {
+        mus_data = NULL;
+        return;
+    }
+    
+    uint16_t score_start = mus_data[6] | (mus_data[7] << 8);
+    mus_pos = score_start;
+    mus_delay_ticks = 0;
+    mus_sample_counter = 0;
+    mus_playing = true;
+    mus_looping = looping;
+    
+    memset(synth_voices, 0, sizeof(synth_voices));
+}
+
+static void I_Equos_StopSong(void) { 
+    mus_playing = false; 
+}
+static boolean I_Equos_MusicIsPlaying(void) { 
+    return mus_playing; 
+}
 static void I_Equos_Poll(void) {}
 
 
