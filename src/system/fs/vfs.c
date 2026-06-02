@@ -48,7 +48,7 @@ void vfs_ls(void) {
     while (dev) {
         term_print("--- Volume: "); term_print(dev->name); term_print(" ---\n");
         if (dev->readdir) {
-            for (int i = 0; i < 64; i++) {
+            for (int i = 0; i < 256; i++) {
                 vfs_dirent_t* de = dev->readdir(dev, i);
                 if (!de) break;
                 term_print("  ");
@@ -69,7 +69,7 @@ uint8_t* vfs_read_file(const char* name, uint32_t* out_size) {
     vfs_node_t* dev = vfs_root->next;
     while (dev) {
         if (dev->readdir && dev->read) {
-            for (int i = 0; i < 64; i++) {
+            for (int i = 0; i < 256; i++) {
                 vfs_dirent_t* de = dev->readdir(dev, i);
                 if (!de) break;
                 if (strcmp(de->name, name) == 0) {

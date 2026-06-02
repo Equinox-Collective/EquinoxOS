@@ -1,0 +1,47 @@
+<html>
+<head><title>N3 fetch() https</title></head>
+<body>
+<h1>fetch() over HTTPS</h1>
+
+<p>target: <span id="u">https://example.com/</span></p>
+
+<button id="go">Fetch</button>
+
+<p>status: <span id="st">(idle)</span></p>
+<p>ok: <span id="ok">-</span></p>
+<p>length: <span id="ln">-</span></p>
+<p>head: <span id="hd">-</span></p>
+<p>error: <span id="er">(none)</span></p>
+
+<script>
+var st = document.getElementById('st');
+var ok = document.getElementById('ok');
+var ln = document.getElementById('ln');
+var hd = document.getElementById('hd');
+var er = document.getElementById('er');
+var go = document.getElementById('go');
+
+function run(){
+  st.textContent = 'fetching...';
+  fetch('https://example.com/').then(function(r){
+    st.textContent = '' + r.status;
+    ok.textContent = r.ok ? 'true' : 'false';
+    return r.text();
+  }).then(function(t){
+    if(typeof t !== 'string'){ er.textContent = 'no text'; return; }
+    ln.textContent = '' + t.length;
+    // show first 60 chars, stripped of newlines, for the status row
+    var head = '';
+    var n = t.length < 60 ? t.length : 60;
+    for(var i=0;i<n;i++){
+      var c = t.charAt(i);
+      head += (c=='\n'||c=='\r') ? ' ' : c;
+    }
+    hd.textContent = head;
+  });
+}
+
+go.addEventListener('click', run);
+</script>
+</body>
+</html>

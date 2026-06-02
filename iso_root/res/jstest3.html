@@ -1,0 +1,49 @@
+<!doctype html>
+<html>
+<head><title>J7 window/storage/timers</title></head>
+<body>
+  <h1 id="hdr">starting</h1>
+
+  <script>
+    // window / location
+    console.log("[w] window === globalThis :", window === globalThis);
+    console.log("[w] location.href         :", JSON.stringify(location.href));
+    console.log("[w] location.protocol     :", JSON.stringify(location.protocol));
+    console.log("[w] location.pathname     :", JSON.stringify(location.pathname));
+
+    // localStorage
+    localStorage.setItem("a", "1");
+    localStorage.setItem("b", "two");
+    localStorage.setItem("a", "1-updated");
+    console.log("[s] length         :", localStorage.length);
+    console.log("[s] getItem('a')   :", JSON.stringify(localStorage.getItem("a")));
+    console.log("[s] getItem('b')   :", JSON.stringify(localStorage.getItem("b")));
+    console.log("[s] getItem('x')   :", localStorage.getItem("x"));
+    localStorage.removeItem("a");
+    console.log("[s] length after rm:", localStorage.length);
+
+    // timers — relative ordering
+    var order = [];
+    setTimeout(function(){ order.push("t-50");  }, 50);
+    setTimeout(function(){ order.push("t-10");  }, 10);
+    var iv = 0, ivId = setInterval(function(){
+      order.push("iv-" + iv);
+      if (++iv >= 3) clearInterval(ivId);
+    }, 20);
+    setTimeout(function(){
+      console.log("[t] order after timers :", JSON.stringify(order));
+    }, 200);
+
+    // DOMContentLoaded + load
+    window.addEventListener("DOMContentLoaded", function(){
+      console.log("[e] DOMContentLoaded fired, hdr was:",
+                  JSON.stringify(document.getElementById("hdr").textContent));
+      document.getElementById("hdr").textContent = "ready";
+    });
+    window.addEventListener("load", function(){
+      console.log("[e] load fired, hdr is now:",
+                  JSON.stringify(document.getElementById("hdr").textContent));
+    });
+  </script>
+</body>
+</html>

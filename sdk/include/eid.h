@@ -47,6 +47,11 @@ void eid_draw_pixel(uint32_t *fb, int win_w, int win_h, int x, int y,
                     uint32_t color);
 void eid_draw_rect(uint32_t *fb, int win_w, int win_h, int x, int y, int w,
                    int h, uint32_t color);
+int  eid_text_width_utf8(const char *text);
+/* Faux-bold bitmap text: 1px smear for weight + extra tracking after caps
+ * so dense all-caps runs (e.g. "QEMU") stay legible instead of gluing. */
+void eid_draw_text_bold(uint32_t *fb, int win_w, int win_h, int x, int y,
+                        const char *text, uint32_t color);
 void eid_draw_text(uint32_t *fb, int win_w, int win_h, int x, int y,
                    const char *text, uint32_t color);
 void eid_draw_line(uint32_t *fb, int win_w, int win_h, int x1, int y1, int x2,
@@ -59,4 +64,11 @@ typedef struct eid_font eid_font_t; // Непрозрачная структур
 eid_font_t *eid_load_font(unsigned char *ttf_data, float size);
 void eid_draw_text_ttf(eid_ctx_t *ctx, eid_font_t *font, int x, int y,
                        const char *text, uint32_t color);
+/* Faux-bold TTF text: each glyph is stamped twice (1px horizontal smear)
+ * to thicken the strokes AND given a small extra advance so the heavier
+ * glyphs don't collide with their neighbours. Use this instead of drawing
+ * eid_draw_text_ttf twice at x and x+1 — that thickens the glyphs without
+ * widening their advance, so words like "QEMU" run together. */
+void eid_draw_text_ttf_bold(eid_ctx_t *ctx, eid_font_t *font, int x, int y,
+                            const char *text, uint32_t color);
 #endif

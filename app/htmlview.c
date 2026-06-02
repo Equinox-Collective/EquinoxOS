@@ -1,9 +1,24 @@
 #include <eid.h>
+#include <eid_ext.h>
 #include <equos.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>     /* malloc — used by <img> in-flex-column downscale */
 #include <string.h>
+#ifdef BROWSER_BUILD
+#include "qjs_window.h"   /* qjs_window_set_history_length proto */
+#include <image_decode.h> /* eq_image_decode for <img> rendering    */
+#endif
+/* dom.h has no BROWSER_BUILD gates and the DOM walker (w_emit_node)
+ * is shared by both builds — include it unconditionally so
+ * apply_css_for_node can reference dom_node_t in either config. */
+#include "dom.h"
+
+/* Defined in sdk/lib/string.c but not declared in sdk/include/string.h yet.
+ * Pulled forward here to silence -Wimplicit-function-declaration in the
+ * <input> type= matcher below. */
+extern int strcasecmp(const char *s1, const char *s2);
 
 #define WIN_W 640
 #define WIN_H 420
@@ -11,7 +26,7 @@
 #define CONTENT_Y 56
 #define CONTENT_W (WIN_W - 36)
 #define LINE_H 18
-#define MAX_LINES 4096
+#define MAX_LINES 1024
 #define LINE_CHARS 74
 
 #define CLR_BG 0xFDFCFC
@@ -33,10 +48,206 @@ static void render(const char *filename);
 static void blank_line(void);
 static void parse_css_declarations_to_state(const char *decl);
 
+/* ── R6/B2: UTF-8 → ASCII fallback ─────────────────────────────
+ *
+ * Our PSF1 console font has only 256 glyphs (ASCII + a CP437-ish
+ * upper half), so any UTF-8 multi-byte sequence reaching it shows up
+ * as garbled high-bit pairs ("ÔÇö" for "—", etc.). Modern hand-written
+ * pages contain *lots* of punctuation in U+2000-2FFF (— … → ★ · ™),
+ * and our target site is bilingual EN/RU, so we also transliterate
+ * Cyrillic into Latin so Russian text remains roughly readable.
+ *
+ * The pipeline runs once per push_line(): decode UTF-8 → codepoint,
+ * substitute via the table below, drop anything else. ASCII is
+ * passed through unchanged. */
+
+/* Decode the first UTF-8 codepoint at *p, returning bytes consumed
+ * (1..4). Sets *cp to the codepoint, or U+FFFD on a malformed
+ * sequence (and consumes a single byte). */
+static int utf8_decode_one(const unsigned char *p, int rem, uint32_t *cp) {
+  if (rem <= 0) { *cp = 0; return 0; }
+  unsigned char b0 = p[0];
+  if (b0 < 0x80) { *cp = b0; return 1; }
+  if ((b0 & 0xE0) == 0xC0 && rem >= 2 && (p[1] & 0xC0) == 0x80) {
+    *cp = ((uint32_t)(b0 & 0x1F) << 6) | (uint32_t)(p[1] & 0x3F);
+    return 2;
+  }
+  if ((b0 & 0xF0) == 0xE0 && rem >= 3 &&
+      (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80) {
+    *cp = ((uint32_t)(b0 & 0x0F) << 12) |
+          ((uint32_t)(p[1] & 0x3F) << 6) |
+          (uint32_t)(p[2] & 0x3F);
+    return 3;
+  }
+  if ((b0 & 0xF8) == 0xF0 && rem >= 4 &&
+      (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80 &&
+      (p[3] & 0xC0) == 0x80) {
+    *cp = ((uint32_t)(b0 & 0x07) << 18) |
+          ((uint32_t)(p[1] & 0x3F) << 12) |
+          ((uint32_t)(p[2] & 0x3F) << 6) |
+          (uint32_t)(p[3] & 0x3F);
+    return 4;
+  }
+  *cp = 0xFFFD;
+  return 1;
+}
+
+/* codepoint → ASCII string (possibly multi-char). NULL means
+ * "no substitution defined". */
+static const char *cp_to_ascii_fallback(uint32_t cp) {
+  switch (cp) {
+    /* Latin-1 punctuation */
+    case 0x00A0: return " ";   /* nbsp                     */
+    case 0x00A9: return "(c)"; /* ©                        */
+    case 0x00AE: return "(r)"; /* ®                        */
+    case 0x00B0: return "*";   /* °                        */
+    case 0x00B7: return "*";   /* ·                        */
+    case 0x00AB: return "<<";  /* «                        */
+    case 0x00BB: return ">>";  /* »                        */
+    case 0x00D7: return "x";   /* ×                        */
+    case 0x00F7: return "/";   /* ÷                        */
+    /* General punctuation */
+    case 0x2010: case 0x2011: case 0x2012: case 0x2013: return "-";
+    case 0x2014: return "--";  /* em dash                  */
+    case 0x2018: case 0x2019: return "'";
+    case 0x201C: case 0x201D: return "\"";
+    case 0x2022: return "*";   /* bullet                   */
+    case 0x2026: return "..."; /* ellipsis                 */
+    case 0x2032: return "'";
+    case 0x2033: return "\"";
+    /* Arrows */
+    case 0x2190: return "<-";
+    case 0x2191: return "^";
+    case 0x2192: return "->";
+    case 0x2193: return "v";
+    case 0x2194: return "<>";
+    case 0x2196: return "<-";
+    case 0x2197: return "->";
+    case 0x2198: return "->";
+    case 0x2199: return "<-";
+    /* Misc symbols */
+    case 0x2605: return "*";   /* ★                        */
+    case 0x2606: return "*";   /* ☆                        */
+    case 0x2713: return "+";   /* ✓                        */
+    case 0x2717: return "x";   /* ✗                        */
+    case 0x2122: return "(tm)";
+    default: return NULL;
+  }
+}
+
+/* Cyrillic transliteration table (U+0410..U+044F).
+ * Capital/lowercase pair-by-pair so we can index by (cp - 0x0410). */
+static const char *cyr_translit[] = {
+  /* 0410 А */ "A",  "B",  "V",  "G",  "D",  "E",  "Zh", "Z",
+  /* 0418 И */ "I",  "J",  "K",  "L",  "M",  "N",  "O",  "P",
+  /* 0420 Р */ "R",  "S",  "T",  "U",  "F",  "H",  "C",  "Ch",
+  /* 0428 Ш */ "Sh", "Sch","\"", "Y",  "'",  "E",  "Yu", "Ya",
+  /* 0430 а */ "a",  "b",  "v",  "g",  "d",  "e",  "zh", "z",
+  /* 0438 и */ "i",  "j",  "k",  "l",  "m",  "n",  "o",  "p",
+  /* 0440 р */ "r",  "s",  "t",  "u",  "f",  "h",  "c",  "ch",
+  /* 0448 ш */ "sh", "sch","\"", "y",  "'",  "e",  "yu", "ya",
+};
+
+static const char *cp_to_translit(uint32_t cp) {
+  if (cp >= 0x0410 && cp <= 0x044F) return cyr_translit[cp - 0x0410];
+  if (cp == 0x0401) return "Yo";   /* Ё */
+  if (cp == 0x0451) return "yo";   /* ё */
+  return NULL;
+}
+
+/* R6/B2c: convert UTF-8 input to *renderer-ready* UTF-8 output.
+ *
+ * Cyrillic Basic (U+0400..U+04FF) now passes straight through —
+ * eid_draw_text knows how to decode UTF-8 and look up the bundled
+ * GNU Unifont Cyrillic glyphs. Everything else stays on the old
+ * path: typographic ASCII subs (en-dash → "--", curly quotes →
+ * "'") and the Cyrillic *transliteration* table is kept ONLY as a
+ * fallback for codepoints outside Basic Cyrillic that previously
+ * had hand-coded substitutions (the Ё/ё specials in
+ * cp_to_translit). Unknown non-ASCII codepoints are dropped
+ * silently (the alternative — '?' — would litter every page that
+ * has any symbol we forgot).
+ *
+ * Returns bytes written (NOT including NUL). out_cap counts bytes,
+ * not codepoints. */
+static int utf8_to_ascii(const char *in, int in_len, char *out, int out_cap) {
+  if (out_cap <= 0) return 0;
+  int w = 0;
+  const unsigned char *p = (const unsigned char *)in;
+  int rem = in_len;
+  while (rem > 0 && w < out_cap - 1) {
+    uint32_t cp = 0;
+    int n = utf8_decode_one(p, rem, &cp);
+    if (n <= 0) break;
+    p += n; rem -= n;
+
+    if (cp < 0x80) {
+      out[w++] = (char)cp;
+      continue;
+    }
+    /* Cyrillic Basic — pass through as raw UTF-8 (2 bytes/codepoint). */
+    if (cp >= 0x0400 && cp <= 0x04FF) {
+      /* re-encode cp as 2-byte UTF-8 (every value in the range fits) */
+      if (w + 2 >= out_cap) break;
+      out[w++] = (char)(0xC0 | (cp >> 6));
+      out[w++] = (char)(0x80 | (cp & 0x3F));
+      continue;
+    }
+    const char *sub = cp_to_ascii_fallback(cp);
+    if (!sub) sub = cp_to_translit(cp);
+    if (!sub) continue;
+    while (*sub && w < out_cap - 1) out[w++] = *sub++;
+  }
+  out[w] = 0;
+  return w;
+}
+
+/* Count visible cells (codepoints) in the first `nbytes` bytes of a
+ * UTF-8 string buffer. Stops at NUL even if nbytes is larger. */
+static int utf8_cells_n(const char *s, int nbytes) {
+  int cells = 0;
+  for (int i = 0; i < nbytes && s[i]; ) {
+    unsigned char b = (unsigned char)s[i];
+    int adv = (b < 0x80) ? 1
+            : ((b & 0xE0) == 0xC0) ? 2
+            : ((b & 0xF0) == 0xE0) ? 3
+            : ((b & 0xF8) == 0xF0) ? 4 : 1;
+    if (i + adv > nbytes) break;
+    cells++; i += adv;
+  }
+  return cells;
+}
+
+/* Count visible columns in a UTF-8 string: each ASCII byte or each
+ * UTF-8 codepoint is exactly one 8-px cell in our renderer. */
+static int utf8_visible_cols(const char *s) {
+  if (!s) return 0;
+  int n = 0;
+  for (const unsigned char *p = (const unsigned char *)s; *p; ) {
+    if (*p < 0x80) { n++; p++; }
+    else if ((*p & 0xE0) == 0xC0) { n++; p += 2; }
+    else if ((*p & 0xF0) == 0xE0) { n++; p += 3; }
+    else if ((*p & 0xF8) == 0xF0) { n++; p += 4; }
+    else { n++; p++; }
+  }
+  return n;
+}
+
 /* ── CSS Engine ────────────────────────────────────────────────── */
 
+/* Real-world pages (e.g. the EquinoxOS landing page) push past
+ * the old 128-rule limit. With ~200 rules in their stylesheet,
+ * everything past .feat-grid / .hero-grid / .stats was silently
+ * truncated — which made the L5 grid layout look like a no-op
+ * because the matching display:grid rules were never stored.
+ * 512 leaves comfortable headroom for the bigger sites we
+ * actually try to render. */
 #define MAX_CSS_RULES 512
-#define MAX_SELECTOR 256
+/* R6/L5+ descendant selectors: keep the full selector including
+ * spaces between simple parts (e.g. ".bar .wrap", ".lang-switch
+ * button"). The matcher walks the DOM ancestor chain. Width
+ * bumped from 64 → 128 to fit real-world chains comfortably. */
+#define MAX_SELECTOR 128
 #define MAX_CSS_CLASS 128
 
 typedef enum { ALIGN_LEFT, ALIGN_CENTER, ALIGN_RIGHT } text_align_t;
@@ -45,6 +256,10 @@ typedef struct {
   char selector[MAX_SELECTOR]; /* e.g. "h1", ".intro", "#main" */
   uint32_t color;              /* text colour        (0 = unset) */
   uint32_t bg_color;           /* background colour  (0 = unset) */
+  int bg_alpha;                /* background alpha 0-255 (255 = opaque).
+                                * Only meaningful when has_bg; lets a
+                                * subtle rgba(...) tint composite over the
+                                * page bg instead of painting full-bright. */
   bool underline;              /* text-decoration: underline      */
   int margin_top;              /* blank lines before (0-2)        */
   int margin_bottom;           /* blank lines after  (0-2)        */
@@ -58,110 +273,150 @@ typedef struct {
   int padding;   /* padding in line-units (0-6)       */
   bool has_padding;
   int max_width;  /* max-width in pixels (0 = unset)   */
+  int css_width;  /* width  in pixels (0 = unset) — used to size <img> */
+  int css_height; /* height in pixels (0 = unset) — used to size <img> */
   int font_size;  /* font-size hint: 0=normal, 1=large, 2=xlarge */
   bool uppercase; /* text-transform: uppercase         */
-  /* Layout — set by `display:grid|flex` and
-   * `grid-template-columns:repeat(N,...)` (or `1fr 1fr ...`). When
-   * this element is rendered, its direct children get laid out
-   * side-by-side, each owning a 1/N slice of the content area. */
-  int grid_cols;  /* 0 = not a grid/flex container, N = N columns */
+  /* R6/L4: flex (and L5: grid) container properties.
+   *   display: 0 = unset (inherit/block), 1 = flex, 2 = grid
+   *            (display:none is encoded in `display_none` above).
+   *   flex_dir: 0 = row, 1 = column.
+   *   gap: pixels between flex/grid items (both axes).
+   *   justify: 0 = start, 1 = end, 2 = center, 3 = space-between.
+   *   align_items: 0 = stretch, 1 = start, 2 = end, 3 = center.
+   *   flex_grow / flex_basis: item-level. Read by the *parent*
+   *     flex container when distributing remaining width.
+   *     flex_basis=0 means "auto" (intrinsic). */
+  int display;
+  int flex_dir;
+  int gap_px;
+  int justify;
+  int align_items;
+  int flex_grow;
+  int flex_basis;
+  /* L5 (grid): raw `grid-template-columns` string, parsed by the
+   * container when laying out children. */
+  char grid_cols[64];
+  /* L5+: `margin-left:auto` — the flexbox/auto-margin "push to the
+   * end" trick. On an inline element it pushes the element (and its
+   * text) to the right edge of the current frame; e.g. a `.lang-pct`
+   * span flush-right against its name. */
+  bool margin_left_auto;
+  /* R6/L6: position: sticky | fixed — pin this element to the top of
+   * the viewport instead of scrolling it with the document flow. Both
+   * keywords collapse to the same "pin at top" behaviour here, which is
+   * what the only positioned bar on the target page (`.bar{position:
+   * sticky;top:0}`) needs. static/relative/absolute leave it false. */
+  bool sticky;
 } css_rule_t;
 
 static css_rule_t css_rules[MAX_CSS_RULES];
 static int css_rule_count = 0;
-static uint32_t body_bg = CLR_BG;
 
-/* ── CSS custom properties (variables) ──────────────────────────
- * Captured from any rule whose declaration block contains
- * `--name: value;`. Most sites put them in `:root { --bg:#... }`,
- * but we record them from any selector — at this level we don't
- * scope by selector, we just need to know what `var(--foo)`
- * resolves to so that the rest of the parser sees a real value.
- *
- * Names are stored without the leading "--".
- */
-#define MAX_CSS_VARS 128
-#define CSS_VAR_NAME_LEN 48
-#define CSS_VAR_VALUE_LEN 96
+/* R6/L5: CSS custom properties (var()). Many modern pages drive their
+ * whole palette through `:root{ --bg:#0a0a0e; --text:#f3f3f6; ... }`
+ * and reference them as `background:var(--bg)`. Without resolution we
+ * dropped every var() value (parse_css_color returns 0 = unset), so a
+ * dark-themed page rendered with a default white body. We collect the
+ * declared custom properties here and expand var(--name[,fallback])
+ * before parsing a value. */
+#define MAX_CSS_VARS 64
 typedef struct {
-  char name[CSS_VAR_NAME_LEN];
-  char value[CSS_VAR_VALUE_LEN];
+  char name[40];   /* includes leading "--"            */
+  char value[64];  /* literal value (already lowercased) */
 } css_var_t;
 static css_var_t css_vars[MAX_CSS_VARS];
 static int css_var_count = 0;
 
-static const char *css_var_lookup(const char *name, int name_len) {
+static const char *css_var_lookup(const char *name, int nlen) {
   for (int i = 0; i < css_var_count; i++) {
-    if ((int)strlen(css_vars[i].name) == name_len &&
-        strncmp(css_vars[i].name, name, name_len) == 0)
+    if ((int)strlen(css_vars[i].name) == nlen &&
+        strncmp(css_vars[i].name, name, nlen) == 0)
       return css_vars[i].value;
   }
   return NULL;
 }
 
-static void css_var_define(const char *name, int name_len, const char *value) {
-  if (name_len <= 0 || name_len >= CSS_VAR_NAME_LEN)
-    return;
-  /* Replace if already defined */
-  for (int i = 0; i < css_var_count; i++) {
-    if ((int)strlen(css_vars[i].name) == name_len &&
-        strncmp(css_vars[i].name, name, name_len) == 0) {
-      strncpy(css_vars[i].value, value, CSS_VAR_VALUE_LEN - 1);
-      css_vars[i].value[CSS_VAR_VALUE_LEN - 1] = '\0';
-      return;
+/* Expand var(--x[, fallback]) occurrences in `in` into `out`.
+ * Non-var text is copied verbatim. Returns true if any var() was
+ * seen (resolved or not). Handles the common embedded case too,
+ * e.g. "1px solid var(--line)". */
+static bool css_resolve_vars(const char *in, char *out, int outsz) {
+  int o = 0;
+  bool saw = false;
+  for (const char *p = in; *p && o < outsz - 1;) {
+    if (strncmp(p, "var(", 4) == 0) {
+      saw = true;
+      const char *q = p + 4;
+      while (*q == ' ') q++;
+      const char *name = q;
+      int nlen = 0;
+      while (q[nlen] && q[nlen] != ',' && q[nlen] != ')') nlen++;
+      /* trim trailing spaces in the name */
+      int tn = nlen;
+      while (tn > 0 && name[tn - 1] == ' ') tn--;
+      const char *sub = css_var_lookup(name, tn);
+      /* locate fallback (after a comma) and the closing paren */
+      const char *fb = NULL;
+      const char *r = q + nlen;
+      if (*r == ',') { fb = r + 1; while (*fb == ' ') fb++; }
+      while (*r && *r != ')') r++;
+      if (!sub && fb) {
+        /* copy fallback text up to the close paren */
+        const char *fe = r;
+        while (fb < fe && o < outsz - 1) out[o++] = *fb++;
+      } else if (sub) {
+        for (const char *s = sub; *s && o < outsz - 1; s++) out[o++] = *s;
+      }
+      p = (*r == ')') ? r + 1 : r;
+    } else {
+      out[o++] = *p++;
     }
   }
-  if (css_var_count >= MAX_CSS_VARS)
-    return;
-  strncpy(css_vars[css_var_count].name, name, name_len);
-  css_vars[css_var_count].name[name_len] = '\0';
-  strncpy(css_vars[css_var_count].value, value, CSS_VAR_VALUE_LEN - 1);
-  css_vars[css_var_count].value[CSS_VAR_VALUE_LEN - 1] = '\0';
-  css_var_count++;
+  out[o] = '\0';
+  return saw;
+}
+static uint32_t body_bg = CLR_BG;
+
+/* Side-channel: parse_css_color() writes the alpha (0-255) of the colour
+ * it just parsed here. 255 for opaque hex/named/rgb; the real alpha for
+ * rgba(). Read immediately after the call (e.g. in the background branch
+ * of apply_css_property) before the next parse overwrites it. */
+static int g_css_alpha = 255;
+
+/* Alpha-composite `src` over `dst` (both 0xRRGGBB) with `a` in 0-255.
+ * Used so a translucent CSS background (rgba) blends into the page bg
+ * instead of being slammed on at full saturation. */
+static uint32_t composite_over(uint32_t src, uint32_t dst, int a) {
+  if (a >= 255) return src;
+  if (a <= 0)   return dst;
+  int sr = (src >> 16) & 0xFF, sg = (src >> 8) & 0xFF, sb = src & 0xFF;
+  int dr = (dst >> 16) & 0xFF, dg = (dst >> 8) & 0xFF, db = dst & 0xFF;
+  int r = (sr * a + dr * (255 - a)) / 255;
+  int g = (sg * a + dg * (255 - a)) / 255;
+  int b = (sb * a + db * (255 - a)) / 255;
+  uint32_t c = ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+  return c ? c : 0x000001; /* keep non-zero (0 = "unset" sentinel) */
 }
 
-/* Substitute every occurrence of `var(--name)` in `val` with the
- * value previously stored via css_var_define(). Unknown vars are
- * left as-is so downstream parsers can still spot them. Output is
- * written to `out` (size `out_size`) and may be the same memory as
- * `val`, since we copy through a small bounce buffer.
- *
- * Only handles one level of indirection — chained vars
- * (var(--a)  where --a: var(--b)) need a second pass; we don't
- * bother today, the site doesn't use it. */
-static void css_resolve_vars(const char *val, char *out, int out_size) {
-  int oi = 0;
-  for (int i = 0; val[i] && oi < out_size - 1;) {
-    if (val[i] == 'v' && val[i + 1] == 'a' && val[i + 2] == 'r' &&
-        val[i + 3] == '(') {
-      const char *p = val + i + 4;
-      while (*p == ' ')
-        p++;
-      if (p[0] == '-' && p[1] == '-') {
-        p += 2;
-        const char *name_start = p;
-        while (*p && *p != ')' && *p != ',' && *p != ' ')
-          p++;
-        int name_len = (int)(p - name_start);
-        /* Skip optional fallback ", value" */
-        const char *q = p;
-        while (*q && *q != ')')
-          q++;
-        if (*q == ')') {
-          const char *resolved = css_var_lookup(name_start, name_len);
-          if (resolved) {
-            for (int k = 0; resolved[k] && oi < out_size - 1; k++)
-              out[oi++] = resolved[k];
-            i = (int)(q - val) + 1;
-            continue;
-          }
-        }
-      }
-    }
-    out[oi++] = val[i++];
-  }
-  out[oi] = '\0';
+/* R6/B5c: theme-aware background for <pre>/<code> blocks. The fixed
+ * light-grey slab (CLR_CODE_BG) is blinding on a dark page — e.g. a
+ * terminal panel whose own CSS is near-black. On a dark page we instead
+ * paint a subtle raised panel derived from the page background; on a
+ * light page we keep the classic light-grey code background. */
+static uint32_t code_bg_for_theme(uint32_t body_bg) {
+  int r = (body_bg >> 16) & 0xFF, g = (body_bg >> 8) & 0xFF, b = body_bg & 0xFF;
+  int lum = (r * 30 + g * 59 + b * 11) / 100;
+  if (lum < 128) return composite_over(0xFFFFFF, body_bg, 16);
+  return CLR_CODE_BG;
 }
+
+/* R6/B5: in-page anchor table. Built during layout from elements that
+ * carry an `id`, so clicking an `<a href="#id">` link can scroll to the
+ * target section instead of reloading the whole page. */
+#define MAX_ANCHORS 64
+static struct { char id[48]; int y; } g_anchors[MAX_ANCHORS];
+static int g_anchor_count = 0;
 
 /* ── Line model (extended) ─────────────────────────────────────── */
 
@@ -173,11 +428,40 @@ typedef enum {
   STYLE_CODE,
   STYLE_MUTED,
   STYLE_BULLET,
-  STYLE_HR
+  STYLE_HR,
+  /* Phase R4/F0: interactive widgets. The line text is the label
+   * (button) or the current value (input); widget_node points at
+   * the originating DOM node so dispatched events know their
+   * target. */
+  STYLE_BUTTON,
+  /* Phase R4/F1: editable single-line input. widget_node points at
+   * the `<input>` DOM element; its current text is stored on the
+   * `value` attribute and read/written per frame by the renderer
+   * (it round-trips through eid_text_input's caller-owned buffer). */
+  STYLE_INPUT,
+  /* Phase R5/N2: toggle widget for <input type=checkbox> and
+   * <input type=radio>. widget_node points at the input. The
+   * "checked" DOM attribute carries the on/off state. */
+  STYLE_CHECKBOX,
+  /* Phase R5/N2: <select>. widget_node points at the select node;
+   * its "value" attribute holds the selected <option>'s value. */
+  STYLE_SELECT,
+  /* Phase R6/B4: image line. The line itself takes up a vertical
+   * slot wider than LINE_H; the renderer reads the image dimensions
+   * from g_images[image_idx] and advances cur_y by image_h + pad. */
+  STYLE_IMAGE,
 } line_style_t;
 
+/* R6/B2c: text buffer now holds UTF-8 so it must be sized in bytes,
+ * not characters. Cyrillic is 2 bytes per codepoint, other BMP
+ * symbols up to 3, so 4× LINE_CHARS leaves headroom for the rare
+ * mixed line. */
+#define LINE_BYTES (LINE_CHARS * 4 + 1)
+/* R6/B7: max distinct colour runs recorded per line (inline <span> colour
+ * changes). Lines that exceed this fall back to the single css_color. */
+#define MAX_COLOR_RUNS 8
 typedef struct {
-  char text[LINE_CHARS + 1];
+  char text[LINE_BYTES];
   line_style_t style;
   bool indent;
   /* CSS overrides – per line */
@@ -191,20 +475,229 @@ typedef struct {
   int font_size;  /* 0=normal, 1=large, 2=xlarge */
   bool uppercase; /* text-transform: uppercase */
   char link_url[128];
-  /* Grid layout — see style_state_t. 0 (or 1) means full-width;
-   * 2..6 places this line inside one cell of an N-column grid. */
-  int grid_cols;
-  int grid_col;
-  int grid_row;
+  /* Phase R4/F0: widget hookup. NULL for plain text lines.
+   * Stored as void* to avoid a forward decl above dom.h's include. */
+  void *widget_node;
+  /* Phase R6/B4: index into g_images[] for STYLE_IMAGE lines, -1
+   * for everything else. */
+  int image_idx;
+  /* Phase R6/L1: pixel-positioned line box.
+   * box_x is relative to CONTENT_X (so a normal full-width line has
+   * box_x=0). box_y is the cumulative document Y of this line's top,
+   * relative to CONTENT_Y+14 (i.e. before the scroll offset is
+   * subtracted). box_w is the content area available for this line
+   * (CONTENT_W - box_x by default). box_h is the line's full
+   * vertical advance — usually LINE_H, but widgets (button/input/
+   * checkbox/select) take LINE_H+6, and STYLE_IMAGE takes
+   * image_h + 2*PAD + 6.
+   *
+   * Default behaviour: push_line() fills these from the current
+   * layout frame (see layout_stack), so the existing
+   * one-line-per-row pipeline is preserved bit-for-bit when the
+   * root frame is the only one on the stack. Flex/grid containers (L4+L5) will
+   * overwrite box_x/box_y/box_w on direct children to splice them
+   * into columns. */
+  int box_x;
+  int box_y;
+  int box_w;
+  int box_h;
+  /* R6/L6: this line belongs to a position:sticky/fixed element and is
+   * painted pinned to the top of the viewport (no scroll offset). */
+  bool sticky;
+  /* R6/B7: per-run text colour inside a single line. css_color above is
+   * the whole-line fallback; when an inline <span> changes colour mid-line
+   * (e.g. one green word in an otherwise grey status line) we record the
+   * colour boundaries here. color_run_count == 0 → use css_color for the
+   * entire line (the common case, bit-for-bit the old behaviour).
+   * Otherwise run r covers bytes [color_run_start[r], color_run_start[r+1])
+   * of text[], drawn in color_run_color[r] (0 = line default). */
+  uint8_t  color_run_count;
+  uint16_t color_run_start[MAX_COLOR_RUNS];
+  uint32_t color_run_color[MAX_COLOR_RUNS];
+  /* R6/B7b: per-run inline BACKGROUND (0 = none). Lets an inline
+   * <code> chip paint a tight box around just its own characters
+   * instead of the whole mixed line getting one greedy STYLE_CODE
+   * box (or none). Runs share the boundaries of color_run_start[]. */
+  uint32_t color_run_bg[MAX_COLOR_RUNS];
 } line_t;
 
 static uint32_t fb[WIN_W * WIN_H];
 static eid_ctx_t ui;
+
+#ifdef BROWSER_BUILD
+/* ── Phase R6/B4: in-document image cache ────────────────────────────
+ * <img> tags get fetched and decoded into a fixed-size table. The
+ * line stream stores indices into this table via line_t::image_idx;
+ * render() reads dimensions from here to advance cur_y by the right
+ * amount and to blit the pixels.
+ *
+ * The table is owned by the htmlview instance and cleared at the
+ * start of every parse_html() so we don't leak across navigations.
+ * Cap is intentionally small — a hobby browser doesn't need to
+ * juggle hundreds of images. */
+#define MAX_DOC_IMAGES 8
+static eq_image_t g_images[MAX_DOC_IMAGES];
+static int        g_image_count;
+
+static void images_reset(void) {
+  for (int i = 0; i < g_image_count; i++) eq_image_free(&g_images[i]);
+  g_image_count = 0;
+}
+
+/* R6/L6b: nearest-neighbour resample of a decoded image to an exact
+ * target size. Used to honour CSS width/height on <img> (e.g. a logo
+ * declared `width:24px;height:24px` that decoded at 512²). Aspect is
+ * the caller's responsibility. In-place; frees the old buffer. */
+#ifdef BROWSER_BUILD
+static void img_resize_to(eq_image_t *im, int tw, int th) {
+  if (!im || !im->rgba) return;
+  if (tw < 1) tw = 1;
+  if (th < 1) th = 1;
+  if (im->w == tw && im->h == th) return;
+  uint8_t *dst = (uint8_t *)malloc((size_t)tw * th * 4);
+  if (!dst) return;
+  for (int y = 0; y < th; y++) {
+    int sy = (int)((long)y * im->h / th);
+    if (sy >= im->h) sy = im->h - 1;
+    const uint8_t *srow = im->rgba + (size_t)sy * im->w * 4;
+    uint8_t       *drow = dst       + (size_t)y  * tw   * 4;
+    for (int x = 0; x < tw; x++) {
+      int sx = (int)((long)x * im->w / tw);
+      if (sx >= im->w) sx = im->w - 1;
+      const uint8_t *sp = srow + (size_t)sx * 4;
+      drow[x * 4 + 0] = sp[0];
+      drow[x * 4 + 1] = sp[1];
+      drow[x * 4 + 2] = sp[2];
+      drow[x * 4 + 3] = sp[3];
+    }
+  }
+  eq_image_free(im);
+  im->rgba = dst; im->w = tw; im->h = th;
+}
+#endif
+
+/* Forward declared so w_emit_node's <img> handler (defined well above
+ * the BROWSER_BUILD section) can call it. Real implementation lives
+ * down with load_page() because it needs eq_http_get / resolve_url. */
+static int load_image_for_src(const char *src);
+#else
+static int load_image_for_src(const char *src) { (void)src; return -1; }
+#endif
 static line_t lines[MAX_LINES];
 static int line_count = 0;
 static int scroll_line = 0;
+/* Max scroll in LINE_H steps, published by render() so main()'s key
+ * handler clamps against the same bound the painter uses. */
+static int g_max_scroll_lines = 0;
+
+/* R6/L5: box-level background pass.
+ *
+ * Per-line css_bg painting can't fill the gaps *between* a block
+ * container's child lines (e.g. the white body of the .terminal
+ * card between its dark title bar and the log lines). So when a
+ * block-level element resolves a CSS bg, we record the bounding
+ * rectangle of all the lines it emitted and paint it as one solid
+ * rect *behind* the text in the render loop. Inline elements
+ * (span/a/badge) keep their per-line bg and are NOT recorded here. */
+typedef struct {
+  int box_x;        /* left, relative to content area (CONTENT_X anchors) */
+  int box_y;        /* top, document space (scroll subtracts at draw)     */
+  int box_w;
+  int box_h;
+  uint32_t color;
+  bool sticky;      /* R6/L6: pinned-to-top bg (no scroll offset) */
+} box_bg_t;
+
+#define MAX_BOX_BGS 64
+static box_bg_t box_bgs[MAX_BOX_BGS];
+static int box_bg_count = 0;
+
+/* Phase R6/L2: layout context stack.
+ *
+ * Each frame describes a rectangular sub-area of the document into
+ * which subsequent push_line() calls write. The bottom-most frame
+ * covers the full content area; nested frames (created by flex/grid
+ * containers in L4+L5) carve out narrower sub-rectangles whose
+ * children's box_x/box_y are anchored against the frame, not the
+ * page root.
+ *
+ * Fields:
+ *   x       — left offset (px) where the next line's box_x starts,
+ *             relative to the content area (CONTENT_X anchors at
+ *             render time).
+ *   y       — current Y cursor (px) within the frame; advanced by
+ *             push_line and layout_extend_last/layout_set_last_height.
+ *             Each frame's y starts at the parent's y at push time
+ *             and advances independently — when we pop, the parent
+ *             absorbs (y - start_y) so its own cursor catches up.
+ *   w       — content width available for children (px).
+ *   start_y — y at which this frame was pushed (in document space).
+ *             Used so pop can report frame height to the parent.
+ *   flow    — reserved for L4/L5: 0=block stream (current), 1=flex-row,
+ *             2=flex-col, 3=grid. L2 only emits flow=0.
+ *
+ * L2 keeps everything visually a no-op: a single root frame with
+ * x=0, y=0, w=CONTENT_W is pushed at the start of every parse
+ * pass, and push_line still produces a vertical text stream. The
+ * push/pop machinery is in place but unused until L3+. */
+typedef struct {
+  int x;
+  int y;
+  int w;
+  int start_y;
+  int flow;
+} layout_frame_t;
+
+#define LAYOUT_MAX_DEPTH 16
+static layout_frame_t layout_stack[LAYOUT_MAX_DEPTH];
+static int layout_depth = 0;
+
+static inline layout_frame_t *layout_top(void) {
+  return &layout_stack[layout_depth];
+}
+
+/* Reset to a single root frame covering the content area.
+ * Called at the top of every parse pass. */
+static void layout_reset(void) {
+  box_bg_count = 0;
+  layout_depth = 0;
+  layout_stack[0].x       = 0;
+  layout_stack[0].y       = 0;
+  layout_stack[0].w       = CONTENT_W;
+  layout_stack[0].start_y = 0;
+  layout_stack[0].flow    = 0;
+}
+
+/* Push a sub-frame. Reserved for L3+ (render_subtree, flex/grid).
+ * Returns NULL on overflow without disturbing the stack. */
+static layout_frame_t *layout_push(int x, int y, int w, int flow) {
+  if (layout_depth + 1 >= LAYOUT_MAX_DEPTH) return NULL;
+  layout_depth++;
+  layout_frame_t *f = &layout_stack[layout_depth];
+  f->x       = x;
+  f->y       = y;
+  f->w       = w;
+  f->start_y = y;
+  f->flow    = flow;
+  return f;
+}
+
+/* Pop the current frame, returning its consumed height (y - start_y).
+ * Does *not* propagate height up; callers (L4/L5 containers) decide
+ * how to splice the popped height into the parent cursor. */
+static int layout_pop(void) {
+  if (layout_depth == 0) return 0;
+  int h = layout_stack[layout_depth].y - layout_stack[layout_depth].start_y;
+  layout_depth--;
+  return h;
+}
+
+/* Default horizontal box for a normal stream line. Indented bullets
+ * shrink the available width by 18 px (matching the legacy indent
+ * offset in render()). */
+#define LAYOUT_DEFAULT_INDENT 18
 static char page_title[64] = "index.html";
-static char current_url[128] = "index.html";
+static char current_url[128] = "res/index.html";
 static char history[16][128];
 static int history_ptr = -1;
 static bool is_navigating_history = false;
@@ -216,7 +709,12 @@ static void push_history(const char *url) {
     history_ptr++;
     strcpy(history[history_ptr], url);
   }
+#ifdef BROWSER_BUILD
+  qjs_window_set_history_length(history_ptr + 1);
+#endif
 }
+
+
 
 /* ── Style Stack ────────────────────────────────────────────────── */
 
@@ -230,25 +728,25 @@ typedef struct {
   bool full_width_bg;
   int padding;
   int max_width;
+  int img_w;   /* R6/L6b: CSS width  applied to a child <img> (0 = unset) */
+  int img_h;   /* R6/L6b: CSS height applied to a child <img> (0 = unset) */
   int font_size;
   bool uppercase;
-  /* Grid layout state ----------------------------------------------
-   * `grid_cols`     – if THIS element is itself a grid/flex container,
-   *                   how many columns its direct children should be
-   *                   placed into. 0 = not a container.
-   * `grid_child_idx`– running counter of direct-child blocks already
-   *                   handed out a column. Incremented when a child
-   *                   push_style_state()'s under us.
-   * `my_cols/my_col/my_row` – the cell THIS element is rendered in
-   *                   (inherited downward so text deep inside a cell
-   *                    still knows its column). 0 / 0 / 0 outside any
-   *                    grid.
-   */
-  int grid_cols;
-  int grid_child_idx;
-  int my_cols;
-  int my_col;
-  int my_row;
+  /* R6/L4+L5: container CSS that controls how the *children* of
+   * the current element are laid out. NOT inherited; these are
+   * read from the element's own CSS rule and used to dispatch
+   * to emit_flex_container / emit_grid_container instead of the
+   * normal recursive emit. */
+  int display;
+  int flex_dir;
+  int gap_px;
+  int justify;
+  int align_items;
+  int flex_grow;
+  int flex_basis;
+  char grid_cols[64];
+  bool margin_left_auto; /* push this element flush-right (auto margin) */
+  bool sticky;           /* R6/L6: position:sticky/fixed — pin to top   */
 } style_state_t;
 
 static eid_font_t *h_font = NULL;
@@ -266,26 +764,43 @@ static void reset_style_stack(void) {
 
 static void push_style_state(void) {
   if (style_depth < MAX_STYLE_STACK - 1) {
-    style_state_t *parent = &style_stack[style_depth];
-    style_state_t *child = &style_stack[style_depth + 1];
-    *child = *parent;
-    /* The child is a fresh element — by default it is not itself a
-     * grid container and has no children yet. (apply_css_for_element
-     * may later set child->grid_cols when this element is the next
-     * grid container down.) */
-    child->grid_cols = 0;
-    child->grid_child_idx = 0;
-    /* If our parent IS a grid container, take the next cell. */
-    if (parent->grid_cols > 1) {
-      int idx = parent->grid_child_idx;
-      child->my_cols = parent->grid_cols;
-      child->my_col = idx % parent->grid_cols;
-      child->my_row = idx / parent->grid_cols;
-      parent->grid_child_idx = idx + 1;
-    }
-    /* else: my_cols/my_col/my_row already copied from parent, so
-     * grandchildren stay in the same cell as their grand-parent. */
+    style_stack[style_depth + 1] = style_stack[style_depth];
     style_depth++;
+    /* CSS inheritance: only color/font/text-align/uppercase/bold/
+     * underline propagate from parent. The rest describe how
+     * *this* element renders and must NOT bleed to children:
+     *
+     *   - background (bg / full_width_bg): a black .nav-bar must
+     *     not paint a full-width black bar behind every line of
+     *     every descendant text run.
+     *   - padding / max-width: layout box sizing belongs to the
+     *     element that declared it.
+     *   - display / flex-* / grid-* / gap: container-layout fields
+     *     (see L5 inheritance fix in 3a26734).
+     *
+     * The descendant's own CSS rule (if any) reinstates these via
+     * apply_css_to_current_state. */
+    style_stack[style_depth].bg            = 0;
+    style_stack[style_depth].full_width_bg = false;
+    style_stack[style_depth].padding       = 0;
+    style_stack[style_depth].max_width     = 0;
+    style_stack[style_depth].img_w         = 0;
+    style_stack[style_depth].img_h         = 0;
+    style_stack[style_depth].display       = 0;
+    style_stack[style_depth].flex_dir      = 0;
+    style_stack[style_depth].gap_px        = 0;
+    style_stack[style_depth].justify       = 0;
+    style_stack[style_depth].align_items   = 0;
+    style_stack[style_depth].flex_grow     = 0;
+    style_stack[style_depth].flex_basis    = 0;
+    style_stack[style_depth].grid_cols[0]  = '\0';
+    style_stack[style_depth].margin_left_auto = false;
+    /* NB: `sticky` is intentionally NOT reset here. In this flat
+     * line model we have no nested positioning contexts, so the only
+     * way the bar's children (nav links, lang buttons, the star CTA)
+     * get painted pinned together with the bar is to let the flag
+     * inherit down the subtree. It is cleared when the sticky element
+     * pops and we return to the (non-sticky) body state. */
   }
 }
 
@@ -293,7 +808,13 @@ static void apply_css_to_current_state(const css_rule_t *r) {
   if (r->has_color)
     style_stack[style_depth].color = r->color;
   if (r->has_bg) {
-    style_stack[style_depth].bg = r->bg_color;
+    /* Composite translucent backgrounds over the page bg so a subtle
+     * rgba(...) tint (badges, ghost buttons, faint panels) renders as a
+     * gentle shade instead of a full-saturation slab. body_bg already
+     * holds the resolved page background by the time element content is
+     * laid out. */
+    int a = r->bg_alpha ? r->bg_alpha : 255;
+    style_stack[style_depth].bg = composite_over(r->bg_color, body_bg, a);
     style_stack[style_depth].full_width_bg = true;
   }
   if (r->underline)
@@ -306,18 +827,44 @@ static void apply_css_to_current_state(const css_rule_t *r) {
     style_stack[style_depth].display_none = true;
   if (r->has_padding && r->padding > 0)
     style_stack[style_depth].padding = r->padding;
+  if (r->sticky)
+    style_stack[style_depth].sticky = true;
   if (r->max_width > 0)
     style_stack[style_depth].max_width = r->max_width;
+  if (r->css_width > 0)
+    style_stack[style_depth].img_w = r->css_width;
+  if (r->css_height > 0)
+    style_stack[style_depth].img_h = r->css_height;
   if (r->font_size > 0)
     style_stack[style_depth].font_size = r->font_size;
   if (r->uppercase)
     style_stack[style_depth].uppercase = true;
-  /* Grid-container declaration: turn THIS element into a grid so the
-   * next direct-child push_style_state() splits its kids by column. */
-  if (r->grid_cols > 1) {
-    style_stack[style_depth].grid_cols = r->grid_cols;
-    style_stack[style_depth].grid_child_idx = 0;
-  }
+  /* R6/L4+L5: container layout. These OVERWRITE rather than OR
+   * because they describe how this element's children are laid
+   * out; a flex/grid declaration replaces any inherited value. */
+  if (r->display != 0)
+    style_stack[style_depth].display = r->display;
+  if (r->flex_dir != 0)
+    style_stack[style_depth].flex_dir = r->flex_dir;
+  if (r->gap_px > 0)
+    style_stack[style_depth].gap_px = r->gap_px;
+  if (r->justify != 0)
+    style_stack[style_depth].justify = r->justify;
+  if (r->align_items != 0)
+    style_stack[style_depth].align_items = r->align_items;
+  /* flex_grow / flex_basis describe how this element behaves as
+   * an item *within* a parent flex container; the parent reads
+   * them via lookup_flex_item_props(). They still land here so a
+   * child container that's also a flex item can be re-queried. */
+  if (r->flex_grow > 0)
+    style_stack[style_depth].flex_grow = r->flex_grow;
+  if (r->flex_basis > 0)
+    style_stack[style_depth].flex_basis = r->flex_basis;
+  if (r->grid_cols[0])
+    strncpy(style_stack[style_depth].grid_cols, r->grid_cols,
+            sizeof(style_stack[style_depth].grid_cols) - 1);
+  if (r->margin_left_auto)
+    style_stack[style_depth].margin_left_auto = true;
 }
 
 static void pop_style_state(void) {
@@ -378,6 +925,8 @@ static int parse_int_from(const char *s, const char **next) {
 }
 
 static uint32_t parse_css_color(const char *s) {
+  /* Default: every colour is opaque unless an rgba() says otherwise. */
+  g_css_alpha = 255;
   /* Skip leading whitespace */
   while (*s == ' ')
     s++;
@@ -385,8 +934,8 @@ static uint32_t parse_css_color(const char *s) {
   /* rgb(r, g, b) or rgba(r, g, b, a) */
   if (strncmp(s, "rgb", 3) == 0) {
     const char *p = s + 3;
-    if (*p == 'a')
-      p++;
+    int is_rgba = 0;
+    if (*p == 'a') { p++; is_rgba = 1; }
     if (*p == '(')
       p++;
     const char *next;
@@ -399,6 +948,26 @@ static uint32_t parse_css_color(const char *s) {
     while (*p == ' ' || *p == ',')
       p++;
     int b = parse_int_from(p, &next);
+    p = next;
+    if (is_rgba) {
+      /* 4th component: alpha as a 0..1 decimal (.05, 0.72, 1). Parse
+       * integer-only to avoid pulling in float math. */
+      while (*p == ' ' || *p == ',' || *p == '/')
+        p++;
+      int whole = 0;
+      while (*p >= '0' && *p <= '9') { whole = whole * 10 + (*p - '0'); p++; }
+      int frac = 0, fdiv = 1;
+      if (*p == '.') {
+        p++;
+        while (*p >= '0' && *p <= '9' && fdiv < 100000) {
+          frac = frac * 10 + (*p - '0'); fdiv *= 10; p++;
+        }
+      }
+      if (whole >= 1) g_css_alpha = 255;          /* 1.0 (or 100%) → opaque */
+      else            g_css_alpha = (frac * 255) / fdiv;
+      if (g_css_alpha > 255) g_css_alpha = 255;
+      if (g_css_alpha < 0)   g_css_alpha = 0;
+    }
     if (r > 255)
       r = 255;
     if (g > 255)
@@ -495,6 +1064,26 @@ static const char *skip_ws(const char *p) {
 /* ── CSS: parse a single property: value pair ────────────────── */
 static void apply_css_property(css_rule_t *rule, const char *prop,
                                const char *val) {
+  /* Custom property declaration: store it for later var() expansion
+   * and stop (it has no direct visual effect itself). */
+  if (prop[0] == '-' && prop[1] == '-') {
+    if (css_var_count < MAX_CSS_VARS) {
+      int ni = 0;
+      while (prop[ni] && ni < 39) { css_vars[css_var_count].name[ni] = prop[ni]; ni++; }
+      css_vars[css_var_count].name[ni] = '\0';
+      int vi2 = 0;
+      while (val[vi2] && vi2 < 63) { css_vars[css_var_count].value[vi2] = val[vi2]; vi2++; }
+      css_vars[css_var_count].value[vi2] = '\0';
+      css_var_count++;
+    }
+    return;
+  }
+
+  /* Expand any var(--x) references before parsing the value. */
+  char resolved[80];
+  if (css_resolve_vars(val, resolved, sizeof(resolved)))
+    val = resolved;
+
   if (strncmp(prop, "color", 5) == 0 && prop[5] == '\0') {
     uint32_t c = parse_css_color(val);
     if (c) {
@@ -506,6 +1095,7 @@ static void apply_css_property(css_rule_t *rule, const char *prop,
     uint32_t c = parse_css_color(val);
     if (c) {
       rule->bg_color = c;
+      rule->bg_alpha = g_css_alpha; /* captured from the parse above */
       rule->has_bg = true;
     }
   } else if (strncmp(prop, "text-decoration", 15) == 0) {
@@ -529,43 +1119,73 @@ static void apply_css_property(css_rule_t *rule, const char *prop,
   } else if (strncmp(prop, "display", 7) == 0) {
     if (strstr(val, "none")) {
       rule->display_none = true;
-    } else if (strstr(val, "grid") || strstr(val, "flex")) {
-      /* Tentative — `grid-template-columns` (or counting `1fr` tokens
-       * for plain `display:flex` rows) refines `grid_cols` below.
-       * Default 1 means "container exists but we don't know N yet" —
-       * children won't be split unless a later prop sets N > 1. */
-      if (rule->grid_cols == 0)
-        rule->grid_cols = 1;
+    } else if (strstr(val, "grid")) {
+      /* check grid before flex because "inline-grid" / "grid"
+       * substrings both contain "grid"; flex check below also
+       * matches "inline-flex" — both are accepted. */
+      rule->display = 2;
+    } else if (strstr(val, "flex")) {
+      rule->display = 1;
     }
+  } else if (strncmp(prop, "position", 8) == 0) {
+    /* sticky / fixed both pin to the top of the viewport here. The page
+     * also uses position:relative/absolute on ::before/::after pseudo
+     * decorations we don't render and on a display:none mobile nav, so
+     * only sticky/fixed flip the flag. */
+    if (strstr(val, "sticky") || strstr(val, "fixed"))
+      rule->sticky = true;
+  } else if (strncmp(prop, "flex-direction", 14) == 0) {
+    if (strstr(val, "column")) rule->flex_dir = 1;
+    else                        rule->flex_dir = 0;
+  } else if (strncmp(prop, "gap", 3) == 0 &&
+             (prop[3] == '\0' || prop[3] == ':' )) {
+    int px = 0; const char *v = val;
+    while (*v >= '0' && *v <= '9') { px = px * 10 + (*v - '0'); v++; }
+    if (px > 0) rule->gap_px = px;
+  } else if (strncmp(prop, "justify-content", 15) == 0) {
+    if      (strstr(val, "space-between")) rule->justify = 3;
+    else if (strstr(val, "center"))        rule->justify = 2;
+    else if (strstr(val, "flex-end")  ||
+             strstr(val, "end"))           rule->justify = 1;
+    else                                   rule->justify = 0;
+  } else if (strncmp(prop, "align-items", 11) == 0) {
+    if      (strstr(val, "center"))        rule->align_items = 3;
+    else if (strstr(val, "flex-end")  ||
+             strstr(val, "end"))           rule->align_items = 2;
+    else if (strstr(val, "flex-start")||
+             strstr(val, "start"))         rule->align_items = 1;
+    else                                   rule->align_items = 0;
+  } else if (strncmp(prop, "flex-basis", 10) == 0) {
+    int px = 0; const char *v = val;
+    while (*v >= '0' && *v <= '9') { px = px * 10 + (*v - '0'); v++; }
+    if (px > 0) rule->flex_basis = px;
+  } else if (strncmp(prop, "flex-grow", 9) == 0) {
+    int g = 0; const char *v = val;
+    while (*v >= '0' && *v <= '9') { g = g * 10 + (*v - '0'); v++; }
+    if (g > 0) rule->flex_grow = g;
+  } else if (strncmp(prop, "flex", 4) == 0 &&
+             (prop[4] == '\0' || prop[4] == ':')) {
+    /* CSS `flex: <grow> <shrink>? <basis>?` shorthand. We honour
+     * the first number as grow, and if a second number / Xpx
+     * follows it lands in basis. The common cases are `flex: 1`
+     * (grow=1, basis=0) and `flex: 0 0 200px` (basis=200). */
+    int g = 0; const char *v = val;
+    while (*v == ' ') v++;
+    while (*v >= '0' && *v <= '9') { g = g * 10 + (*v - '0'); v++; }
+    if (g > 0) rule->flex_grow = g;
+    while (*v == ' ' || (*v >= '0' && *v <= '9')) v++; /* skip shrink */
+    int basis = 0;
+    while (*v == ' ') v++;
+    while (*v >= '0' && *v <= '9') { basis = basis * 10 + (*v - '0'); v++; }
+    if (basis > 0) rule->flex_basis = basis;
   } else if (strncmp(prop, "grid-template-columns", 21) == 0) {
+    /* Store the raw value; the grid container parses it at
+     * layout time so we don't lose precision (1fr vs 200px etc). */
     int n = 0;
-    const char *rep = strstr(val, "repeat(");
-    if (rep) {
-      rep += 7;
-      while (*rep == ' ')
-        rep++;
-      while (*rep >= '0' && *rep <= '9') {
-        n = n * 10 + (*rep - '0');
-        rep++;
-      }
-    } else {
-      /* Count whitespace-separated tokens — "1fr 1fr 1fr" → 3.
-       * Auto-fit / auto-fill we give up on and stick with 0. */
-      if (!strstr(val, "auto-fit") && !strstr(val, "auto-fill")) {
-        bool in_tok = false;
-        for (const char *v = val; *v; v++) {
-          if (*v == ' ' || *v == '\t') {
-            in_tok = false;
-          } else {
-            if (!in_tok)
-              n++;
-            in_tok = true;
-          }
-        }
-      }
+    while (val[n] && n < (int)sizeof(rule->grid_cols) - 1) {
+      rule->grid_cols[n] = val[n]; n++;
     }
-    if (n > 0 && n <= 6)
-      rule->grid_cols = n;
+    rule->grid_cols[n] = 0;
   } else if (strncmp(prop, "padding", 7) == 0 && prop[7] == '\0') {
     /* Convert px to line-units: rough heuristic */
     int px = 0;
@@ -589,6 +1209,17 @@ static void apply_css_property(css_rule_t *rule, const char *prop,
     }
     if (px > 0)
       rule->max_width = px;
+  } else if (strncmp(prop, "width", 5) == 0 && prop[5] == '\0') {
+    /* R6/L6b: explicit pixel width. Only consumed when this element is
+     * an <img>, to honour e.g. `.brand img{width:24px}`. Percent/auto
+     * values (no leading digit) are ignored. */
+    int px = 0; const char *v = val;
+    while (*v >= '0' && *v <= '9') { px = px * 10 + (*v - '0'); v++; }
+    if (px > 0) rule->css_width = px;
+  } else if (strncmp(prop, "height", 6) == 0 && prop[6] == '\0') {
+    int px = 0; const char *v = val;
+    while (*v >= '0' && *v <= '9') { px = px * 10 + (*v - '0'); v++; }
+    if (px > 0) rule->css_height = px;
   } else if (strncmp(prop, "font-size", 9) == 0) {
     int px = 0;
     const char *v = val;
@@ -604,42 +1235,61 @@ static void apply_css_property(css_rule_t *rule, const char *prop,
     if (strstr(val, "uppercase"))
       rule->uppercase = true;
   } else if (strncmp(prop, "margin", 6) == 0 && prop[6] == '\0') {
-    if (strstr(val, "auto")) {
-      rule->align = ALIGN_CENTER;
-      rule->has_align = true;
-    }
+    /* L5+: don't conflate `margin:0 auto` with `text-align:center`.
+     * margin:auto centers the block itself in its parent; it does
+     * NOT make text inside the block centered. The old mapping
+     * inherited ALIGN_CENTER down through every descendant text
+     * line — e.g. `.wrap{margin:0 auto}` made the entire bar's
+     * brand/nav/cta text render center-aligned across the window.
+     */
     rule->margin_top = 1;
     rule->margin_bottom = 1;
   } else if (strncmp(prop, "margin-top", 10) == 0) {
     rule->margin_top = 1;
   } else if (strncmp(prop, "margin-bottom", 13) == 0) {
     rule->margin_bottom = 1;
+  } else if (strncmp(prop, "margin-left", 11) == 0) {
+    /* `margin-left:auto` is the flexbox push-to-end trick — flush the
+     * element right within its container. We only act on the `auto`
+     * keyword; numeric left margins are ignored (no box model). */
+    if (strstr(val, "auto")) rule->margin_left_auto = true;
   }
 }
 
 /* ── CSS: parse the declaration block between { and } ────────── */
 static void parse_css_declarations(css_rule_t *rule, const char *decl,
                                    int dlen) {
+  /* Strip C-style comments from the declaration block first. An inline
+   * comment sitting between two declarations otherwise gets glued onto
+   * the FRONT of the next property name, so that property (and its var)
+   * is silently dropped. We copy into a scratch buffer with comments
+   * removed, then parse that. For unusually large blocks (bigger than the
+   * scratch buffer) we fall back to parsing the raw text so nothing is
+   * truncated. */
+  char clean[1024];
+  if (dlen < (int)sizeof(clean)) {
+    int cn = 0;
+    for (int i = 0; i < dlen; i++) {
+      if (decl[i] == '/' && i + 1 < dlen && decl[i + 1] == '*') {
+        i += 2; /* skip the opening "/*" */
+        while (i + 1 < dlen && !(decl[i] == '*' && decl[i + 1] == '/'))
+          i++;
+        i += 1; /* land on the closing '/'; the for-loop's i++ steps past */
+        continue;
+      }
+      clean[cn++] = decl[i];
+    }
+    clean[cn] = '\0';
+    decl = clean;
+    dlen = cn;
+  }
+
   char prop[48], val[48];
   int pi = 0, vi = 0;
   bool in_val = false;
 
   for (int i = 0; i < dlen; i++) {
     char c = decl[i];
-    /* Skip a CSS slash-star comment that may sit between properties:
-     * declaration blocks often have inline comments after a value,
-     * e.g. "--accent:#7dd3fc;  (* sky-300 *)" (using parens here so
-     * this C comment doesn't terminate early). Without skipping them
-     * the comment bleeds into the next property name and we lose all
-     * subsequent --variable captures. */
-    if (c == '/' && i + 1 < dlen && decl[i + 1] == '*') {
-      i += 2;
-      while (i + 1 < dlen && !(decl[i] == '*' && decl[i + 1] == '/'))
-        i++;
-      if (i + 1 < dlen)
-        i++;
-      continue;
-    }
     if (c == ':') {
       in_val = true;
       vi = 0;
@@ -655,41 +1305,23 @@ static void parse_css_declarations(css_rule_t *rule, const char *decl,
       prop[pi] = '\0';
       val[vi] = '\0';
 
-      /* Trim leading whitespace (spaces, tabs, newlines — rules
-       * inside `:root { ... }` etc. are typically multi-line) */
+      /* Trim leading whitespace. Must include \n/\t/\r, not just
+       * spaces: in a multi-line rule body every property after the
+       * first is preceded by a newline + indentation, so a space-only
+       * trim leaves prop[0]=='\n'. That silently broke every such
+       * property — most visibly the custom-property check
+       * (prop[0]=='-' && prop[1]=='-') in apply_css_property, so a
+       * multi-line :root{ --bg:..; --text:..; } stored no variables
+       * at all and every later var(--x) reference resolved to empty. */
       const char *pp = prop;
-      while (*pp && ascii_isspace(*pp))
+      while (*pp == ' ' || *pp == '\n' || *pp == '\t' || *pp == '\r')
         pp++;
       const char *vv = val;
-      while (*vv && ascii_isspace(*vv))
+      while (*vv == ' ' || *vv == '\n' || *vv == '\t' || *vv == '\r')
         vv++;
 
-      if (pp[0] && vv[0]) {
-        /* CSS custom property declaration: --name: value; */
-        if (pp[0] == '-' && pp[1] == '-') {
-          const char *name = pp + 2;
-          int name_len = (int)strlen(name);
-          /* Strip !important / trailing whitespace from value */
-          char clean_val[CSS_VAR_VALUE_LEN];
-          int cv = 0;
-          for (int k = 0; vv[k] && cv < CSS_VAR_VALUE_LEN - 1; k++) {
-            if (vv[k] == '!')
-              break;
-            clean_val[cv++] = vv[k];
-          }
-          while (cv > 0 && clean_val[cv - 1] == ' ')
-            cv--;
-          clean_val[cv] = '\0';
-          css_var_define(name, name_len, clean_val);
-        } else if (strstr(vv, "var(")) {
-          /* Resolve var(--foo) in value before applying */
-          char resolved[CSS_VAR_VALUE_LEN * 2];
-          css_resolve_vars(vv, resolved, sizeof(resolved));
-          apply_css_property(rule, pp, resolved);
-        } else {
-          apply_css_property(rule, pp, vv);
-        }
-      }
+      if (pp[0] && vv[0])
+        apply_css_property(rule, pp, vv);
 
       pi = 0;
       vi = 0;
@@ -750,39 +1382,47 @@ static void parse_css_block(const char *css, int css_len) {
     }
 
     /* Read selector (preserve spaces for compound selector splitting).
-     * If the selector is too long for our buffer, keep advancing p so
-     * we still find the next `{` — that way one giant comma-list like
-     * `body.lang-out [data-i18n], body.lang-out #lang-top, ...` no
-     * longer aborts the whole stylesheet. */
-    char sel[MAX_SELECTOR];
+     *
+     * The collection buffer must hold the *full comma-separated* list
+     * before we split it, so it has to be much larger than the size of
+     * a single selector. Real-world pages routinely have rules like
+     * "[data-i18n], #lang-top, #status-line, #updated, #s-commits-last,
+     *  #s-engui-last, #s-prs-sub, #s-stars-sub, #lang-total, ..."
+     * which run 150-200 chars before the '{'. */
+    enum { SEL_BUF = 1024 };
+    char sel[SEL_BUF];
     int si = 0;
     bool prev_space = false;
-    bool sel_truncated = false;
-    while (p < end && *p != '{') {
+    while (p < end && *p != '{' && si < SEL_BUF - 1) {
       if (ascii_isspace(*p)) {
-        if (si > 0 && si < MAX_SELECTOR - 1)
+        if (si > 0)
           prev_space = true;
       } else {
-        if (si >= MAX_SELECTOR - 1) {
-          sel_truncated = true;
-        } else {
-          if (prev_space && si > 0 && si < MAX_SELECTOR - 1)
-            sel[si++] = ' ';
-          prev_space = false;
-          sel[si++] = ascii_lower(*p);
-        }
+        if (prev_space && si > 0 && si < SEL_BUF - 1)
+          sel[si++] = ' ';
+        prev_space = false;
+        sel[si++] = ascii_lower(*p);
       }
       p++;
     }
     sel[si] = '\0';
-    if (p >= end || *p != '{')
-      break;
+    if (p >= end) break;
+    if (*p != '{') {
+      /* Selector buffer overflowed even at SEL_BUF (super-long list).
+       * Skip over this rule's body so we can keep parsing the rest of
+       * the stylesheet instead of bailing out entirely. */
+      while (p < end && *p != '{') p++;
+      if (p >= end) break;
+      p++; /* skip { */
+      int depth = 1;
+      while (p < end && depth > 0) {
+        if (*p == '{') depth++;
+        else if (*p == '}') depth--;
+        p++;
+      }
+      continue;
+    }
     p++; /* skip { */
-    /* Keep parsing the declaration block even when the selector was
-     * truncated — we still want to capture any `--var: value` lines
-     * inside it. The (oversized) recorded selector probably won't
-     * match anything, but that's fine. */
-    (void)sel_truncated;
 
     /* Find closing } (handle nested braces) */
     const char *brace = p;
@@ -819,17 +1459,38 @@ static void parse_css_block(const char *css, int css_len) {
       if (qi == 0)
         continue;
 
-      /* For compound selectors like '.header h1', use last segment */
-      char *last_space = NULL;
-      for (int s = 0; single[s]; s++) {
-        if (single[s] == ' ')
-          last_space = &single[s];
-      }
-      char *final_sel = last_space ? (last_space + 1) : single;
-
+      /* R6/L5+: keep the FULL selector verbatim, including any
+       * descendant whitespace (`.bar .wrap`, `.lang-switch
+       * button`). The matcher (match_selector_node) splits on
+       * spaces at match time and walks the DOM ancestor chain.
+       * Previously this dropped everything but the rightmost
+       * simple selector, which made `.bar .wrap{display:flex}`
+       * apply to *every* `.wrap` on the page — including hero,
+       * sections, and footer — and turned every content block
+       * into a horizontally-laid-out flex container. */
       css_rule_t *r = &css_rules[css_rule_count];
       memset(r, 0, sizeof(css_rule_t));
-      strncpy(r->selector, final_sel, MAX_SELECTOR - 1);
+      /* Collapse internal whitespace runs to a single space so
+       * `.a  .b` and `.a .b` store identically. */
+      {
+        int dst = 0;
+        bool in_space = false;
+        for (int s = 0; single[s] && dst < MAX_SELECTOR - 1; s++) {
+          char c = single[s];
+          if (c == '\t' || c == '\n' || c == '\r') c = ' ';
+          if (c == ' ') {
+            if (!in_space && dst > 0) {
+              r->selector[dst++] = ' ';
+              in_space = true;
+            }
+          } else {
+            r->selector[dst++] = c;
+            in_space = false;
+          }
+        }
+        while (dst > 0 && r->selector[dst - 1] == ' ') dst--;
+        r->selector[dst] = '\0';
+      }
 
       parse_css_declarations(r, p, decl_len);
       css_rule_count++;
@@ -970,7 +1631,193 @@ static void extract_attr(const char *tag, const char *attr, char *out,
   }
 }
 
+/* ── CSS selector matching helpers ────────────────────────────── */
+
+/* Match a single simple selector ("h1", ".intro", "#nav",
+ * "tag.class", "tag#id") against an element's resolved
+ * tag/class/id triple. Pseudo-classes / pseudo-elements (`:hover`,
+ * `::after`, `:not(.x)` …) are not honoured: we treat the first
+ * `:` we see as end-of-selector, which means the rule applies
+ * unconditionally instead of never — the lesser evil for a
+ * static renderer with no interaction state. */
+static bool match_simple_sel(const char *sel, const char *tag,
+                             const char *cls, const char *id) {
+  if (!sel || !*sel) return false;
+  /* Reject pseudo-ELEMENT selectors (`::before`, `::after`, and the
+   * legacy single-colon `:before`/`:after`/`:first-line`/`:first-letter`).
+   * They style a generated box we don't render, so they must NOT match
+   * the base element — otherwise their declarations (very often a
+   * `background`) get slapped onto the real element as a bogus slab.
+   * Concrete bug this fixes: `.live::before{background:var(--done)}` (a
+   * 7px status dot) was painting the whole "offline snapshot" line solid
+   * green. Pseudo-CLASSES (`:hover`, `:nth-child`, `:not`…) keep the
+   * existing "apply unconditionally" behaviour below. */
+  {
+    const char *colon = sel;
+    while (*colon && *colon != ':') colon++;
+    if (*colon == ':') {
+      const char *p = colon + 1;
+      if (*p == ':' ||
+          strncmp(p, "before", 6) == 0 || strncmp(p, "after", 5) == 0 ||
+          strncmp(p, "first-line", 10) == 0 ||
+          strncmp(p, "first-letter", 12) == 0)
+        return false;
+    }
+  }
+  /* Effective length: stop at first ':' to gracefully drop
+   * pseudo-class suffixes from the comparison. */
+  int slen = 0;
+  while (sel[slen] && sel[slen] != ':') slen++;
+  if (slen == 0) return false;
+
+  /* Universal selector `*` matches anything. */
+  if (slen == 1 && sel[0] == '*') return true;
+
+  if (sel[0] == '.') {
+    if (!cls || !cls[0]) return false;
+    char buf[MAX_SELECTOR];
+    int cn = slen - 1;
+    if (cn >= MAX_SELECTOR) cn = MAX_SELECTOR - 1;
+    memcpy(buf, sel + 1, cn);
+    buf[cn] = 0;
+    return has_class(cls, buf);
+  }
+  if (sel[0] == '#') {
+    if (!id || !id[0]) return false;
+    char buf[MAX_SELECTOR];
+    int cn = slen - 1;
+    if (cn >= MAX_SELECTOR) cn = MAX_SELECTOR - 1;
+    memcpy(buf, sel + 1, cn);
+    buf[cn] = 0;
+    return strcmp(buf, id) == 0;
+  }
+
+  /* tag, tag.class, tag#id */
+  int split = -1;
+  for (int k = 0; k < slen; k++) {
+    if (sel[k] == '.' || sel[k] == '#') { split = k; break; }
+  }
+  char tag_part[MAX_SELECTOR];
+  int tn = (split >= 0) ? split : slen;
+  if (tn >= MAX_SELECTOR) tn = MAX_SELECTOR - 1;
+  memcpy(tag_part, sel, tn);
+  tag_part[tn] = 0;
+  if (!tag || strcmp(tag_part, tag) != 0) return false;
+  if (split < 0) return true;
+  if (sel[split] == '.') {
+    if (!cls || !cls[0]) return false;
+    char buf[MAX_SELECTOR];
+    int cn = slen - split - 1;
+    if (cn >= MAX_SELECTOR) cn = MAX_SELECTOR - 1;
+    memcpy(buf, sel + split + 1, cn);
+    buf[cn] = 0;
+    return has_class(cls, buf);
+  }
+  /* '#' */
+  if (!id || !id[0]) return false;
+  char buf[MAX_SELECTOR];
+  int cn = slen - split - 1;
+  if (cn >= MAX_SELECTOR) cn = MAX_SELECTOR - 1;
+  memcpy(buf, sel + split + 1, cn);
+  buf[cn] = 0;
+  return strcmp(buf, id) == 0;
+}
+
+/* Node-aware wrapper. */
+static bool match_simple_node(const char *sel, dom_node_t *n) {
+  if (!n || n->type != DOM_NODE_ELEMENT) return false;
+  const char *cls = dom_get_attr(n, "class");
+  const char *id  = dom_get_attr(n, "id");
+  return match_simple_sel(sel, n->tag_name, cls, id);
+}
+
+/* Full descendant selector match: tokenises `full_sel` on spaces
+ * right-to-left. The rightmost simple selector must match `n`;
+ * each preceding simple selector must match SOME ancestor (any
+ * depth) found above the previous match, in order. This is the
+ * standard CSS descendant-combinator semantics. Child (`>`),
+ * sibling (`+` / `~`), attribute (`[…]`) and pseudo-element
+ * combinators are not handled. */
+static bool match_selector_node(const char *full_sel, dom_node_t *n) {
+  if (!full_sel || !*full_sel) return false;
+  int len = 0;
+  while (full_sel[len]) len++;
+
+  /* Find rightmost simple selector. */
+  int end = len;
+  while (end > 0 && full_sel[end - 1] == ' ') end--;
+  int start = end;
+  while (start > 0 && full_sel[start - 1] != ' ') start--;
+
+  char buf[MAX_SELECTOR];
+  int sl = end - start;
+  if (sl >= MAX_SELECTOR) sl = MAX_SELECTOR - 1;
+  memcpy(buf, full_sel + start, sl);
+  buf[sl] = 0;
+  if (!match_simple_node(buf, n)) return false;
+
+  /* Walk leftwards over the remaining tokens. */
+  end = start;
+  while (end > 0 && full_sel[end - 1] == ' ') end--;
+  dom_node_t *anc = n->parent;
+  while (end > 0) {
+    int s = end;
+    while (s > 0 && full_sel[s - 1] != ' ') s--;
+    int al = end - s;
+    if (al >= MAX_SELECTOR) al = MAX_SELECTOR - 1;
+    memcpy(buf, full_sel + s, al);
+    buf[al] = 0;
+
+    bool found = false;
+    while (anc) {
+      if (match_simple_node(buf, anc)) { found = true; break; }
+      anc = anc->parent;
+    }
+    if (!found) return false;
+    anc = anc->parent;  /* continue strictly above this match */
+
+    end = s;
+    while (end > 0 && full_sel[end - 1] == ' ') end--;
+  }
+  return true;
+}
+
+/* Legacy: string-only matcher used by apply_css_with_attrs when
+ * the caller has no DOM node in hand. Treats any selector that
+ * contains a space as a non-match — safer than over-applying. */
+static bool match_selector_attrs(const char *full_sel, const char *tag,
+                                 const char *cls, const char *id) {
+  if (!full_sel || !*full_sel) return false;
+  for (int k = 0; full_sel[k]; k++) {
+    if (full_sel[k] == ' ') return false; /* descendant: need DOM */
+  }
+  return match_simple_sel(full_sel, tag, cls, id);
+}
+
 /* ── Apply CSS overrides for the current element ─────────────── */
+static void apply_css_with_attrs(const char *elem, const char *cls,
+                                 const char *id, const char *inline_style) {
+  /* 1. Stylesheet rules (element / .class / #id / tag.class /
+   * tag#id selectors). Descendant selectors that need DOM
+   * context are skipped here; the DOM-aware entry point
+   * apply_css_for_node handles them. */
+  for (int i = 0; i < css_rule_count; i++) {
+    const css_rule_t *r = &css_rules[i];
+    if (!match_selector_attrs(r->selector, elem, cls, id)) continue;
+    apply_css_to_current_state(r);
+    if (r->margin_top > 0)
+      blank_line();
+  }
+
+  /* 2. Inline style attribute */
+  if (inline_style && inline_style[0]) {
+    parse_css_declarations_to_state(inline_style);
+  }
+}
+
+/* Legacy entry: takes a raw tag string (e.g. `a class="x" href="y"`)
+ * and parses its attributes out of the string. Used by the legacy
+ * parse_html() pipeline that doesn't have a DOM at hand. */
 static void apply_css_for_element(const char *tag) {
   char elem[MAX_SELECTOR];
   char cls[MAX_CSS_CLASS];
@@ -982,75 +1829,36 @@ static void apply_css_for_element(const char *tag) {
   extract_attr(tag, "id", id, MAX_CSS_CLASS);
   extract_attr(tag, "style", inline_style, sizeof(inline_style));
 
-  /* 1. Stylesheet rules (element, .class, #id, element.class selectors).
-   *
-   * For descendant combinators ('.stats .grid', 'header nav a', ...) we
-   * collapse to matching just the right-most simple selector — i.e. we
-   * pretend the rule is '.grid' / 'a' here. That's looser than real CSS
-   * but on real sites the right-most token is usually specific enough
-   * (e.g. `.grid` only appears inside `.stats`), and properties like
-   * `display:grid` need to fire on the page or layout falls apart. */
+  apply_css_with_attrs(elem, cls, id, inline_style);
+}
+
+/* R6/L4: DOM-walk entry. Reads class/id/style directly off the
+ * DOM node (the previous code path was passing only the tag name
+ * to apply_css_for_element, so class/id selectors silently
+ * missed for every element walked through the DOM tree — that
+ * was effectively breaking *all* class-based CSS during the
+ * w_emit_node pass). */
+static void apply_css_for_node(dom_node_t *n) {
+  if (!n || !n->tag_name) return;
+  const char *st  = dom_get_attr(n, "style");
+
+  /* R6/L5+: descendant selector support. Walk rules in source
+   * order so later rules override earlier ones; for each rule
+   * use match_selector_node so `.bar .wrap{display:flex}` only
+   * matches a `.wrap` whose ancestor chain contains `.bar`.
+   * Plain rules (`.brand`, `h1`, …) still work — the matcher
+   * collapses to match_simple_node when there's no space. */
   for (int i = 0; i < css_rule_count; i++) {
     const css_rule_t *r = &css_rules[i];
-    bool match = false;
-    const char *sel = r->selector;
-    const char *last_space = NULL;
-    for (const char *q = sel; *q; q++)
-      if (*q == ' ')
-        last_space = q;
-    if (last_space)
-      sel = last_space + 1;
-
-    if (sel[0] == '.') {
-      if (cls[0] && has_class(cls, sel + 1))
-        match = true;
-    } else if (sel[0] == '#') {
-      if (id[0] && strcmp(sel + 1, id) == 0)
-        match = true;
-    } else {
-      /* Element or Element.class or Element#id */
-      char sel_elem[MAX_SELECTOR];
-      int dot_idx = -1;
-      int hash_idx = -1;
-      for (int k = 0; sel[k]; k++) {
-        if (sel[k] == '.') {
-          dot_idx = k;
-          break;
-        }
-        if (sel[k] == '#') {
-          hash_idx = k;
-          break;
-        }
-      }
-
-      if (dot_idx != -1) {
-        strncpy(sel_elem, sel, dot_idx);
-        sel_elem[dot_idx] = '\0';
-        if (strcmp(sel_elem, elem) == 0 &&
-            has_class(cls, sel + dot_idx + 1))
-          match = true;
-      } else if (hash_idx != -1) {
-        strncpy(sel_elem, sel, hash_idx);
-        sel_elem[hash_idx] = '\0';
-        if (strcmp(sel_elem, elem) == 0 &&
-            strcmp(id, sel + hash_idx + 1) == 0)
-          match = true;
-      } else {
-        if (elem[0] && strcmp(sel, elem) == 0)
-          match = true;
-      }
-    }
-
-    if (match) {
-      apply_css_to_current_state(r);
-      if (r->margin_top > 0)
-        blank_line();
-    }
+    if (!match_selector_node(r->selector, n)) continue;
+    apply_css_to_current_state(r);
+    if (r->margin_top > 0)
+      blank_line();
   }
 
-  /* 2. Inline style attribute */
-  if (inline_style[0]) {
-    parse_css_declarations_to_state(inline_style);
+  /* Inline style attribute */
+  if (st && st[0]) {
+    parse_css_declarations_to_state(st);
   }
 }
 
@@ -1160,6 +1968,59 @@ static int decode_entity(const char *src, char *out) {
   return 0; /* unknown entity, leave as-is */
 }
 
+/* R6/B7: per-byte text colour for the line currently being assembled by
+ * append_word(). Indexed by byte offset in the line buffer (w->current).
+ * g_inline_colors_active gates the whole feature: it is set by append_word
+ * when it records a colour and cleared by push_line once consumed, so the
+ * many direct push_line() callers (headings, blank lines, image rows) are
+ * never affected and keep the single-css_color path. */
+static uint32_t g_inline_colors[LINE_BYTES];
+static uint32_t g_inline_bg[LINE_BYTES];   /* parallel per-byte inline bg (0=none) */
+static bool     g_inline_colors_active = false;
+
+/* Like utf8_to_ascii but also carries a per-byte colour. in_col is indexed
+ * by source byte offset; out_col receives the colour of the source
+ * codepoint that produced each output byte. Used by push_line so colour
+ * boundaries survive UTF-8 normalisation (a middot/dash mid-line,
+ * Cyrillic, etc.). */
+static int utf8_to_ascii_col(const char *in, int in_len, char *out,
+                             int out_cap, const uint32_t *in_col,
+                             uint32_t *out_col, const uint32_t *in_bg,
+                             uint32_t *out_bg) {
+  if (out_cap <= 0) return 0;
+  int w = 0;
+  const unsigned char *p = (const unsigned char *)in;
+  int rem = in_len;
+  int off = 0;
+  while (rem > 0 && w < out_cap - 1) {
+    uint32_t cp = 0;
+    int n = utf8_decode_one(p, rem, &cp);
+    if (n <= 0) break;
+    uint32_t c  = in_col ? in_col[off] : 0;
+    uint32_t cb = in_bg  ? in_bg[off]  : 0;
+    p += n; rem -= n; off += n;
+
+    if (cp < 0x80) {
+      out[w] = (char)cp; out_col[w] = c; out_bg[w] = cb; w++;
+      continue;
+    }
+    if (cp >= 0x0400 && cp <= 0x04FF) {
+      if (w + 2 >= out_cap) break;
+      out[w] = (char)(0xC0 | (cp >> 6)); out_col[w] = c; out_bg[w] = cb; w++;
+      out[w] = (char)(0x80 | (cp & 0x3F)); out_col[w] = c; out_bg[w] = cb; w++;
+      continue;
+    }
+    const char *sub = cp_to_ascii_fallback(cp);
+    if (!sub) sub = cp_to_translit(cp);
+    if (!sub) continue;
+    while (*sub && w < out_cap - 1) {
+      out[w] = *sub++; out_col[w] = c; out_bg[w] = cb; w++;
+    }
+  }
+  out[w] = 0;
+  return w;
+}
+
 static void push_line(const char *text, int len, line_style_t style,
                       bool indent) {
   if (line_count >= MAX_LINES)
@@ -1167,12 +2028,55 @@ static void push_line(const char *text, int len, line_style_t style,
 
   if (len < 0)
     len = 0;
-  if (len > LINE_CHARS)
-    len = LINE_CHARS;
 
-  for (int i = 0; i < len; i++)
-    lines[line_count].text[i] = text[i];
-  lines[line_count].text[len] = '\0';
+  /* R6/B2c: every text line passes through the UTF-8 normalise pass
+   * which keeps Cyrillic as raw UTF-8 (so the eid renderer can hit
+   * the bundled Unifont glyph table) and substitutes other non-ASCII
+   * codepoints to plain ASCII (— → "--", … → "...", →/↑ → ASCII). We
+   * then truncate at LINE_CHARS *visible columns*, never mid-byte
+   * inside a UTF-8 sequence. */
+  /* R6/B7: consume the per-byte inline colour buffer (set by append_word)
+   * exactly once, and only for a non-empty line. Empty pushes (blank_line,
+   * widget placeholders) must NOT consume it — a margin blank_line can fire
+   * between a parent's pending inline text and its flush, and swallowing the
+   * flag there would drop the colours. Direct push_line() callers never set
+   * the flag, so they take the single-css_color path unchanged. */
+  bool inline_cols = g_inline_colors_active && len > 0;
+  if (len > 0) g_inline_colors_active = false;
+
+  char norm_buf[LINE_BYTES];
+  /* static (not stack): push_line is never reentrant, and these LINE_BYTES
+   * arrays on the stack would add ~5 KB to a deeply-recursive walk. */
+  static uint32_t norm_cols[LINE_BYTES];
+  static uint32_t norm_bg[LINE_BYTES];
+  int  norm_len;
+  if (inline_cols)
+    norm_len = utf8_to_ascii_col(text, len, norm_buf, sizeof(norm_buf),
+                                 g_inline_colors, norm_cols,
+                                 g_inline_bg, norm_bg);
+  else
+    norm_len = utf8_to_ascii(text, len, norm_buf, sizeof(norm_buf));
+
+  static uint32_t text_cols[LINE_BYTES];
+  static uint32_t text_bg[LINE_BYTES];
+  int  out_w = 0, cols = 0;
+  for (int i = 0; i < norm_len && cols < LINE_CHARS; ) {
+    unsigned char b = (unsigned char)norm_buf[i];
+    int adv = (b < 0x80) ? 1
+            : ((b & 0xE0) == 0xC0) ? 2
+            : ((b & 0xF0) == 0xE0) ? 3
+            : ((b & 0xF8) == 0xF0) ? 4 : 1;
+    if (i + adv > norm_len) break;
+    if (out_w + adv >= (int)sizeof(lines[line_count].text)) break;
+    for (int k = 0; k < adv; k++) {
+      if (inline_cols) { text_cols[out_w] = norm_cols[i + k];
+                         text_bg[out_w]   = norm_bg[i + k]; }
+      lines[line_count].text[out_w++] = norm_buf[i + k];
+    }
+    i += adv; cols++;
+  }
+  lines[line_count].text[out_w] = '\0';
+  len = out_w;
 
   /* Apply text-transform: uppercase */
   if (style_stack[style_depth].uppercase) {
@@ -1191,78 +2095,243 @@ static void push_line(const char *text, int len, line_style_t style,
   lines[line_count].css_bold = style_stack[style_depth].bold;
   lines[line_count].css_align = style_stack[style_depth].align;
   lines[line_count].full_width_bg = style_stack[style_depth].full_width_bg;
+  lines[line_count].sticky = style_stack[style_depth].sticky;
   lines[line_count].padding = style_stack[style_depth].padding;
   lines[line_count].font_size = style_stack[style_depth].font_size;
   lines[line_count].uppercase = style_stack[style_depth].uppercase;
-  lines[line_count].grid_cols = style_stack[style_depth].my_cols;
-  lines[line_count].grid_col = style_stack[style_depth].my_col;
-  lines[line_count].grid_row = style_stack[style_depth].my_row;
+
+  /* R6/B7: condense the per-byte colours into runs. Only kept when they
+   * add information (>1 colour, or a single run differing from the line
+   * default), so ordinary uniform lines stay on the single-colour path and
+   * render exactly as before. */
+  lines[line_count].color_run_count = 0;
+  if (inline_cols && out_w > 0) {
+    uint8_t rc = 0;
+    uint32_t prev    = 0x01000000;  /* sentinel; no 0x00RRGGBB equals this */
+    uint32_t prev_bg = 0x01000000;  /* sentinel bg */
+    bool overflow = false;
+    for (int i = 0; i < out_w; ) {
+      uint32_t c  = text_cols[i];
+      uint32_t cb = text_bg[i];
+      if (c != prev || cb != prev_bg) {
+        if (rc >= MAX_COLOR_RUNS) { overflow = true; break; }
+        lines[line_count].color_run_start[rc] = (uint16_t)i;
+        lines[line_count].color_run_color[rc] = c;
+        lines[line_count].color_run_bg[rc]    = cb;
+        rc++;
+        prev = c; prev_bg = cb;
+      }
+      unsigned char b = (unsigned char)lines[line_count].text[i];
+      int adv = (b < 0x80) ? 1 : ((b & 0xE0) == 0xC0) ? 2
+              : ((b & 0xF0) == 0xE0) ? 3 : ((b & 0xF8) == 0xF0) ? 4 : 1;
+      i += adv;
+    }
+    uint32_t def = lines[line_count].css_color;
+    bool has_bg_run = false;
+    for (int r = 0; r < rc; r++)
+      if (lines[line_count].color_run_bg[r]) { has_bg_run = true; break; }
+    /* Keep the runs when they add info: any inline bg (a <code> chip), or
+     * >1 run, or a single run whose colour differs from the line default. */
+    if (!overflow && rc >= 1 &&
+        (has_bg_run || rc > 1 ||
+         !(lines[line_count].color_run_color[0] == def ||
+           lines[line_count].color_run_color[0] == 0)))
+      lines[line_count].color_run_count = rc;
+  }
 
   if (style == STYLE_LINK) {
     extract_attr(tag_context, "href", lines[line_count].link_url, 127);
   } else {
     lines[line_count].link_url[0] = '\0';
   }
+  /* Default for everything that isn't an <img> placeholder; the
+   * <img> handler overwrites this immediately after we return. */
+  lines[line_count].image_idx = -1;
+
+  /* R6/L1+L2: pixel-positioned box, anchored against the current
+   * layout frame. The root frame covers (0, 0, CONTENT_W) so this
+   * reproduces the legacy vertical-stream geometry bit-for-bit;
+   * a nested frame (L3+) would shift these into a sub-rectangle. */
+  layout_frame_t *f = layout_top();
+  int bx = indent ? LAYOUT_DEFAULT_INDENT : 0;
+  if (bx > f->w) bx = f->w; /* defensive: never go negative-width */
+  lines[line_count].box_x = f->x + bx;
+  lines[line_count].box_y = f->y;
+  lines[line_count].box_w = f->w - bx;
+  lines[line_count].box_h = LINE_H;
+  f->y += LINE_H;
 
   line_count++;
+}
+
+/* R6/L1+L2: post-adjust the last-pushed line's vertical advance.
+ * `extra` is added on top of the LINE_H already consumed by
+ * push_line(). Used by widget/image emitters to model their
+ * heavier visual height (button + padding, image + card, …).
+ * Advances the *current* frame's cursor, not the global one. */
+static void layout_extend_last(int extra) {
+  if (line_count == 0 || extra <= 0) return;
+  lines[line_count - 1].box_h += extra;
+  layout_top()->y += extra;
+}
+
+/* R6/L1+L2: replace the last-pushed line's vertical advance with
+ * an absolute pixel height. Used by the <img> emitter once the
+ * image dimensions are known. */
+static void layout_set_last_height(int h) {
+  if (line_count == 0 || h <= 0) return;
+  int delta = h - lines[line_count - 1].box_h;
+  lines[line_count - 1].box_h = h;
+  layout_top()->y += delta;
 }
 
 static void blank_line(void) {
   if (line_count == 0)
     return;
-  if (line_count > 0 && lines[line_count - 1].text[0] == '\0')
+  /* L5 fix: don't emit a leading blank at the top of a fresh layout
+   * frame (e.g. a flex/grid column that just pushed its own
+   * private frame via render_subtree). The frame's start_y already
+   * encodes the desired vertical anchor; an unconditional blank
+   * here would shift the *second-and-later* column's contents
+   * down by LINE_H because `blank_line()` looks at the global
+   * lines[] tail and the previous column's last emitted line is
+   * always non-blank. That caused row-flex children (e.g. EN / RU
+   * buttons inside .lang-switch) to render diagonally instead of
+   * side-by-side at the same y.  */
+  layout_frame_t *f = layout_top();
+  if (f && f->y == f->start_y)
     return;
-  /* If we are currently AT a grid container (between cells), an
-   * empty placeholder line gets tagged as non-grid (my_cols=0) and
-   * would force the draw loop to exit the grid run, then re-enter
-   * — which trashes per-column Y cursors and stacks the right
-   * column below the left one. Skip the blank in that case. */
-  if (style_stack[style_depth].grid_cols > 1)
+  if (lines[line_count - 1].text[0] == '\0')
     return;
   push_line("", 0, STYLE_NORMAL, false);
 }
 
+/* R6/L5c: vertical spacing at a block boundary. CSS padding on block
+ * elements is modelled as blank lines; large design paddings (e.g.
+ * `section.bk{padding:90px 0}` → ~5 line-units) were emitted in full on
+ * BOTH the exiting section's bottom and the next section's top, with no
+ * collapsing — burying ~180px of dead space between adjacent sections on
+ * the 420px-tall viewport. Fix: collapse against blank lines already at
+ * the tail (like blank_line() does for the single-blank case) and cap a
+ * single boundary so it never eats more than BLOCK_PAD_MAX lines. */
+#define BLOCK_PAD_MAX 2
+static void emit_block_spacing(void) {
+  if (line_count == 0) return;            /* never lead with a blank */
+  layout_frame_t *f = layout_top();
+  if (f && f->y == f->start_y) return;    /* top of a fresh sub-frame */
+
+  int want = style_stack[style_depth].padding;
+  if (want <= 0) want = 1;                /* default: single blank */
+  if (want > BLOCK_PAD_MAX) want = BLOCK_PAD_MAX;
+
+  int have = 0;                           /* blanks already at the tail */
+  for (int i = line_count - 1; i >= 0 && lines[i].text[0] == '\0'; i--) have++;
+  for (int k = have; k < want; k++) push_line("", 0, STYLE_NORMAL, false);
+}
+
+/* R6/B2c: width math is in *cells*, not bytes. `*len` and `word_len`
+ * are byte indices; we use utf8_cells_n to convert. Buffer overflow
+ * is guarded against LINE_BYTES. */
 static void append_word(char *line, int *len, const char *word, int word_len,
                         line_style_t style, bool indent) {
-  /* Cell-aware wrap: if we're inside a grid cell, our usable width
-   * is only a 1/N slice of the screen. Without this, text from a
-   * single card would still wrap at the full 74-char window and
-   * spill into other cells when the column-aware draw loop offsets
-   * it to cell_x. */
-  int cols = style_stack[style_depth].my_cols;
-  int base = LINE_CHARS;
-  if (cols > 1)
-    base = LINE_CHARS / cols;
-  if (base < 8)
-    base = 8;
-  int max_chars = indent ? (base - 4) : base;
-  if (word_len <= 0)
-    return;
+  /* Wrap to the CURRENT layout frame's width — not the full content
+   * width. Inside a flex/grid column the frame is the column, so text
+   * wraps to the column instead of overflowing into the neighbour
+   * (headings) or being truncated at draw time (body). For the root /
+   * full-width frame this still resolves to ~LINE_CHARS, so legacy
+   * single-column geometry is unchanged.
+   *
+   * The px-per-cell used for the budget must match the width
+   * draw_text_line() will actually paint with for this run, or a
+   * heading drawn with the 9-11 px TTF would still overrun a budget
+   * computed at 8 px/cell. */
+  int frame_w = layout_top()->w;
+  int avail_px = frame_w - (indent ? LAYOUT_DEFAULT_INDENT : 0);
+  if (avail_px < 8) avail_px = 8;
+  int ppc = 8;                                   /* bitmap body cell */
+  if (style == STYLE_H1 || style_stack[style_depth].font_size >= 2)
+    ppc = 11;                                    /* large TTF heading */
+  else if (style == STYLE_H2 || style_stack[style_depth].font_size >= 1)
+    ppc = 9;                                     /* medium TTF heading */
+  int max_cells = avail_px / ppc;
+  int cap = indent ? (LINE_CHARS - 4) : LINE_CHARS;
+  if (max_cells < 1)   max_cells = 1;
+  if (max_cells > cap) max_cells = cap;
+  if (word_len <= 0) return;
 
-  if (*len > 0 && *len + 1 + word_len > max_chars) {
-    push_line(line, *len, style, indent);
-    *len = 0;
-  }
+  /* R6/B7: colour of this word = the style currently on the stack (set by
+   * the enclosing inline <span>'s CSS). Record it per byte so push_line can
+   * reconstruct colour runs. WCOL writes the colour for the byte about to
+   * be appended at *len. */
+  uint32_t wc = style_stack[style_depth].color;
+  /* Per-run inline background: an inline <code> paints a tight chip box.
+   * Only code carries a bg here (other inline bg, e.g. badges, keeps the
+   * existing whole-line / box_bg paths). */
+  uint32_t wbg = (style == STYLE_CODE) ? code_bg_for_theme(body_bg) : 0;
+  g_inline_colors_active = true;
+#define WCOL() do { if ((unsigned)(*len) < LINE_BYTES) { \
+                      g_inline_colors[*len] = wc; g_inline_bg[*len] = wbg; } \
+                  } while (0)
 
-  if (*len > 0)
-    line[(*len)++] = ' ';
-
-  while (word_len > max_chars) {
-    int room = max_chars - *len;
-    if (room <= 0) {
-      push_line(line, *len, style, indent);
-      *len = 0;
-      room = max_chars;
+  /* Short trailing punctuation (".", ",", ")", "!"...) takes no leading
+   * space — it hugs the preceding word (e.g. a closing </code> chip), so
+   * we don't get "equos.iso ." with a gap, and it no longer gets pushed
+   * onto its own line just because a separator space wouldn't fit. */
+  bool punct_only = (word_len > 0 && word_len <= 2);
+  if (punct_only)
+    for (int i = 0; i < word_len; i++) {
+      char c = word[i];
+      if (c != '.' && c != ',' && c != ';' && c != ':' && c != '!' &&
+          c != '?' && c != ')' && c != ']' && c != '}' && c != '\'' &&
+          c != '"') { punct_only = false; break; }
     }
-    for (int i = 0; i < room; i++)
-      line[(*len)++] = *word++;
-    word_len -= room;
+
+  int cur_cells  = utf8_cells_n(line, *len);
+  int word_cells = utf8_cells_n(word, word_len);
+  int sep = (cur_cells > 0 && !punct_only) ? 1 : 0;  /* separator space? */
+
+  if (cur_cells > 0 && cur_cells + sep + word_cells > max_cells) {
     push_line(line, *len, style, indent);
     *len = 0;
+    cur_cells = 0;
+    sep = 0;
   }
 
-  for (int i = 0; i < word_len && *len < max_chars; i++)
-    line[(*len)++] = word[i];
+  if (sep && *len + 1 < LINE_BYTES) {
+    WCOL(); line[(*len)++] = ' ';
+    cur_cells++;
+  }
+
+  /* Word longer than the whole line: split at cell boundaries. */
+  while (word_cells > max_cells) {
+    /* fill what's left of the line in cells */
+    int room_cells = max_cells - cur_cells;
+    int i = 0, took = 0;
+    while (i < word_len && took < room_cells && *len + 4 < LINE_BYTES) {
+      unsigned char b = (unsigned char)word[i];
+      int adv = (b < 0x80) ? 1 : ((b & 0xE0) == 0xC0) ? 2
+              : ((b & 0xF0) == 0xE0) ? 3 : ((b & 0xF8) == 0xF0) ? 4 : 1;
+      if (i + adv > word_len) break;
+      for (int k = 0; k < adv; k++) { WCOL(); line[(*len)++] = word[i + k]; }
+      i += adv; took++;
+    }
+    word += i; word_len -= i; word_cells -= took;
+    push_line(line, *len, style, indent);
+    *len = 0; cur_cells = 0;
+  }
+
+  /* Tail copy: append the rest of the word, byte by byte but
+   * respecting cell budget and buffer headroom. */
+  int i = 0;
+  while (i < word_len && cur_cells < max_cells && *len + 4 < LINE_BYTES) {
+    unsigned char b = (unsigned char)word[i];
+    int adv = (b < 0x80) ? 1 : ((b & 0xE0) == 0xC0) ? 2
+            : ((b & 0xF0) == 0xE0) ? 3 : ((b & 0xF8) == 0xF0) ? 4 : 1;
+    if (i + adv > word_len) break;
+    for (int k = 0; k < adv; k++) { WCOL(); line[(*len)++] = word[i + k]; }
+    i += adv; cur_cells++;
+  }
+#undef WCOL
 }
 
 static void flush_current(char *line, int *len, line_style_t style,
@@ -1290,7 +2359,12 @@ static void read_tag(const char *html, uint32_t size, uint32_t *pos, char *tag,
   tag[len] = '\0';
 }
 
-static int visible_lines(void) { return (WIN_H - CONTENT_Y - 20) / LINE_H; }
+/* Status bar is 18 px; content starts at CONTENT_Y + 14 (page title bar
+ * offset matches what render() uses). Leave LINE_H slack so the
+ * bottom-most line isn't clipped against the status bar border. */
+static int visible_lines(void) {
+  return (WIN_H - 18 - (CONTENT_Y + 14) - LINE_H) / LINE_H;
+}
 
 /* ── Apply CSS overrides for the current element ─────────────── */
 
@@ -1312,66 +2386,1797 @@ static void copy_title_from_html(const char *html, uint32_t size) {
         end++;
       }
 
-      int out = 0;
-      uint32_t j = start;
-      while (j < end && out < 63) {
-        unsigned char b0 = (unsigned char)html[j];
-
-        /* Same UTF-8 → ASCII fallback as in the body text loop. The
-         * <title> ends up rendered to the page-title strip via plain
-         * eid_draw_text with a single-byte font, so leaving raw multi-
-         * byte sequences in produces 2-3 garbage glyphs (e.g. "—"
-         * shows as "ÔÇö"). */
-        if (b0 >= 0x80) {
-          unsigned char b1 = (j + 1 < end) ? (unsigned char)html[j + 1] : 0;
-          unsigned char b2 = (j + 2 < end) ? (unsigned char)html[j + 2] : 0;
-          const char *r = "?";
-          int eaten = 1;
-          char tmp[2] = {0, 0};
-          if (b0 == 0xC2 && b1 == 0xA0) { r = " ";  eaten = 2; }
-          else if (b0 == 0xC2 && b1 == 0xB7) { r = "*"; eaten = 2; }
-          else if (b0 == 0xE2 && b1 == 0x80) {
-            eaten = 3;
-            switch (b2) {
-            case 0x90: case 0x91: case 0x92: case 0x93:
-            case 0x94: case 0x95: r = "-"; break;
-            case 0x98: case 0x99: case 0x9A: case 0x9B:
-              tmp[0] = '\''; r = tmp; break;
-            case 0x9C: case 0x9D: case 0x9E: case 0x9F: r = "\""; break;
-            case 0xA2: r = "*"; break;
-            case 0xA6: r = "..."; break;
-            default:   r = "?"; break;
-            }
-          } else if (b0 == 0xE2 && b1 == 0x86) {
-            eaten = 3;
-            switch (b2) {
-            case 0x90: r = "<-"; break;
-            case 0x91: r = "^";  break;
-            case 0x92: r = "->"; break;
-            case 0x93: r = "v";  break;
-            default:   r = "->"; break;
-            }
-          } else if (b0 >= 0xF0) { eaten = 4; }
-          else if (b0 >= 0xE0)   { eaten = 3; }
-          else if (b0 >= 0xC0)   { eaten = 2; }
-          for (int k = 0; r[k] && out < 63; k++)
-            page_title[out++] = r[k];
-          j += eaten;
-          continue;
-        }
-
-        if (!ascii_isspace((char)b0) || (out > 0 && page_title[out - 1] != ' '))
-          page_title[out++] = ascii_isspace((char)b0) ? ' ' : (char)b0;
-        j++;
+      /* R6/B2: titles often contain U+2014 em-dashes etc. Collapse
+       * whitespace inline as before, but route the byte stream through
+       * the same UTF-8 → ASCII pass everything else uses. */
+      char raw[256];
+      int rlen = 0;
+      for (uint32_t j = start; j < end && rlen < (int)sizeof(raw) - 1; j++) {
+        char c = html[j];
+        if (ascii_isspace(c)) c = ' ';
+        if (c == ' ' && rlen > 0 && raw[rlen - 1] == ' ') continue;
+        raw[rlen++] = c;
       }
-      page_title[out] = '\0';
+      raw[rlen] = '\0';
+      utf8_to_ascii(raw, rlen, page_title, sizeof(page_title));
       return;
     }
   }
 }
 
+/* =====================================================================
+ * DOM-tree-driven parser (phase J3 step 2).
+ *
+ * Replaces the byte-stream state machine below with: build a dom_node_t
+ * tree, then walk it emitting lines through the existing push_line /
+ * append_word / flush_current / blank_line / style-stack helpers. The
+ * line-emission layer is therefore unchanged — only the input layer
+ * (HTML bytes → events) is swapped.
+ *
+ * Why: J4 needs DOM bindings in QuickJS. The tree becomes the single
+ * source of truth that both the renderer and the JS DOM bindings
+ * share.
+ *
+ * Safety net: the legacy parser is kept under parse_html_legacy() and
+ * is reachable via the --legacy CLI flag in case of regression.
+ * ===================================================================== */
+
+#include "dom.h"
+
+#ifdef BROWSER_BUILD
+/* Phase J6a: pull QuickJS + ca-bundle in early so parse_html (defined
+ * well above the load_page() switch) can hand the DOM off to scripts.
+ * The original includes lower in the file (inside the load_page
+ * branch) are kept for clarity. */
+#include "qjs_page.h"
+#include "qjs_window.h"
+#include "../third_party/ca_bundle/ca_bundle.h"
+#endif
+
+typedef struct {
+  /* R6/B2c: buffers hold UTF-8 bytes, sized to fit a full LINE_CHARS
+   * row of Cyrillic-or-wider codepoints. The width caps below
+   * (LINE_CHARS) still mean *visible cells*, not bytes. */
+  char         current[LINE_BYTES];
+  int          current_len;       /* bytes used in current */
+  char         word[LINE_BYTES];
+  int          word_len;          /* bytes used in word */
+  line_style_t style;
+  bool         in_list;
+  bool         in_pre;
+  bool         at_li_start;
+} walk_ctx_t;
+
+/* Save/restore the renderer-visible style for tags that override it.
+ * The CSS style stack already handles colour/bold/etc; this is only
+ * about the per-line `line_style_t` enum (H1/H2/CODE/LINK/BULLET/...). */
+typedef struct {
+  line_style_t style;
+  bool         in_pre;
+} style_save_t;
+
+static void w_flush(walk_ctx_t *w) {
+  if (w->word_len > 0) {
+    append_word(w->current, &w->current_len, w->word, w->word_len,
+                w->style, w->in_list);
+    w->word_len = 0;
+  }
+  flush_current(w->current, &w->current_len, w->style, w->in_list);
+}
+
+static void w_emit_text(walk_ctx_t *w, const char *text) {
+  if (!text) return;
+
+  /* R6/B2: walk UTF-8 by codepoint, not byte. The word/line buffers
+   * count ASCII chars (matching the renderer's 1 char = 8 px font),
+   * so non-ASCII codepoints have to be substituted *before* we hit
+   * the width math in append_word() — otherwise a 2-byte cyrillic
+   * char would be split mid-sequence the moment the byte-counted
+   * word fills up. */
+  const unsigned char *p = (const unsigned char *)text;
+  int rem = 0; while (text[rem]) rem++;
+  while (rem > 0) {
+    uint32_t cp = 0;
+    int n = utf8_decode_one(p, rem, &cp);
+    if (n <= 0) break;
+    p += n; rem -= n;
+
+    if (w->at_li_start) {
+      append_word(w->current, &w->current_len, "*", 1, STYLE_BULLET, true);
+      w->at_li_start = false;
+    }
+
+    if (cp < 0x80) {
+      char c = (char)cp;
+      if (w->in_pre && (c == '\n' || c == '\r')) {
+        if (w->word_len > 0) {
+          append_word(w->current, &w->current_len, w->word, w->word_len,
+                      w->style, w->in_list);
+          w->word_len = 0;
+        }
+        flush_current(w->current, &w->current_len, w->style, w->in_list);
+        continue;
+      }
+      if (c == '&') {
+        char decoded;
+        int consumed = decode_entity((const char *)(p - 1), &decoded);
+        if (consumed > 0) {
+          if (w->word_len < LINE_CHARS) w->word[w->word_len++] = decoded;
+          /* skip the entity body. We already consumed '&'; advance by
+           * (consumed-1) more bytes. */
+          int extra = consumed - 1;
+          if (extra > rem) extra = rem;
+          p += extra; rem -= extra;
+          continue;
+        }
+      }
+      if (ascii_isspace(c)) {
+        if (w->word_len > 0) {
+          append_word(w->current, &w->current_len, w->word, w->word_len,
+                      w->style, w->in_list);
+          w->word_len = 0;
+        }
+      } else if (w->word_len < LINE_CHARS) {
+        w->word[w->word_len++] = c;
+      }
+      continue;
+    }
+
+    /* R6/B2c: Cyrillic Basic (U+0400..U+04FF) — keep raw UTF-8 in
+     * the word buffer so the renderer can render it directly through
+     * eid_draw_text's Unifont lookup. Word/line buffers still count
+     * visible cells, but cell-width math (LINE_CHARS) below uses
+     * codepoint count not byte count; we just need to make sure we
+     * don't split a UTF-8 sequence across the buffer boundary. */
+    if (cp >= 0x0400 && cp <= 0x04FF) {
+      if (w->word_len + 2 < LINE_CHARS) {
+        w->word[w->word_len++] = (char)(0xC0 | (cp >> 6));
+        w->word[w->word_len++] = (char)(0x80 | (cp & 0x3F));
+      }
+      continue;
+    }
+
+    /* Non-ASCII outside Cyrillic Basic: substitute (may be NULL →
+     * drop). All fallback strings are non-whitespace so we don't
+     * need to flush a word boundary. */
+    const char *sub = cp_to_ascii_fallback(cp);
+    if (!sub) sub = cp_to_translit(cp);
+    if (!sub) continue;
+    while (*sub && w->word_len < LINE_CHARS) w->word[w->word_len++] = *sub++;
+  }
+}
+
+/* Synthesize an `<a href="...">`-style string into tag_context so
+ * push_line can pick it up via extract_attr() when emitting STYLE_LINK
+ * lines. Matches the original parser's contract. */
+static void w_set_link_context(const dom_node_t *n) {
+  const char *href = dom_get_attr(n, "href");
+  if (!href) { tag_context[0] = 0; return; }
+  /* Format: a href="VALUE" — exactly what extract_attr expects. */
+  int o = 0;
+  const char *prefix = "a href=\"";
+  while (prefix[o]) { tag_context[o] = prefix[o]; o++; }
+  for (const char *s = href; *s && o < (int)sizeof(tag_context) - 2; s++)
+    tag_context[o++] = *s;
+  tag_context[o++] = '"';
+  tag_context[o] = 0;
+}
+
+/* Forward decl: emit_flex_container / emit_grid_container call
+ * w_emit_node via render_subtree, but they themselves are called
+ * from w_emit_node, so we need a declaration up front. */
+static void w_emit_node(walk_ctx_t *w, dom_node_t *n);
+/* L3 helpers live further down the file (just above
+ * rebuild_lines_from_dom); flex / grid containers call into
+ * them. */
+static void render_subtree(walk_ctx_t *w, dom_node_t *node,
+                           int frame_x, int frame_y, int frame_w,
+                           int *out_first, int *out_count, int *out_h);
+static void layout_translate_range(int first, int count, int dx, int dy);
+
+/* ─────────────────────────────────────────────────────────────────
+ * R6/L4: flex container layout.
+ *
+ * Called by w_emit_node when the current element's CSS resolves
+ * display:flex. Iterates the element's children, decides widths
+ * for flex-direction:row (each child gets a column-shaped sub-
+ * frame), and drops back to vertical stacking for
+ * flex-direction:column. In all cases `gap` and `align-items`
+ * are honoured.
+ *
+ * Width distribution (row):
+ *   - sum_basis = Σ child.flex_basis (children whose basis > 0
+ *                                     consume their basis verbatim)
+ *   - remaining = container_w − sum_basis − (n−1)*gap
+ *   - sum_grow  = Σ child.flex_grow  (default 0; "flex:1" sets to 1)
+ *   - any child with flex_grow > 0 gets:
+ *         child_w = basis + remaining * grow / sum_grow
+ *   - children with neither basis nor grow get an equal share of
+ *     whatever's left (i.e. they behave like flex:1).
+ *
+ * Height computation (row):
+ *   - render_subtree each child into its column.
+ *   - row height = max(child heights).
+ *   - apply align-items: stretch (default) leaves children as is;
+ *     start/end/center re-translate each child vertically within
+ *     the row.
+ *
+ * Column direction:
+ *   - children are stacked normally with `gap` separation; no
+ *     width splitting (each child gets the full container width).
+ *
+ * Justify-content (row):
+ *   - flex-start (default): no horizontal redistribution.
+ *   - center: shift each child by leftover/2.
+ *   - flex-end: shift each child by leftover.
+ *   - space-between: split leftover between gaps.
+ *
+ * The function returns after handling the children; the caller
+ * skips the normal child-recursion loop. The container's own
+ * outer style stack frame (push_style_state above) is left
+ * untouched and will be popped after the postlude.
+ * ────────────────────────────────────────────────────────────── */
+
+/* Helper: read an element's flex-item props (basis, grow) without
+ * touching the global style stack. Used by emit_flex_container
+ * to decide each child's width. */
+typedef struct {
+  int basis;
+  int grow;
+  bool has_grow;
+  bool has_basis;
+} flex_item_props_t;
+
+static void lookup_flex_item_props(dom_node_t *n, flex_item_props_t *out) {
+  out->basis = 0; out->grow = 0;
+  out->has_basis = false; out->has_grow = false;
+  if (!n || !n->tag_name) return;
+  const char *st  = dom_get_attr(n, "style");
+
+  /* Walk the global stylesheet rules and accumulate any flex-grow
+   * / flex-basis that matches this element. Uses the same
+   * descendant-aware matcher as apply_css_for_node so per-item
+   * rules like `.hero-grid > div{flex:1}` resolve correctly
+   * (well, modulo `>`, which we treat as descendant). */
+  for (int i = 0; i < css_rule_count; i++) {
+    const css_rule_t *r = &css_rules[i];
+    if (!match_selector_node(r->selector, n)) continue;
+    if (r->flex_grow  > 0) { out->grow  = r->flex_grow;  out->has_grow  = true; }
+    if (r->flex_basis > 0) { out->basis = r->flex_basis; out->has_basis = true; }
+  }
+  /* Inline style overrides stylesheet matches. */
+  if (st && st[0]) {
+    css_rule_t tmp;
+    memset(&tmp, 0, sizeof(tmp));
+    parse_css_declarations(&tmp, st, (int)strlen(st));
+    if (tmp.flex_grow  > 0) { out->grow  = tmp.flex_grow;  out->has_grow  = true; }
+    if (tmp.flex_basis > 0) { out->basis = tmp.flex_basis; out->has_basis = true; }
+  }
+}
+
+/* Count renderable element children (skip text-only / comment
+ * nodes; they get absorbed into whichever flex item contains
+ * them by virtue of being inside that item's subtree). */
+static int count_flex_children(dom_node_t *parent) {
+  int n = 0;
+  for (dom_node_t *c = parent->first_child; c; c = c->next_sibling) {
+    if (c->type == DOM_NODE_ELEMENT) n++;
+  }
+  return n;
+}
+
+static void emit_flex_container(walk_ctx_t *w, dom_node_t *n) {
+  layout_frame_t *parent = layout_top();
+  int container_x = parent->x;
+  int container_y = parent->y;
+  int container_w = parent->w;
+  int flex_dir    = style_stack[style_depth].flex_dir;
+  int gap         = style_stack[style_depth].gap_px;
+  int justify     = style_stack[style_depth].justify;
+  int align       = style_stack[style_depth].align_items;
+
+  /* Flush any pending inline text from the parent first; we
+   * don't want the container's children to inherit a half-built
+   * word run from before. */
+  w_flush(w);
+
+  /* Column direction → no horizontal splitting. Just walk the
+   * children normally but insert `gap` between them. Cheap and
+   * sufficient because the existing block stream already stacks
+   * vertically. The only thing we add is the gap. */
+  if (flex_dir == 1) {
+    int first = 1;
+    for (dom_node_t *c = n->first_child; c; c = c->next_sibling) {
+      if (c->type != DOM_NODE_ELEMENT) {
+        /* keep text/comment in-line behaviour for column flex */
+        w_emit_node(w, c);
+        continue;
+      }
+      if (!first && gap > 0) {
+        layout_top()->y += gap;
+      }
+      w_emit_node(w, c);
+      first = 0;
+    }
+    w_flush(w);
+    return;
+  }
+
+  /* ---- flex-direction: row ---- */
+  int nchildren = count_flex_children(n);
+  if (nchildren <= 0) {
+    /* No element children → fall back to normal recursion so
+     * orphan text still gets rendered. */
+    for (dom_node_t *c = n->first_child; c; c = c->next_sibling)
+      w_emit_node(w, c);
+    w_flush(w);
+    return;
+  }
+
+  /* Single child row is the same as normal recursion. */
+  if (nchildren == 1) {
+    for (dom_node_t *c = n->first_child; c; c = c->next_sibling)
+      w_emit_node(w, c);
+    w_flush(w);
+    return;
+  }
+
+  /* If the container is too narrow to give every child at least
+   * MIN_COL_W pixels, degrade to vertical stacking. This is
+   * critical at our 604-px content width: 6+ columns just turn
+   * into chopped text. */
+  const int MIN_COL_W = 80;
+  int gross_w = container_w - (nchildren - 1) * gap;
+  if (gross_w / nchildren < MIN_COL_W) {
+    /* The container's `gap` is a *horizontal* gutter; reusing it as the
+     * vertical spacing of the degraded stack massively inflates height
+     * (e.g. a nav with gap:24px and 4 links would add 72px of dead
+     * vertical space). Cap it to a tight vertical gutter. */
+    int vgap = gap > 6 ? 6 : gap;
+    int first = 1;
+    for (dom_node_t *c = n->first_child; c; c = c->next_sibling) {
+      if (c->type != DOM_NODE_ELEMENT) { w_emit_node(w, c); continue; }
+      if (!first && vgap > 0) layout_top()->y += vgap;
+      w_emit_node(w, c);
+      /* L5+: force a line break between degraded-vertical flex
+       * children. Without this, a `.badges` row of 7 inline
+       * `<span class="badge">` siblings — degraded to vertical
+       * because the column is too narrow — would concatenate all
+       * 7 text runs into a single line, then bg-paint the row
+       * yellow once, looking like one continuous yellow bar with
+       * all 7 labels smushed together. */
+      w_flush(w);
+      first = 0;
+    }
+    w_flush(w);
+    return;
+  }
+
+  /* Compute each child's column width. */
+  int widths[16] = {0};
+  int starts[16] = {0};
+  int first_idx[16];
+  int counts[16];
+  int heights[16] = {0};
+
+  if (nchildren > 16) nchildren = 16; /* clamp; rare in practice */
+
+  /* Pass 1: gather props. */
+  int sum_basis = 0;
+  int sum_grow  = 0;
+  int n_auto    = 0;
+  flex_item_props_t props[16] = {{0}};
+  {
+    int idx = 0;
+    for (dom_node_t *c = n->first_child; c && idx < nchildren;
+         c = c->next_sibling) {
+      if (c->type != DOM_NODE_ELEMENT) continue;
+      lookup_flex_item_props(c, &props[idx]);
+      if (props[idx].has_basis) sum_basis += props[idx].basis;
+      if (props[idx].has_grow ) sum_grow  += props[idx].grow;
+      if (!props[idx].has_basis && !props[idx].has_grow) n_auto++;
+      idx++;
+    }
+  }
+
+  int remaining = container_w - sum_basis - (nchildren - 1) * gap;
+  if (remaining < 0) remaining = 0;
+  /* Pool to distribute to grow-children. If no child has grow but
+   * some are "auto" (neither grow nor basis), treat each auto as
+   * flex:1 — this is the dominant case (3-column "div / div / div"
+   * without explicit flex on any item). */
+  int eff_sum_grow = sum_grow;
+  if (eff_sum_grow == 0 && n_auto > 0) eff_sum_grow = n_auto;
+
+  /* Pass 2: assign widths. */
+  for (int i = 0; i < nchildren; i++) {
+    int wpx = props[i].has_basis ? props[i].basis : 0;
+    if (props[i].has_grow) {
+      wpx += (remaining * props[i].grow) / (eff_sum_grow > 0 ? eff_sum_grow : 1);
+    } else if (!props[i].has_basis && n_auto > 0) {
+      wpx += (remaining * 1) / (eff_sum_grow > 0 ? eff_sum_grow : 1);
+    }
+    if (wpx < MIN_COL_W) wpx = MIN_COL_W;
+    widths[i] = wpx;
+  }
+
+  /* Justify-content: compute extra horizontal offset per column. */
+  int total_used = (nchildren - 1) * gap;
+  for (int i = 0; i < nchildren; i++) total_used += widths[i];
+  int leftover = container_w - total_used;
+  if (leftover < 0) leftover = 0;
+
+  int extra_gap = gap;
+  int x_cursor  = container_x;
+  if (justify == 2 /*center*/) {
+    x_cursor += leftover / 2;
+  } else if (justify == 1 /*flex-end*/) {
+    x_cursor += leftover;
+  } else if (justify == 3 /*space-between*/ && nchildren > 1) {
+    extra_gap = gap + (leftover / (nchildren - 1));
+  }
+  for (int i = 0; i < nchildren; i++) {
+    starts[i] = x_cursor;
+    x_cursor += widths[i] + extra_gap;
+  }
+
+  /* Pass 3: render each child into its column. We anchor each
+   * column at (starts[i], container_y, widths[i]); render_subtree
+   * pushes that as a private frame so emitted lines get correct
+   * box_x/box_y. */
+  int max_h = 0;
+  {
+    int idx = 0;
+    for (dom_node_t *c = n->first_child; c && idx < nchildren;
+         c = c->next_sibling) {
+      if (c->type != DOM_NODE_ELEMENT) continue;
+      int first = -1, count = 0, h = 0;
+      render_subtree(w, c, starts[idx], container_y, widths[idx],
+                     &first, &count, &h);
+      first_idx[idx] = first;
+      counts[idx]    = count;
+      heights[idx]   = h;
+      if (h > max_h) max_h = h;
+      idx++;
+    }
+  }
+
+  /* Pass 4: align-items vertical fixup.
+   *
+   * L5+: when one flex child degraded to a vertical stack
+   * (e.g. .nav with 4 links → ~162 px tall) and the others are
+   * single-line (~18 px), `align-items:center` against the
+   * raw max_h would shove the short children halfway down the
+   * tall column and they'd visually collide with the tall
+   * column's later lines. Cap the centering reference to a
+   * "typical" height: if max_h is more than 2× the second-
+   * largest child, center against that smaller height instead.
+   * Tall column keeps dy=0, others get a small shift, no
+   * collision. */
+  int ref_h = max_h;
+  if (align == 3 /*center*/ && nchildren > 1) {
+    int top1 = 0, top2 = 0;
+    for (int i = 0; i < nchildren; i++) {
+      int h = heights[i];
+      if (h > top1) { top2 = top1; top1 = h; }
+      else if (h > top2) { top2 = h; }
+    }
+    if (top2 > 0 && top1 > 2 * top2) ref_h = top2;
+  }
+  if (align != 0) {
+    for (int i = 0; i < nchildren; i++) {
+      if (counts[i] <= 0) continue;
+      int dy = 0;
+      if      (align == 3 /*center*/) dy = (ref_h - heights[i]) / 2;
+      else if (align == 2 /*end*/)    dy = (max_h - heights[i]);
+      /* align == 1 (start): dy = 0 */
+      if (dy > 0) layout_translate_range(first_idx[i], counts[i], 0, dy);
+    }
+  }
+
+  /* Advance the parent frame's cursor by the row's max height. */
+  parent->y = container_y + max_h;
+  w_flush(w);
+}
+
+/* ─────────────────────────────────────────────────────────────────
+ * R6/L5: display:grid container layout.
+ *
+ * Supports the grid-template-columns vocabulary the real
+ * EquinoxOS landing page (equinoxos.duckdns.org) uses:
+ *
+ *   grid-template-columns: 1fr 1fr
+ *   grid-template-columns: 1.05fr .95fr
+ *   grid-template-columns: 200px 1fr
+ *   grid-template-columns: repeat(3, 1fr)
+ *   grid-template-columns: repeat(2, 1fr)
+ *   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr))
+ *
+ * Flow is row-major: child i lands in column (i % n_cols), row
+ * (i / n_cols). Row height is max of its cells' heights. After a
+ * row finishes, y advances by row_h + gap (per-row gap; we don't
+ * yet split row-gap vs column-gap).
+ *
+ * Track distribution:
+ *   - parse the template into a list of tracks; each track is
+ *     either a fixed px (rule_kind=PX) or a fractional fr
+ *     (rule_kind=FR, with a "fr count" — 1, 1.05, .95 etc. scaled
+ *     by 100 to stay integer).
+ *   - For auto-fit / auto-fill minmax(min,1fr) we compute
+ *     n_cols = max(1, container_w / min_px) and synthesise N
+ *     equal 1fr tracks.
+ *   - widths: sum_px = Σ PX tracks; remaining = container_w
+ *     − sum_px − (n_cols−1) * col_gap; sum_fr = Σ fr counts;
+ *     each FR track gets remaining * fr_count / sum_fr. Final
+ *     widths clamped to at least MIN_COL_W = 50px so single-char
+ *     columns aren't created at narrow widths.
+ *
+ * Like flex, grid degrades to vertical stacking when the
+ * container is too narrow for the requested number of columns.
+ * ────────────────────────────────────────────────────────────── */
+
+typedef struct { int kind; int px; int fr_x100; } grid_track_t;
+
+/* Parse a single track token (e.g. "1fr", "1.05fr", "200px",
+ * "auto", "minmax(160px,1fr)"). For minmax we keep the *fr*
+ * side as the track but remember the min-px in `min_px_out` —
+ * the caller uses that for auto-fit column-count math. */
+static bool grid_parse_track(const char *p, const char *end,
+                             grid_track_t *out, int *min_px_out) {
+  while (p < end && (*p == ' ' || *p == ',')) p++;
+  if (p >= end) return false;
+
+  /* minmax(...) — read the second argument and keep the inner
+   * track; the first arg (min) feeds auto-fit column count. */
+  if (strncmp(p, "minmax(", 7) == 0) {
+    const char *open = p + 7;
+    const char *comma = strchr(open, ',');
+    const char *close = strchr(open, ')');
+    if (!comma || !close || comma >= close) return false;
+    /* min part */
+    int mn = 0; const char *q = open;
+    while (q < comma && *q == ' ') q++;
+    while (q < comma && *q >= '0' && *q <= '9') { mn = mn*10 + (*q-'0'); q++; }
+    if (min_px_out) *min_px_out = mn > 0 ? mn : 0;
+    /* recurse on the second part */
+    return grid_parse_track(comma + 1, close, out, NULL);
+  }
+  /* "Xfr" or "X.Yfr" */
+  /* digits, optional dot, optional digits */
+  int int_part = 0, frac_part = 0, frac_div = 1;
+  const char *q = p;
+  bool had_digit = false;
+  while (q < end && *q >= '0' && *q <= '9') {
+    int_part = int_part * 10 + (*q - '0'); q++; had_digit = true;
+  }
+  if (q < end && *q == '.') {
+    q++;
+    while (q < end && *q >= '0' && *q <= '9') {
+      frac_part = frac_part * 10 + (*q - '0');
+      frac_div  = frac_div  * 10;
+      q++; had_digit = true;
+    }
+  }
+  /* skip whitespace */
+  while (q < end && *q == ' ') q++;
+  if (q + 2 <= end && strncmp(q, "fr", 2) == 0) {
+    int x100 = int_part * 100 + (frac_part * 100) / frac_div;
+    if (x100 <= 0) x100 = 100;
+    out->kind = 1; /* FR */
+    out->fr_x100 = x100;
+    out->px = 0;
+    return true;
+  }
+  if (q + 2 <= end && strncmp(q, "px", 2) == 0) {
+    out->kind = 0; /* PX */
+    out->px = int_part;
+    out->fr_x100 = 0;
+    return true;
+  }
+  /* "auto" or anything else → treat as 1fr */
+  if (!had_digit && q + 4 <= end && strncmp(q, "auto", 4) == 0) {
+    out->kind = 1; out->fr_x100 = 100; out->px = 0;
+    return true;
+  }
+  return false;
+}
+
+/* Parse grid-template-columns string. Fills `tracks[]` with
+ * decoded tracks, returns track count. Handles repeat(N, X)
+ * and repeat(auto-fit/auto-fill, minmax(Y, 1fr)). */
+static int grid_parse_template(const char *spec, int container_w, int gap,
+                               grid_track_t *tracks, int max_tracks) {
+  int n = 0;
+  const char *p = spec;
+  while (*p && n < max_tracks) {
+    while (*p == ' ' || *p == ',') p++;
+    if (!*p) break;
+    /* repeat(...) */
+    if (strncmp(p, "repeat(", 7) == 0) {
+      const char *open  = p + 7;
+      const char *comma = strchr(open, ',');
+      const char *close = strchr(open, ')');
+      if (!comma || !close) break;
+      /* Count token */
+      char count_tok[16] = {0};
+      int cl = (int)(comma - open);
+      if (cl > 15) cl = 15;
+      memcpy(count_tok, open, cl);
+      /* trim */
+      char *ct = count_tok;
+      while (*ct == ' ') ct++;
+      int reps = 0;
+      bool auto_fit = false;
+      if (strncmp(ct, "auto-fit", 8) == 0 ||
+          strncmp(ct, "auto-fill", 9) == 0) {
+        auto_fit = true;
+      } else {
+        while (*ct >= '0' && *ct <= '9') { reps = reps*10 + (*ct-'0'); ct++; }
+      }
+      grid_track_t inner;
+      int min_px = 0;
+      if (!grid_parse_track(comma + 1, close, &inner, &min_px)) break;
+      if (auto_fit) {
+        int mp = min_px > 0 ? min_px : 100;
+        /* how many fit: (W + gap) / (mp + gap)  (since N tracks
+         * need (N-1) gaps between them: total = N*mp + (N-1)*gap
+         * ≤ W → N ≤ (W + gap)/(mp + gap)) */
+        reps = (container_w + gap) / (mp + gap);
+        if (reps < 1) reps = 1;
+        if (reps > max_tracks - n) reps = max_tracks - n;
+      }
+      for (int i = 0; i < reps && n < max_tracks; i++) tracks[n++] = inner;
+      p = close + 1;
+      continue;
+    }
+    /* single track */
+    const char *q = p;
+    while (*q && *q != ' ' && *q != ',') q++;
+    grid_track_t one;
+    if (!grid_parse_track(p, q, &one, NULL)) break;
+    tracks[n++] = one;
+    p = q;
+  }
+  return n;
+}
+
+static void emit_grid_container(walk_ctx_t *w, dom_node_t *n) {
+  layout_frame_t *parent = layout_top();
+  int container_x = parent->x;
+  int container_y = parent->y;
+  int container_w = parent->w;
+  int gap         = style_stack[style_depth].gap_px;
+  int align       = style_stack[style_depth].align_items;
+  const char *spec = style_stack[style_depth].grid_cols;
+
+  w_flush(w);
+
+  /* No template → fall back to plain block recursion. */
+  if (!spec[0]) {
+    for (dom_node_t *c = n->first_child; c; c = c->next_sibling)
+      w_emit_node(w, c);
+    return;
+  }
+
+  grid_track_t tracks[8];
+  int n_cols = grid_parse_template(spec, container_w, gap, tracks, 8);
+  if (n_cols <= 0) {
+    /* Unparseable template → treat as block. */
+    for (dom_node_t *c = n->first_child; c; c = c->next_sibling)
+      w_emit_node(w, c);
+    return;
+  }
+
+  /* Compute track widths. */
+  int widths[8] = {0};
+  int starts[8] = {0};
+  const int MIN_COL_W = 50;
+  int sum_px = 0;
+  int sum_fr = 0;
+  for (int i = 0; i < n_cols; i++) {
+    if (tracks[i].kind == 0) sum_px += tracks[i].px;
+    else                      sum_fr += tracks[i].fr_x100;
+  }
+  int remaining = container_w - sum_px - (n_cols - 1) * gap;
+  if (remaining < 0) remaining = 0;
+
+  /* If even one column would be < MIN_COL_W, degrade to vertical
+   * stack of element children with `gap` between rows. */
+  bool too_narrow = false;
+  for (int i = 0; i < n_cols; i++) {
+    if (tracks[i].kind == 0) widths[i] = tracks[i].px;
+    else if (sum_fr > 0)     widths[i] = (remaining * tracks[i].fr_x100) / sum_fr;
+    else                      widths[i] = remaining / n_cols;
+    if (widths[i] < MIN_COL_W) too_narrow = true;
+  }
+
+  if (too_narrow) {
+    int first = 1;
+    for (dom_node_t *c = n->first_child; c; c = c->next_sibling) {
+      if (c->type != DOM_NODE_ELEMENT) { w_emit_node(w, c); continue; }
+      if (!first && gap > 0) layout_top()->y += gap;
+      w_emit_node(w, c);
+      first = 0;
+    }
+    w_flush(w);
+    return;
+  }
+
+  /* x positions: simple left-to-right, no justify-content
+   * (grid centring is rare on the target page). */
+  int x_cursor = container_x;
+  for (int i = 0; i < n_cols; i++) {
+    starts[i] = x_cursor;
+    x_cursor += widths[i] + gap;
+  }
+
+  /* Collect element children (text/comment children inside a
+   * grid container are uncommon — we just skip them in the
+   * cell-layout pass; the existing block recursion already
+   * absorbs them through render_subtree per cell). */
+  dom_node_t *kids[32];
+  int n_kids = 0;
+  for (dom_node_t *c = n->first_child; c && n_kids < 32;
+       c = c->next_sibling) {
+    if (c->type == DOM_NODE_ELEMENT) kids[n_kids++] = c;
+  }
+  if (n_kids == 0) {
+    /* Fall through: render any text children. */
+    for (dom_node_t *c = n->first_child; c; c = c->next_sibling)
+      w_emit_node(w, c);
+    return;
+  }
+
+  int n_rows = (n_kids + n_cols - 1) / n_cols;
+  int row_y  = container_y;
+  for (int r = 0; r < n_rows; r++) {
+    int row_first[8];
+    int row_count[8];
+    int row_h    [8] = {0};
+    int max_h = 0;
+    for (int c = 0; c < n_cols; c++) {
+      int idx = r * n_cols + c;
+      if (idx >= n_kids) { row_first[c] = -1; row_count[c] = 0; continue; }
+      int first = -1, count = 0, h = 0;
+      render_subtree(w, kids[idx], starts[c], row_y, widths[c],
+                     &first, &count, &h);
+      row_first[c] = first;
+      row_count[c] = count;
+      row_h[c]     = h;
+      if (h > max_h) max_h = h;
+    }
+    /* align-items inside the row (mirrors flex). */
+    if (align != 0) {
+      for (int c = 0; c < n_cols; c++) {
+        if (row_count[c] <= 0) continue;
+        int dy = 0;
+        if      (align == 3 /*center*/) dy = (max_h - row_h[c]) / 2;
+        else if (align == 2 /*end*/)    dy = (max_h - row_h[c]);
+        if (dy > 0) layout_translate_range(row_first[c], row_count[c], 0, dy);
+      }
+    }
+    row_y += max_h;
+    if (r < n_rows - 1) row_y += gap;
+  }
+  parent->y = row_y;
+  w_flush(w);
+}
+
+/* Sum the visible cell width of every TEXT descendant of `n`. Used to
+ * right-align a `margin-left:auto` element: we need to know how wide
+ * its own text will be before we pad the line up to the frame edge.
+ * Approximate (ignores entity expansion / inline-image slots) but
+ * accurate for the common case of a short label like "84.1%". */
+static int measure_node_text_cells(dom_node_t *n) {
+  if (!n) return 0;
+  if (n->type == DOM_NODE_TEXT)
+    return n->text ? utf8_cells_n(n->text, (int)strlen(n->text)) : 0;
+  if (n->type == DOM_NODE_COMMENT) return 0;
+  int total = 0;
+  for (dom_node_t *c = n->first_child; c; c = c->next_sibling)
+    total += measure_node_text_cells(c);
+  return total;
+}
+
+static void w_emit_node(walk_ctx_t *w, dom_node_t *n) {
+  if (!n) return;
+
+  if (n->type == DOM_NODE_TEXT) { w_emit_text(w, n->text); return; }
+  if (n->type == DOM_NODE_COMMENT) return;
+  if (n->type == DOM_NODE_DOCUMENT) {
+    for (dom_node_t *c = n->first_child; c; c = c->next_sibling)
+      w_emit_node(w, c);
+    return;
+  }
+  /* ELEMENT */
+  const char *tag = n->tag_name;
+
+  /* Skip metadata / non-rendered subtrees. */
+  if (tag_eq(tag, "head")     || tag_eq(tag, "script")   ||
+      tag_eq(tag, "style")    || tag_eq(tag, "noscript") ||
+      tag_eq(tag, "title")    || tag_eq(tag, "meta")     ||
+      tag_eq(tag, "link")) {
+    /* <link rel="stylesheet" href="..."> — fetch local CSS like the
+     * legacy parser did. */
+    if (tag_eq(tag, "link")) {
+      const char *rel  = dom_get_attr(n, "rel");
+      const char *href = dom_get_attr(n, "href");
+      if (rel && strstr(rel, "stylesheet") && href && href[0] &&
+          !strstr(href, "http")) {
+        uint32_t css_size = 0;
+        void *css_data = (void *)_syscall(SYS_READ_FILE, (uint64_t)href,
+                                          (uint64_t)&css_size, 0, 0, 0);
+        if (css_data) parse_css_block((const char *)css_data, css_size);
+      }
+    }
+    return;
+  }
+
+  push_style_state();
+  apply_css_for_node(n);
+  if (style_stack[style_depth].display_none) { pop_style_state(); return; }
+
+  /* R6/B5: record this element's document-y for in-page anchor jumps
+   * (`<a href="#id">`). layout_top()->y is the content-relative pixel
+   * offset where the element's content will start. */
+  {
+    const char *nid = dom_get_attr(n, "id");
+    if (nid && nid[0] && g_anchor_count < MAX_ANCHORS) {
+      strncpy(g_anchors[g_anchor_count].id, nid, sizeof(g_anchors[0].id) - 1);
+      g_anchors[g_anchor_count].id[sizeof(g_anchors[0].id) - 1] = '\0';
+      g_anchors[g_anchor_count].y = layout_top()->y;
+      g_anchor_count++;
+    }
+  }
+
+  style_save_t save = { w->style, w->in_pre };
+
+  /* R6/L5: box-level bg. If this is a *block-level* element with a
+   * resolved CSS bg, remember where its line range starts so we can
+   * paint a solid rect behind the whole box at the end (covers the
+   * gaps between child lines that per-line bg can't reach, e.g. the
+   * .terminal card body). Inline tags keep per-line bg and are
+   * excluded so a `.badge` <span> never becomes a full-box slab. */
+  bool box_bg_block =
+      style_stack[style_depth].bg != 0 &&
+      !tag_eq(tag, "span") && !tag_eq(tag, "a")    && !tag_eq(tag, "code") &&
+      !tag_eq(tag, "em")   && !tag_eq(tag, "b")    && !tag_eq(tag, "i")    &&
+      !tag_eq(tag, "strong") && !tag_eq(tag, "small") &&
+      !tag_eq(tag, "sup")  && !tag_eq(tag, "sub")  && !tag_eq(tag, "mark") &&
+      !tag_eq(tag, "label") && !tag_eq(tag, "button");
+  if (tag_eq(tag, "body")) box_bg_block = false;  /* body paints via body_bg */
+  int box_bg_first = line_count;
+  uint32_t box_bg_color = style_stack[style_depth].bg;
+
+  /* ---- per-tag prelude ----------------------------------------- */
+  if (tag_eq(tag, "body")) {
+    if (style_stack[style_depth].bg) body_bg = style_stack[style_depth].bg;
+  } else if (tag_eq(tag, "h1")) {
+    w_flush(w);
+    blank_line();
+    w->style = STYLE_H1;
+  } else if (tag_eq(tag, "h2") || tag_eq(tag, "h3") || tag_eq(tag, "h4") ||
+             tag_eq(tag, "h5") || tag_eq(tag, "h6")) {
+    w_flush(w);
+    blank_line();
+    w->style = STYLE_H2;
+    style_stack[style_depth].bold = true;
+  } else if (tag_eq(tag, "p")       || tag_eq(tag, "div")     ||
+             tag_eq(tag, "section") || tag_eq(tag, "header")  ||
+             tag_eq(tag, "footer")  || tag_eq(tag, "article") ||
+             tag_eq(tag, "main")    || tag_eq(tag, "nav")     ||
+             tag_eq(tag, "aside")   || tag_eq(tag, "blockquote")) {
+    w_flush(w);
+    emit_block_spacing();
+  } else if (tag_eq(tag, "center")) {
+    w_flush(w);
+    style_stack[style_depth].align = ALIGN_CENTER;
+  } else if (tag_eq(tag, "br")) {
+    w_flush(w);
+  } else if (tag_eq(tag, "hr")) {
+    w_flush(w);
+    push_line("", 0, STYLE_HR, false);
+  } else if (tag_eq(tag, "img")) {
+    w_flush(w);
+    /* R6/B4: try to fetch + decode. On success push a STYLE_IMAGE
+     * line carrying the image index; on failure fall back to the
+     * old text placeholder so the slot is still visible. */
+    const char *src = dom_get_attr(n, "src");
+    int idx = src ? load_image_for_src(src) : -1;
+    if (idx >= 0) {
+#ifdef BROWSER_BUILD
+      /* L5+: if we're emitting this <img> inside a narrower
+       * flex/grid column, halve the cached pixel buffer again
+       * until it fits the column. load_image_for_src() only knows
+       * about CONTENT_W (the whole content area), so a 1080² logo
+       * lands at 270² — fine for a hero <center><img>, but a
+       * watermark-sized monster inside a 89 px brand column.
+       * Aspect-preserving, in-place. We also leave 2*IMG_PAD card
+       * room so the card frame still fits inside the column. */
+      const int IMG_PAD = 6;
+      layout_frame_t *cf = layout_top();
+      int max_col_w = (cf ? cf->w : CONTENT_W) - IMG_PAD * 2;
+      if (max_col_w < 8) max_col_w = 8;
+      eq_image_t *im = &g_images[idx];
+      /* R6/L6b: honour an explicit CSS width/height first (e.g. a
+       * `.brand img{width:24px;height:24px}` logo). Without this the
+       * logo decodes huge and is only shrunk to the column width,
+       * blowing up the (now pinned) bar. If only one axis is given,
+       * preserve aspect from the other. */
+      int want_w = style_stack[style_depth].img_w;
+      int want_h = style_stack[style_depth].img_h;
+      if (want_w > 0 || want_h > 0) {
+        int sw = im->w > 0 ? im->w : 1;
+        int sh = im->h > 0 ? im->h : 1;
+        if (want_w <= 0) want_w = sw * want_h / sh;
+        if (want_h <= 0) want_h = sh * want_w / sw;
+        img_resize_to(im, want_w, want_h);
+      }
+      while (im->w > max_col_w && im->w > 1 && im->h > 1) {
+        int nw = im->w / 2; if (nw < 1) nw = 1;
+        int nh = im->h / 2; if (nh < 1) nh = 1;
+        uint8_t *dst = (uint8_t *)malloc((size_t)nw * nh * 4);
+        if (!dst) break;
+        for (int y = 0; y < nh; y++) {
+          const uint8_t *srow = im->rgba + (size_t)(y * 2) * im->w * 4;
+          uint8_t       *drow = dst       + (size_t) y      * nw   * 4;
+          for (int x = 0; x < nw; x++) {
+            const uint8_t *sp = srow + (size_t)(x * 2) * 4;
+            drow[x * 4 + 0] = sp[0];
+            drow[x * 4 + 1] = sp[1];
+            drow[x * 4 + 2] = sp[2];
+            drow[x * 4 + 3] = sp[3];
+          }
+        }
+        eq_image_free(im);
+        im->rgba = dst; im->w = nw; im->h = nh;
+      }
+#endif
+      push_line("", 0, STYLE_IMAGE, w->in_list);
+      lines[line_count - 1].image_idx = idx;
+#ifdef BROWSER_BUILD
+      /* L1: replace the default LINE_H placeholder with the
+       * image's real on-screen advance — image + 2*PAD card + 6
+       * px gap, matching render()'s tail bump. */
+      int img_h = g_images[idx].h + IMG_PAD * 2 + 6;
+      layout_set_last_height(img_h);
+#endif
+    } else {
+      push_line("[ IMAGE ]", 9, STYLE_MUTED, w->in_list);
+    }
+  } else if (tag_eq(tag, "ul") || tag_eq(tag, "ol")) {
+    w_flush(w);
+    w->in_list = true;
+  } else if (tag_eq(tag, "li")) {
+    w_flush(w);
+    w->style = STYLE_BULLET;
+    w->at_li_start = true;
+  } else if (tag_eq(tag, "b") || tag_eq(tag, "strong")) {
+    style_stack[style_depth].bold = true;
+  } else if (tag_eq(tag, "i") || tag_eq(tag, "em")) {
+    style_stack[style_depth].color = CLR_MUTED;
+  } else if (tag_eq(tag, "u")) {
+    style_stack[style_depth].underline = true;
+  } else if (tag_eq(tag, "span")) {
+    /* R6/L5+ chip separator: a `<span>` with its own CSS background
+     * (the typical `.badge` / chip pattern) is always meant to read
+     * as a discrete pill. We don't render an inline-block box, but
+     * we *do* break the word boundary so consecutive badges with
+     * no whitespace between tags ("</span><span>") don't glue into
+     * one giant word like "Limine boot4-level paging".
+     * append_word's own separator logic then inserts a space the
+     * next time a word is pushed. */
+    if (style_stack[style_depth].bg && w->word_len > 0) {
+      append_word(w->current, &w->current_len, w->word, w->word_len,
+                  w->style, w->in_list);
+      w->word_len = 0;
+    }
+  } else if (tag_eq(tag, "a")) {
+    /* R6/B6: push any preceding inline run as its own line before the
+     * link opens. This (a) keeps consecutive <a>…</a><a>…</a> pairs from
+     * gluing into one word, and (b) makes the link's own text flush as a
+     * STYLE_LINK line *with* its href while the context is live. The old
+     * code only flushed the pending word into the buffer; the actual
+     * push_line was deferred to the next block / flex-child boundary,
+     * which fires *after* </a> below has already reset w->style to NORMAL
+     * and cleared tag_context — so nav links were emitted as dead,
+     * unclickable plain-text lines with an empty link_url. */
+    w_flush(w);
+    w_set_link_context(n);
+    w->style = STYLE_LINK;
+    style_stack[style_depth].underline = true;
+  } else if (tag_eq(tag, "pre")) {
+    /* Block-level preformatted text: break the line and preserve
+     * internal whitespace/newlines. */
+    w_flush(w);
+    w->style = STYLE_CODE;
+    w->in_pre = true;
+  } else if (tag_eq(tag, "code")) {
+    /* Inline code chip: change style mid-line, do NOT flush (no forced
+     * line break around the chip) and leave in_pre as inherited. A tight
+     * per-run background is painted around just the code text at draw
+     * time, so it reads as an inline `code` chip inside flowing prose. */
+    w->style = STYLE_CODE;
+#ifdef BROWSER_BUILD
+  } else if (tag_eq(tag, "button")) {
+    /* R4/F0: emit a widget line. The button's label is its
+     * concatenated text content; we collect it from descendant TEXT
+     * nodes (good enough for `<button>Click me</button>` and the
+     * common `<button><span>Click</span></button>` patterns). */
+    w_flush(w);
+    char label[LINE_CHARS + 1]; int li = 0;
+    /* Tiny in-order TEXT collector; bounded by LINE_CHARS. */
+    dom_node_t *stack[32]; int sp = 0;
+    stack[sp++] = n;
+    while (sp > 0 && li < LINE_CHARS) {
+      dom_node_t *cur = stack[--sp];
+      if (!cur) continue;
+      if (cur->type == DOM_NODE_TEXT && cur->text) {
+        for (const char *t = cur->text; *t && li < LINE_CHARS; t++) {
+          if (ascii_isspace(*t)) { if (li && label[li-1] != ' ') label[li++] = ' '; }
+          else label[li++] = *t;
+        }
+      } else if (cur->type == DOM_NODE_ELEMENT) {
+        /* push children in reverse so we visit in document order */
+        int n_children = 0;
+        for (dom_node_t *c = cur->first_child; c; c = c->next_sibling) n_children++;
+        dom_node_t *kids[16]; int k = 0;
+        for (dom_node_t *c = cur->first_child; c && k < 16; c = c->next_sibling) kids[k++] = c;
+        while (k > 0 && sp < 32) stack[sp++] = kids[--k];
+      }
+    }
+    while (li > 0 && label[li-1] == ' ') li--;
+    label[li] = 0;
+    if (li == 0) { strcpy(label, "Button"); li = 6; }
+
+    blank_line();
+    push_line(label, li, STYLE_BUTTON, false);
+    lines[line_count - 1].widget_node = n;
+    layout_extend_last(6);  /* L1: render() advances by LINE_H+6 */
+    /* Don't descend — the label is already captured. */
+    pop_style_state();
+    w->style = save.style;
+    w->in_pre = save.in_pre;
+    return;
+  } else if (tag_eq(tag, "input")) {
+    /* R4/F1: emit an editable input line. We render text-style inputs
+     * as STYLE_INPUT widgets, and (R4/F2) type="submit" as STYLE_BUTTON
+     * widgets carrying the input node so the click handler can submit
+     * the enclosing form. Other types (hidden / file / image / reset /
+     * button) are skipped at render time but still participate in
+     * form_collect (except where excluded). <input> is void in HTML,
+     * so don't descend. */
+    const char *type = dom_get_attr(n, "type");
+    bool is_textish = (!type ||
+                       strcasecmp(type, "text")   == 0 ||
+                       strcasecmp(type, "search") == 0 ||
+                       strcasecmp(type, "url")    == 0 ||
+                       strcasecmp(type, "email")  == 0 ||
+                       strcasecmp(type, "tel")    == 0 ||
+                       strcasecmp(type, "password") == 0);
+    bool is_submit   = type && strcasecmp(type, "submit") == 0;
+    bool is_checkbox = type && strcasecmp(type, "checkbox") == 0;
+    bool is_radio    = type && strcasecmp(type, "radio") == 0;
+    if (is_checkbox || is_radio) {
+      w_flush(w);
+      /* The toggle box itself has no inline text; the surrounding
+       * <label>/text flows naturally on its own line. */
+      blank_line();
+      push_line("", 0, STYLE_CHECKBOX, false);
+      lines[line_count - 1].widget_node = n;
+      layout_extend_last(6);  /* L1: render() advances by LINE_H+6 */
+    } else if (is_textish) {
+      w_flush(w);
+      const char *val = dom_get_attr(n, "value");
+      char vbuf[LINE_CHARS + 1]; int vlen = 0;
+      if (val) {
+        for (const char *t = val; *t && vlen < LINE_CHARS; t++) vbuf[vlen++] = *t;
+      }
+      vbuf[vlen] = 0;
+      blank_line();
+      push_line(vbuf, vlen, STYLE_INPUT, false);
+      lines[line_count - 1].widget_node = n;
+      layout_extend_last(6);  /* L1: render() advances by LINE_H+6 */
+    } else if (is_submit) {
+      w_flush(w);
+      const char *val = dom_get_attr(n, "value");
+      const char *label = (val && val[0]) ? val : "Submit";
+      int li = (int)strlen(label);
+      if (li > LINE_CHARS) li = LINE_CHARS;
+      char lbuf[LINE_CHARS + 1];
+      memcpy(lbuf, label, li); lbuf[li] = 0;
+      blank_line();
+      push_line(lbuf, li, STYLE_BUTTON, false);
+      lines[line_count - 1].widget_node = n;
+      layout_extend_last(6);  /* L1: render() advances by LINE_H+6 */
+    }
+    pop_style_state();
+    w->style = save.style;
+    w->in_pre = save.in_pre;
+    return;
+  } else if (tag_eq(tag, "select")) {
+    /* R5/N2: emit a STYLE_SELECT widget showing the currently-
+     * selected <option>'s visible text. Initialise the select's
+     * `value` attr from the first <option selected> (or the first
+     * option) if it isn't set yet. Don't descend — option children
+     * would otherwise render as plain text. */
+    w_flush(w);
+
+    /* Locate the currently-selected option. */
+    dom_node_t *selected = NULL;
+    dom_node_t *first    = NULL;
+    for (dom_node_t *c = n->first_child; c; c = c->next_sibling) {
+      if (c->type == DOM_NODE_ELEMENT && c->tag_name &&
+          strcmp(c->tag_name, "option") == 0) {
+        if (!first) first = c;
+        if (dom_get_attr(c, "selected") && !selected) selected = c;
+      }
+    }
+    if (!selected) selected = first;
+
+    /* Sync select's `value` if it's not set yet. */
+    const char *cur_v = dom_get_attr(n, "value");
+    if ((!cur_v || !cur_v[0]) && selected) {
+      const char *ov = dom_get_attr(selected, "value");
+      /* If <option> has no value attribute, the option text is the
+       * value. Collect option text below into a buffer either way. */
+      char otxt[64]; int ol = 0;
+      for (dom_node_t *c = selected->first_child; c && ol < (int)sizeof(otxt) - 1; c = c->next_sibling) {
+        if (c->type == DOM_NODE_TEXT && c->text) {
+          for (const char *t = c->text; *t && ol < (int)sizeof(otxt) - 1; t++) otxt[ol++] = *t;
+        }
+      }
+      otxt[ol] = 0;
+      dom_set_attr(n, "value", (ov && ov[0]) ? ov : otxt);
+    }
+
+    /* Build the display label: the selected option's text. */
+    char label[LINE_CHARS + 1]; int li = 0;
+    if (selected) {
+      for (dom_node_t *c = selected->first_child; c && li < LINE_CHARS; c = c->next_sibling) {
+        if (c->type == DOM_NODE_TEXT && c->text) {
+          for (const char *t = c->text; *t && li < LINE_CHARS; t++) label[li++] = *t;
+        }
+      }
+    }
+    if (li == 0) { strcpy(label, "(select)"); li = 8; }
+    label[li] = 0;
+
+    blank_line();
+    push_line(label, li, STYLE_SELECT, false);
+    lines[line_count - 1].widget_node = n;
+    layout_extend_last(6);  /* L1: render() advances by LINE_H+6 */
+
+    pop_style_state();
+    w->style = save.style;
+    w->in_pre = save.in_pre;
+    return;
+#endif
+  }
+
+  /* L5+: `margin-left:auto` push-to-end. If this (inline) element
+   * declared an auto left margin and there is already content on the
+   * current line, flush the pending word and pad the line with spaces
+   * so the element's own text lands flush against the right edge of
+   * the current frame — e.g. "C" on the left, "84.1%" on the right of
+   * a `.lang-item` cell. We subtract one extra cell because append_word
+   * re-inserts a single separating space before the next word. */
+  if (style_stack[style_depth].margin_left_auto &&
+      style_stack[style_depth].display == 0) {
+    if (w->word_len > 0) {
+      append_word(w->current, &w->current_len, w->word, w->word_len,
+                  w->style, w->in_list);
+      w->word_len = 0;
+    }
+    int used = utf8_cells_n(w->current, w->current_len);
+    if (used > 0) {
+      layout_frame_t *cf = layout_top();
+      int cap = (cf ? cf->w : CONTENT_W) / 8;
+      if (w->in_list) cap -= 4;
+      if (cap > LINE_CHARS) cap = LINE_CHARS;
+      int tw  = measure_node_text_cells(n);
+      int pad = cap - used - tw - 1;
+      for (int i = 0; i < pad && w->current_len + 1 < LINE_BYTES; i++)
+        w->current[w->current_len++] = ' ';
+    }
+  }
+
+  /* ---- recurse into children ----------------------------------- */
+  /* R6/L4: dispatch to the flex layout instead of plain recursion
+   * when the element resolved display:flex. Grid (display:2) will
+   * land in L5. */
+  int disp = style_stack[style_depth].display;
+  if (disp == 1) {
+    emit_flex_container(w, n);
+  } else if (disp == 2) {
+    emit_grid_container(w, n);
+  } else {
+    for (dom_node_t *c = n->first_child; c; c = c->next_sibling) {
+      w_emit_node(w, c);
+    }
+  }
+
+  /* ---- per-tag postlude ---------------------------------------- */
+  if (tag_eq(tag, "h1") ||
+      tag_eq(tag, "h2") || tag_eq(tag, "h3") || tag_eq(tag, "h4") ||
+      tag_eq(tag, "h5") || tag_eq(tag, "h6")) {
+    w_flush(w);
+    w->style = STYLE_NORMAL;
+    blank_line();
+  } else if (tag_eq(tag, "p")       || tag_eq(tag, "div")     ||
+             tag_eq(tag, "section") || tag_eq(tag, "header")  ||
+             tag_eq(tag, "footer")  || tag_eq(tag, "article") ||
+             tag_eq(tag, "main")    || tag_eq(tag, "nav")     ||
+             tag_eq(tag, "aside")   || tag_eq(tag, "blockquote")) {
+    w_flush(w);
+    emit_block_spacing();
+  } else if (tag_eq(tag, "center")) {
+    w_flush(w);
+  } else if (tag_eq(tag, "ul") || tag_eq(tag, "ol")) {
+    w_flush(w);
+    w->in_list = false;
+    blank_line();
+  } else if (tag_eq(tag, "li")) {
+    w_flush(w);
+    w->style = STYLE_NORMAL;
+    w->at_li_start = false;
+  } else if (tag_eq(tag, "a")) {
+    /* R6/B6: flush the link's text as a STYLE_LINK line NOW, while
+     * w->style is still STYLE_LINK and tag_context still holds the href.
+     * Only after the line is pushed do we reset the style and clear the
+     * context. Previously the reset happened first and the deferred
+     * flush (flex child / block boundary) produced a NORMAL line with no
+     * link_url, so the anchor/nav click handler never fired. */
+    w_flush(w);
+    w->style = w->in_list ? STYLE_BULLET : STYLE_NORMAL;
+    tag_context[0] = 0;
+  } else if (tag_eq(tag, "span")) {
+    /* Symmetric postlude: flush the span's pending word NOW, while its
+     * inline CSS (background AND/OR text colour) is still on the style
+     * stack. append_word() samples the colour at flush time, but words
+     * are only committed on the next whitespace. A word that ends exactly
+     * at </span> with no trailing space inside the span — e.g.
+     * <span style="color:..">live</span> · … — would otherwise stay
+     * buffered until the space in the FOLLOWING text node, by which point
+     * the style has popped back to the parent and the word is recoloured
+     * wrong (grey instead of the span's colour). Trigger when the span
+     * sets a background OR changes the text colour vs its parent. */
+    bool span_bg    = style_stack[style_depth].bg != 0;
+    bool span_color = style_depth > 0 &&
+                      style_stack[style_depth].color !=
+                      style_stack[style_depth - 1].color;
+    if ((span_bg || span_color) && w->word_len > 0) {
+      append_word(w->current, &w->current_len, w->word, w->word_len,
+                  w->style, w->in_list);
+      w->word_len = 0;
+    }
+  } else if (tag_eq(tag, "pre")) {
+    w_flush(w);
+    w->style = w->in_list ? STYLE_BULLET : STYLE_NORMAL;
+    w->in_pre = false;
+  } else if (tag_eq(tag, "code")) {
+    /* Inline code close: just drop back to the surrounding text style,
+     * no flush (keep flowing on the same line). If we're inside a <pre>
+     * keep STYLE_CODE so the rest of the block stays code-styled. */
+    w->style = w->in_pre ? STYLE_CODE
+                         : (w->in_list ? STYLE_BULLET : STYLE_NORMAL);
+  }
+  (void)save;   /* most paths overwrite explicitly; struct kept for clarity */
+
+  /* R6/L5: emit a box-level bg rect for this block element, covering
+   * the bounding box of every line it produced. */
+  if (box_bg_block && box_bg_color && line_count > box_bg_first &&
+      box_bg_count < MAX_BOX_BGS) {
+    int min_x = 1 << 30, min_y = 1 << 30, max_x = 0, max_y = 0;
+    for (int i = box_bg_first; i < line_count; i++) {
+      int lx = lines[i].box_x;
+      int ly = lines[i].box_y;
+      int lr = lines[i].box_x + lines[i].box_w;
+      int lb = lines[i].box_y + (lines[i].box_h > 0 ? lines[i].box_h
+                                                    : LINE_H);
+      if (lx < min_x) min_x = lx;
+      if (ly < min_y) min_y = ly;
+      if (lr > max_x) max_x = lr;
+      if (lb > max_y) max_y = lb;
+    }
+    /* Skip full-width block bars (body/header/footer) — the per-line
+     * full_width_bg path already paints those edge-to-edge and a box
+     * rect would just duplicate it. */
+    bool is_full_width = (min_x == 0 && (max_x - min_x) >= CONTENT_W);
+    if (!is_full_width && max_x > min_x && max_y > min_y) {
+      box_bgs[box_bg_count].box_x = min_x;
+      box_bgs[box_bg_count].box_y = min_y;
+      box_bgs[box_bg_count].box_w = max_x - min_x;
+      box_bgs[box_bg_count].box_h = max_y - min_y;
+      box_bgs[box_bg_count].color = box_bg_color;
+      box_bgs[box_bg_count].sticky = style_stack[style_depth].sticky;
+      box_bg_count++;
+    }
+  }
+
+  pop_style_state();
+}
+
+/* Renamed-forward declaration. Original definition below this block. */
+static void parse_html_legacy(const char *html, uint32_t size);
+
+/* Selects the parser. Flipped to true via the --legacy CLI flag. */
+static bool g_use_legacy_parser = false;
+
+/* --------------------------------------------------------------------
+ * R4/F0: keep the parsed tree + QuickJS session alive across frames so
+ * widget events (button click → JS handler) can fire post-load. The
+ * old "parse → walk → free" pipeline is now split into:
+ *
+ *   parse_html(html, size)
+ *     dom_free(prev) + qjs_page_free(prev)
+ *     dom_parse → walk → install JS session
+ *
+ *   rebuild_lines_from_dom()
+ *     walks the live tree again into a fresh lines[] (after a JS
+ *     mutation, or after a renderer-side widget value change).
+ * ------------------------------------------------------------------ */
+
+static dom_node_t *g_doc;
+#ifdef BROWSER_BUILD
+static qjs_page_t *g_page;
+
+/* R5/N2: track which text <input> is currently focused so we can fire
+ * a `change` event when the user navigates away with a different
+ * value. Cleared whenever a new page is parsed (since the old node
+ * pointer goes away with dom_free). */
+static dom_node_t *focus_input_node = NULL;
+static char        focus_input_snapshot[64] = {0};
+
+/* R5/N1: act on a navigation request the page's JS produced via
+ * location.assign/replace/reload or history.back/forward/go.
+ *   kind 1 ASSIGN   relative url → resolve, load, push.
+ *   kind 2 REPLACE  resolve, load, *do not* push.
+ *   kind 3 RELOAD   reload current url without pushing.
+ *   kind 4 HISTORY  jump history_ptr by delta (clamped to populated
+ *                   slots), reload that url without pushing. */
+static void apply_nav_request(int kind, const char *url, int delta) {
+  switch (kind) {
+    case 1:
+    case 2: {
+      if (!url || !*url) return;
+      char resolved[512];
+      resolve_url(current_url, url, resolved);
+      strncpy(current_url, resolved, sizeof(current_url) - 1);
+      current_url[sizeof(current_url) - 1] = 0;
+      if (kind == 2) is_navigating_history = true; /* suppress push */
+      load_page(current_url);
+      is_navigating_history = false;
+      return;
+    }
+    case 3:
+      is_navigating_history = true;
+      load_page(current_url);
+      is_navigating_history = false;
+      return;
+    case 4: {
+      int target = history_ptr + delta;
+      if (target < 0) target = 0;
+      if (target > 15) target = 15;
+      if (target == history_ptr) return;
+      /* Forward (target > current) is only valid if the slot was
+       * filled by an earlier push that we haven't overwritten. */
+      if (target > history_ptr && history[target][0] == 0) return;
+      history_ptr = target;
+      strcpy(current_url, history[history_ptr]);
+      is_navigating_history = true;
+      load_page(current_url);
+      is_navigating_history = false;
+      qjs_window_set_history_length(history_ptr + 1);
+      return;
+    }
+    default:
+      return;
+  }
+}
+
+/* Drain one nav request from the JS side (if any) and act on it.
+ * Returns 1 if a navigation was triggered (caller should bail out of
+ * its current paint/event loop), 0 if there was nothing to do. */
+static int drain_pending_nav(void) {
+  if (!g_page) return 0;
+  int kind = 0, delta = 0;
+  char url[512] = {0};
+  if (!qjs_page_take_nav(g_page, &kind, url, sizeof url, &delta)) return 0;
+  apply_nav_request(kind, url, delta);
+  return 1;
+}
+#endif
+
+/* ─────────────────────────────────────────────────────────────────
+ * Phase R6/L3: render_subtree — walk a DOM subtree under a private
+ * layout frame and report which lines were produced and how tall
+ * the resulting block is.
+ *
+ * Why this exists: flex / grid containers (L4 + L5) need to lay
+ * out children *side by side* in columns whose widths are smaller
+ * than the parent's full content width. The natural way to do
+ * that with the existing w_emit_node machinery is to:
+ *   1. push a sub-frame at (column_x, parent_y, column_w),
+ *   2. emit the child subtree into lines[] under that frame,
+ *   3. note (first_line, line_count_in_subtree, sub_height),
+ *   4. pop the sub-frame,
+ *   5. either splice the lines as-is (if the column's left edge is
+ *      already correct from the sub-frame) or translate their
+ *      box_x/box_y in place (when reflowing for align/justify).
+ *
+ * This function does steps 1–4. The caller decides what to do with
+ * the captured range in step 5; L3 itself just gives flex/grid the
+ * primitive they'll build on. Not called yet — pure scaffolding,
+ * exercised first by L4.
+ *
+ * Note: walk_ctx_t style/in_pre/in_list are shared with the
+ * caller because they reflect CSS inheritance from the *parent*
+ * (e.g. a flex item inside <body> still inherits body's font).
+ * The caller is responsible for save/restore around render_subtree
+ * if it wants to isolate them; in practice the standard
+ * pop_style_state() flow already handles per-element styles.
+ *
+ * Out-params (may be NULL):
+ *   *out_first — index of the first line emitted (line_count at
+ *                entry), or -1 if no lines were produced.
+ *   *out_count — number of lines emitted by the subtree.
+ *   *out_h     — vertical advance consumed by the sub-frame, in px.
+ * ────────────────────────────────────────────────────────────── */
+static void render_subtree(walk_ctx_t *w, dom_node_t *node,
+                           int frame_x, int frame_y, int frame_w,
+                           int *out_first, int *out_count, int *out_h) {
+  int first_before = line_count;
+
+  /* Push a private frame; on overflow degrade to the parent frame
+   * so the subtree still emits *somewhere*, just not isolated.
+   * Better than silently dropping content on deeply-nested HTML. */
+  layout_frame_t *f = layout_push(frame_x, frame_y, frame_w, /*flow=*/0);
+  bool pushed = (f != NULL);
+
+  /* w_flush before and after so any pending inline text run from
+   * the parent doesn't leak into / out of the sub-frame's lines. */
+  w_flush(w);
+  if (node) w_emit_node(w, node);
+  w_flush(w);
+
+  int captured_h = 0;
+  if (pushed) {
+    captured_h = layout_pop();
+  }
+  /* Frame-push overflow path: emission still happened on the
+   * parent frame, but we can't cleanly report a height for it,
+   * so leave captured_h at 0 and let the caller fall back to
+   * a "skip this container" path. */
+
+  int captured_n = line_count - first_before;
+  if (out_first) *out_first = (captured_n > 0) ? first_before : -1;
+  if (out_count) *out_count = captured_n;
+  if (out_h)     *out_h     = captured_h;
+}
+
+/* R6/L3 helper: shift an already-emitted range of lines by
+ * (dx, dy) pixels. Used by flex/grid containers in L4+L5 after
+ * they know the final column / cell position. Safe to call with
+ * (0, 0) — becomes a no-op. */
+static void layout_translate_range(int first, int count, int dx, int dy) {
+  if (first < 0 || count <= 0) return;
+  for (int i = 0; i < count; i++) {
+    int idx = first + i;
+    if (idx < 0 || idx >= line_count) break;
+    lines[idx].box_x += dx;
+    lines[idx].box_y += dy;
+  }
+}
+
+static void rebuild_lines_from_dom(void) {
+  /* Preserve scroll across in-page rebuilds (e.g. when a click on a
+   * checkbox / radio / <select> mutates the DOM). Callers that want
+   * to jump to the top — load_page / parse_html OOM, history nav —
+   * reset scroll_line explicitly. */
+  int saved_scroll = scroll_line;
+  line_count  = 0;
+  g_anchor_count = 0;
+  layout_reset();
+  reset_style_stack();
+  body_bg = CLR_BG;
+  tag_context[0] = 0;
+
+  if (!g_doc) {
+    push_line("(no document)", 13, STYLE_MUTED, false);
+    return;
+  }
+
+  walk_ctx_t w;
+  memset(&w, 0, sizeof(w));
+  w.style = STYLE_NORMAL;
+  w_emit_node(&w, g_doc);
+  w_flush(&w);
+
+  if (line_count == 0)
+    push_line("(empty HTML document)", 21, STYLE_MUTED, false);
+
+  /* Clamp restored scroll to the new content height. */
+  int v = visible_lines();
+  int max_scroll = line_count - v;
+  if (max_scroll < 0) max_scroll = 0;
+  if (saved_scroll > max_scroll) saved_scroll = max_scroll;
+  if (saved_scroll < 0)          saved_scroll = 0;
+  scroll_line = saved_scroll;
+}
+
 static void parse_html(const char *html, uint32_t size) {
+  if (g_use_legacy_parser) { parse_html_legacy(html, size); return; }
+
+  /* Drop the previous page's runtime + tree before we leak. The free
+   * order matters: JS first (it may hold borrowed DOM pointers via
+   * unwrap_element), then the DOM tree itself. */
+#ifdef BROWSER_BUILD
+  if (g_page) { qjs_page_free(g_page); g_page = NULL; }
+#endif
+  if (g_doc)  { dom_free(g_doc); g_doc = NULL; }
+#ifdef BROWSER_BUILD
+  /* R5/N2: focus tracker pointed at the now-freed tree — reset. */
+  focus_input_node = NULL;
+  focus_input_snapshot[0] = 0;
+  /* R6/B4: drop the previous page's decoded image buffers before
+   * the upcoming walk re-fetches and re-decodes for the new page. */
+  images_reset();
+#endif
+
+  copy_title_from_html(html, size);
+  extract_css(html, size);
+
+  g_doc = dom_parse(html, size);
+  if (!g_doc) {
+    line_count = 0; scroll_line = 0;
+    push_line("(out of memory parsing HTML)", 28, STYLE_MUTED, false);
+    return;
+  }
+
+#ifdef BROWSER_BUILD
+  /* J6a + R4/F0: stand up the persistent JS session. Initial inline
+   * scripts run inside qjs_page_create; addEventListener callbacks
+   * registered there survive until the next navigation, so widget
+   * events (post-paint) can dispatch into them. */
+  g_page = qjs_page_create(g_doc, current_url, TAs_MOZ, TAs_MOZ_NUM);
+  /* R5/N0+N1: an inline <script> can navigate via
+   * location.href / assign / replace / reload / history.*; if so,
+   * redirect immediately instead of rendering the now-stale tree. */
+  if (drain_pending_nav()) return;
+#endif
+
+  rebuild_lines_from_dom();
+}
+
+#ifdef BROWSER_BUILD
+/* --------------------------------------------------------------------
+ * R4/F2 — HTML form submission
+ *
+ * Triggered by:
+ *   - click on `<input type="submit">` (rendered as a STYLE_BUTTON)
+ *   - click on `<button type="submit">`
+ *   - Enter pressed while a STYLE_INPUT widget is focused
+ *
+ * Walks the form's descendants, collects name=value pairs from named
+ * inputs (skipping submit/button/reset/image/file/no-name), URL-encodes
+ * them, and navigates to `action`?...query. POST is downgraded to GET
+ * for now (no body upload path in HTTP client yet) — same observable
+ * behaviour for static pages.
+ *
+ * A `submit` event is dispatched to the form node before navigation so
+ * scripts can observe; preventDefault is not implemented yet, so JS
+ * cannot cancel.
+ * ------------------------------------------------------------------ */
+static dom_node_t *find_form_ancestor(dom_node_t *n) {
+  for (dom_node_t *p = n ? n->parent : NULL; p; p = p->parent) {
+    if (p->type == DOM_NODE_ELEMENT && p->tag_name &&
+        strcmp(p->tag_name, "form") == 0) return p;
+  }
+  return NULL;
+}
+
+static int url_encode_into(const char *s, char *dst, int j, int cap) {
+  static const char hex[] = "0123456789ABCDEF";
+  for (int i = 0; s && s[i] && j + 3 < cap; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+        (c >= '0' && c <= '9') ||
+         c == '-' || c == '_' || c == '.' || c == '~') {
+      dst[j++] = (char)c;
+    } else if (c == ' ') {
+      dst[j++] = '+';
+    } else {
+      dst[j++] = '%';
+      dst[j++] = hex[(c >> 4) & 0xF];
+      dst[j++] = hex[c & 0xF];
+    }
+  }
+  if (j < cap) dst[j] = 0;
+  return j;
+}
+
+static void form_collect(dom_node_t *node, char *qbuf, int *jp, int cap, int *first) {
+  if (!node) return;
+  if (node->type == DOM_NODE_ELEMENT && node->tag_name &&
+      strcmp(node->tag_name, "input") == 0) {
+    const char *name = dom_get_attr(node, "name");
+    const char *type = dom_get_attr(node, "type");
+    bool skip = false;
+    if (type) {
+      if (strcasecmp(type, "submit") == 0 ||
+          strcasecmp(type, "button") == 0 ||
+          strcasecmp(type, "reset")  == 0 ||
+          strcasecmp(type, "image")  == 0 ||
+          strcasecmp(type, "file")   == 0) skip = true;
+      /* R5/N2: unchecked checkbox/radio are not submitted. */
+      if ((strcasecmp(type, "checkbox") == 0 || strcasecmp(type, "radio") == 0) &&
+          !dom_get_attr(node, "checked")) skip = true;
+    }
+    if (name && name[0] && !skip) {
+      const char *val = dom_get_attr(node, "value");
+      /* Checkbox/radio with no value attribute defaults to "on" — the
+       * HTML standard. */
+      if (type && (strcasecmp(type, "checkbox") == 0 || strcasecmp(type, "radio") == 0) &&
+          (!val || !val[0])) val = "on";
+      if (!*first && *jp < cap - 1) qbuf[(*jp)++] = '&';
+      *first = 0;
+      *jp = url_encode_into(name, qbuf, *jp, cap);
+      if (*jp < cap - 1) qbuf[(*jp)++] = '=';
+      *jp = url_encode_into(val ? val : "", qbuf, *jp, cap);
+    }
+  } else if (node->type == DOM_NODE_ELEMENT && node->tag_name &&
+             strcmp(node->tag_name, "select") == 0) {
+    /* R5/N2: submit the select's current value attribute. */
+    const char *name = dom_get_attr(node, "name");
+    const char *val  = dom_get_attr(node, "value");
+    if (name && name[0]) {
+      if (!*first && *jp < cap - 1) qbuf[(*jp)++] = '&';
+      *first = 0;
+      *jp = url_encode_into(name, qbuf, *jp, cap);
+      if (*jp < cap - 1) qbuf[(*jp)++] = '=';
+      *jp = url_encode_into(val ? val : "", qbuf, *jp, cap);
+    }
+    /* Don't descend into <option> — they aren't form controls. */
+    return;
+  }
+  for (dom_node_t *c = node->first_child; c; c = c->next_sibling)
+    form_collect(c, qbuf, jp, cap, first);
+}
+
+static void submit_form_for(dom_node_t *trigger) {
+  dom_node_t *form = find_form_ancestor(trigger);
+  if (!form) return;
+
+  /* R4/F3: honour event.preventDefault() inside submit listeners.
+   * If anyone called it, suppress the navigation but still let
+   * subsequent paints reflect any DOM mutations the handler did. */
+  if (g_page) {
+    int prevented = qjs_page_dispatch_event(g_page, form, "submit");
+    if (prevented) return;
+  }
+
+  const char *action_raw = dom_get_attr(form, "action");
+  const char *action = (action_raw && action_raw[0]) ? action_raw : current_url;
+
+  char qbuf[1024]; int jp = 0; int first = 1;
+  form_collect(form, qbuf, &jp, (int)sizeof qbuf, &first);
+  qbuf[jp] = 0;
+
+  char resolved[256];
+  resolve_url(current_url, action, resolved);
+
+  if (jp > 0) {
+    char sep = strchr(resolved, '?') ? '&' : '?';
+    int rl = (int)strlen(resolved);
+    if (rl + 1 + jp < (int)sizeof resolved) {
+      resolved[rl++] = sep;
+      memcpy(resolved + rl, qbuf, (size_t)jp);
+      resolved[rl + jp] = 0;
+    }
+  }
+
+  strcpy(current_url, resolved);
+  load_page(current_url);
+}
+
+/* R5/N2: walk the form (or document if no enclosing form) and clear
+ * the "checked" attribute on every other radio that shares `name`
+ * with `chosen`. Mirrors the HTML radio-group behaviour. */
+static void uncheck_radio_siblings(dom_node_t *chosen) {
+  if (!chosen || !chosen->tag_name) return;
+  const char *grp = dom_get_attr(chosen, "name");
+  if (!grp || !*grp) return;
+
+  dom_node_t *root = find_form_ancestor(chosen);
+  if (!root) root = g_doc;
+  if (!root) return;
+
+  /* Iterative DFS. */
+  dom_node_t *stack[64]; int sp = 0;
+  stack[sp++] = root;
+  while (sp > 0) {
+    dom_node_t *cur = stack[--sp];
+    if (!cur) continue;
+    if (cur != chosen && cur->type == DOM_NODE_ELEMENT && cur->tag_name &&
+        strcmp(cur->tag_name, "input") == 0) {
+      const char *t = dom_get_attr(cur, "type");
+      const char *m = dom_get_attr(cur, "name");
+      if (t && strcasecmp(t, "radio") == 0 && m && strcmp(m, grp) == 0) {
+        dom_remove_attr(cur, "checked");
+      }
+    }
+    for (dom_node_t *c = cur->first_child; c && sp < 64; c = c->next_sibling)
+      stack[sp++] = c;
+  }
+}
+
+/* R5/N2: pick the next <option> after `cur` in `select`, wrapping
+ * around to the first one. Returns NULL if `select` has no options. */
+static dom_node_t *next_option(dom_node_t *select, dom_node_t *cur) {
+  dom_node_t *first = NULL;
+  dom_node_t *after = NULL;
+  bool seen = false;
+  for (dom_node_t *c = select->first_child; c; c = c->next_sibling) {
+    if (c->type == DOM_NODE_ELEMENT && c->tag_name &&
+        strcmp(c->tag_name, "option") == 0) {
+      if (!first) first = c;
+      if (seen && !after) { after = c; break; }
+      if (c == cur) seen = true;
+    }
+  }
+  return after ? after : first;
+}
+
+/* R5/N2: find the <option> whose value (or text if no value attr)
+ * matches `v` inside `select`. NULL if not found. */
+static dom_node_t *find_option_by_value(dom_node_t *select, const char *v) {
+  if (!v) return NULL;
+  for (dom_node_t *c = select->first_child; c; c = c->next_sibling) {
+    if (c->type == DOM_NODE_ELEMENT && c->tag_name &&
+        strcmp(c->tag_name, "option") == 0) {
+      const char *ov = dom_get_attr(c, "value");
+      if (ov && strcmp(ov, v) == 0) return c;
+      if (!ov || !ov[0]) {
+        /* No value attr — use option text. */
+        char otxt[64]; int ol = 0;
+        for (dom_node_t *t = c->first_child; t && ol < (int)sizeof(otxt) - 1; t = t->next_sibling) {
+          if (t->type == DOM_NODE_TEXT && t->text) {
+            for (const char *s = t->text; *s && ol < (int)sizeof(otxt) - 1; s++) otxt[ol++] = *s;
+          }
+        }
+        otxt[ol] = 0;
+        if (strcmp(otxt, v) == 0) return c;
+      }
+    }
+  }
+  return NULL;
+}
+
+/* True iff `node` is `<input type="submit">` or `<button type="submit">`.
+ * Used to decide whether STYLE_BUTTON click should also trigger a form
+ * submit on top of the JS 'click' dispatch. */
+static bool is_submit_widget(dom_node_t *n) {
+  if (!n || !n->tag_name) return false;
+  const char *type = dom_get_attr(n, "type");
+  if (strcmp(n->tag_name, "input") == 0) {
+    return type && strcasecmp(type, "submit") == 0;
+  }
+  if (strcmp(n->tag_name, "button") == 0) {
+    /* Real HTML default for `<button>` is type=submit, but to avoid
+     * surprising scripted buttons we require the type to be explicit
+     * OR for the button to live inside a <form>. Bare button outside
+     * any form is always click-only. */
+    if (type) return strcasecmp(type, "submit") == 0;
+    return find_form_ancestor(n) != NULL;
+  }
+  return false;
+}
+#endif /* BROWSER_BUILD */
+
+static void parse_html_legacy(const char *html, uint32_t size) {
   line_count = 0;
+  layout_reset();
   scroll_line = 0;
   line_style_t style = STYLE_NORMAL;
   bool in_body = false;
@@ -1382,7 +4187,6 @@ static void parse_html(const char *html, uint32_t size) {
   bool in_style_tag = false;
   bool in_script_tag = false;
   bool in_noscript_tag = false;
-  bool in_svg_tag = false;
 
   char current[LINE_CHARS + 1];
   char word[LINE_CHARS + 1];
@@ -1393,16 +4197,6 @@ static void parse_html(const char *html, uint32_t size) {
   extract_css(html, size);
   reset_style_stack();
   body_bg = CLR_BG;
-
-  /* Debug: print CSS rule count to serial */
-  char dbg[64];
-  sprintf(dbg, "[CSS] Extracted %d rules\n", css_rule_count);
-  print(dbg);
-  for (int d = 0; d < css_rule_count && d < 10; d++) {
-    sprintf(dbg, "  [%d] sel='%s' c=%06x bg=%06x\n", d, css_rules[d].selector,
-            css_rules[d].color, css_rules[d].bg_color);
-    print(dbg);
-  }
 
   for (uint32_t i = 0; i < size;) {
     char c = html[i];
@@ -1440,25 +4234,6 @@ static void parse_html(const char *html, uint32_t size) {
       }
       if (tag_eq(tag, "/noscript")) {
         in_noscript_tag = false;
-        continue;
-      }
-      /* SVG: treat as opaque. Inline SVG icons would otherwise
-       * push_style_state for every <svg>, <path/>, <g> etc. since
-       * our self-closing detector only knows about a few HTML
-       * void elements (not the `/>` XML notation). Each unmatched
-       * push leaks one level of depth, which then mis-tags the
-       * next sibling element's grid_col/grid_row. */
-      if (tag_eq(tag, "svg")) {
-        in_svg_tag = true;
-        continue;
-      }
-      if (tag_eq(tag, "/svg")) {
-        in_svg_tag = false;
-        continue;
-      }
-      if (in_svg_tag) {
-        /* Eat every other tag — open, close, self-close — inside
-         * the SVG without touching the style stack. */
         continue;
       }
       if (tag_eq(tag, "head")) {
@@ -1561,15 +4336,9 @@ static void parse_html(const char *html, uint32_t size) {
                    tag_eq(tag, "main") || tag_eq(tag, "nav") ||
                    tag_eq(tag, "aside") || tag_eq(tag, "blockquote")) {
           flush_current(current, &current_len, style, in_list);
-          /* Add padding blank lines if CSS padding is set —
-           * but only if we are NOT currently sitting on a grid
-           * container level (otherwise those blanks land between
-           * cells with grid_cols=0 and snap the right column
-           * down underneath the left one). */
+          /* Add padding blank lines if CSS padding is set */
           int pad = style_stack[style_depth].padding;
-          if (style_stack[style_depth].grid_cols > 1) {
-            /* between cells of a grid: emit nothing */
-          } else if (pad > 0) {
+          if (pad > 0) {
             for (int p = 0; p < pad; p++)
               push_line("", 0, STYLE_NORMAL, false);
           } else {
@@ -1582,9 +4351,7 @@ static void parse_html(const char *html, uint32_t size) {
                    tag_eq(tag, "/aside") || tag_eq(tag, "/blockquote")) {
           flush_current(current, &current_len, style, in_list);
           int pad = style_stack[style_depth].padding;
-          if (style_stack[style_depth].grid_cols > 1) {
-            /* between cells of a grid: emit nothing */
-          } else if (pad > 0) {
+          if (pad > 0) {
             for (int p = 0; p < pad; p++)
               push_line("", 0, STYLE_NORMAL, false);
           } else {
@@ -1635,7 +4402,6 @@ static void parse_html(const char *html, uint32_t size) {
 
     /* Skip content if hidden or in metadata tags */
     if (in_style_tag || in_script_tag || in_noscript_tag ||
-        in_svg_tag ||
         style_stack[style_depth].display_none) {
       i++;
       continue;
@@ -1675,73 +4441,6 @@ static void parse_html(const char *html, uint32_t size) {
         i += consumed;
         continue;
       }
-    }
-
-    /* UTF-8 → ASCII fallback for the punctuation that actually shows
-     * up on the EquinoxOS landing page. The terminal font is single-
-     * byte, so without this every literal "—", "…", "→", curly quote
-     * gets rendered as 2-3 garbage glyphs. We don't ship a real
-     * Unicode font, so substitute a sensible ASCII equivalent. */
-    if ((unsigned char)c >= 0x80) {
-      unsigned char b0 = (unsigned char)c;
-      unsigned char b1 = (i + 1 < size) ? (unsigned char)html[i + 1] : 0;
-      unsigned char b2 = (i + 2 < size) ? (unsigned char)html[i + 2] : 0;
-      int eaten = 1;
-      const char *replacement = "?";
-      char tmp[2] = {0, 0};
-      if (b0 == 0xC2 && b1 == 0xA0) { /* nbsp */
-        replacement = " ";
-        eaten = 2;
-      } else if (b0 == 0xC2 && b1 == 0xB7) { /* middle dot */
-        replacement = "*";
-        eaten = 2;
-      } else if (b0 == 0xE2 && b1 == 0x80) {
-        eaten = 3;
-        switch (b2) {
-        case 0x90: case 0x91: case 0x92: case 0x93:
-        case 0x94: case 0x95: /* hyphens / dashes */
-          replacement = "-";
-          break;
-        case 0x98: case 0x99: case 0x9A: case 0x9B: /* single quotes */
-          tmp[0] = '\'';
-          replacement = tmp;
-          break;
-        case 0x9C: case 0x9D: case 0x9E: case 0x9F: /* double quotes */
-          replacement = "\"";
-          break;
-        case 0xA2: /* bullet */
-          replacement = "*";
-          break;
-        case 0xA6: /* ellipsis */
-          replacement = "...";
-          break;
-        default:
-          replacement = "?";
-          break;
-        }
-      } else if (b0 == 0xE2 && b1 == 0x86) {
-        /* arrows */
-        eaten = 3;
-        switch (b2) {
-        case 0x90: replacement = "<-"; break;
-        case 0x91: replacement = "^";  break;
-        case 0x92: replacement = "->"; break;
-        case 0x93: replacement = "v";  break;
-        case 0xB5: replacement = "^";  break;
-        case 0xB7: replacement = "v";  break;
-        default:   replacement = "->"; break;
-        }
-      } else if (b0 >= 0xF0) {
-        eaten = 4; /* 4-byte UTF-8 (most emoji) */
-      } else if (b0 >= 0xE0) {
-        eaten = 3;
-      } else if (b0 >= 0xC0) {
-        eaten = 2;
-      }
-      for (int k = 0; replacement[k] && word_len < LINE_CHARS; k++)
-        word[word_len++] = replacement[k];
-      i += eaten;
-      continue;
     }
 
     if (ascii_isspace(c)) {
@@ -1789,19 +4488,48 @@ static void draw_text_line(int x, int y, const line_t *ln) {
   line_style_t style = ln->style;
   const char *text = ln->text;
 
-  /* If this line belongs to a grid cell, all the "full-width"
-   * decorations below (HR rule, full-width background, align:center)
-   * have to be clamped to the cell — otherwise card 1's background
-   * spills across cards 2/3/4 and the layout looks like one giant
-   * blob. */
-  int cell_left = CONTENT_X;
-  int cell_width = CONTENT_W;
-  if (ln->grid_cols > 1) {
-    cell_width = (WIN_W - 36) / ln->grid_cols;
-    cell_left = CONTENT_X + ln->grid_col * cell_width;
+  /* L5+: if the line lives inside a flex/grid column narrower than
+   * the content area, clip the text so it can't bleed into the
+   * neighbour column. We truncate to the column's pixel width
+   * (approx via 8 px/cell for bitmap, 9-11 px/char for TTF) — good
+   * enough to stop "Features Repos Roadmap" turning into a single
+   * smeared line. The truncated copy lives in a local buffer so we
+   * don't mutate the cached line text. */
+  char clip_buf[LINE_BYTES];
+  /* Only clip body-size text — for headings / large fonts we'd rather
+   * see overflow than a brutally truncated H1. */
+  bool clip_eligible = (style != STYLE_H1 && style != STYLE_H2 &&
+                        ln->font_size == 0);
+  if (clip_eligible && ln->box_w > 0 && ln->box_w < CONTENT_W) {
+    int max_cells = ln->box_w / 8;            /* bitmap cell ~8 px wide */
+    if (max_cells < 1) max_cells = 1;
+    /* Measure in *visible cells* (codepoints), not bytes — a Cyrillic
+     * line is 2 bytes per glyph, so a byte-based budget would chop
+     * correctly-wrapped Russian text in half. With frame-width wrapping
+     * in append_word() this clip is normally a no-op; it stays as a
+     * safety net for the rare over-wide split word. */
+    int total_cells = utf8_cells_n(text, (int)strlen(text));
+    if (total_cells > max_cells) {
+      int cells = 0, bi = 0, last_space = -1;
+      while (text[bi] && cells < max_cells) {
+        unsigned char b = (unsigned char)text[bi];
+        int adv = (b < 0x80) ? 1 : ((b & 0xE0) == 0xC0) ? 2
+                : ((b & 0xF0) == 0xE0) ? 3 : ((b & 0xF8) == 0xF0) ? 4 : 1;
+        if (b == ' ') last_space = bi;          /* cut at word boundary */
+        bi += adv; cells++;
+      }
+      int copy = bi;
+      if (last_space > 0 && last_space > bi / 2) copy = last_space;
+      if (copy >= (int)sizeof clip_buf) copy = (int)sizeof clip_buf - 1;
+      memcpy(clip_buf, text, (size_t)copy);
+      clip_buf[copy] = '\0';
+      text = clip_buf;
+    }
   }
 
-  int w = strlen(text) * 8;
+  /* R6/B2c: width in pixels = visible cells × 8 (Cyrillic is 1 cell
+   * per codepoint but 2 bytes per codepoint, so strlen overcounts). */
+  int w = eid_text_width_utf8(text);
   /* Use TTF width estimate if using TTF font */
   bool use_ttf = false;
   eid_font_t *draw_font = NULL;
@@ -1824,55 +4552,125 @@ static void draw_text_line(int x, int y, const line_t *ln) {
   }
 
   if (ln->css_align == ALIGN_CENTER) {
-    x = cell_left + (cell_width - w) / 2;
+    x = CONTENT_X + (CONTENT_W - w) / 2;
   } else if (ln->css_align == ALIGN_RIGHT) {
-    x = cell_left + cell_width - w;
+    x = CONTENT_X + CONTENT_W - w;
   }
 
   uint32_t color = ln->css_color ? ln->css_color : color_for_style(style);
 
+  /* L5+: skip per-line bg painting for empty/whitespace lines inside
+   * narrow flex columns. Without this, a `.tt-bar` of 6
+   * `<span class="dot">` siblings (each with a dark bg) — degraded
+   * vertical because the column is only ~250 px wide — emits 6
+   * empty dark stripes, stacked, that look like one tall solid
+   * black rectangle next to the hero. The dots are decorative;
+   * dropping their empty-line bg keeps the actual terminal text
+   * visible without the leading 100 px of black slab. */
+  bool text_is_blank = true;
+  for (const char *p = ln->text; *p; p++) {
+    if (*p != ' ' && *p != '\t') { text_is_blank = false; break; }
+  }
+  if (ln->css_bg && text_is_blank && ln->box_w > 0 &&
+      ln->box_w < CONTENT_W) {
+    /* skip — no text in this column line, don't paint dark slab */
+  } else
   /* CSS background override */
   if (ln->css_bg) {
-    if (ln->full_width_bg) {
-      /* Fill the entire window width for block-level backgrounds
-       * (or the cell when this line lives inside a grid cell). */
-      int bgx = (ln->grid_cols > 1) ? cell_left - 4 : 0;
-      int bgw = (ln->grid_cols > 1) ? cell_width : WIN_W;
-      eid_draw_rect(fb, WIN_W, WIN_H, bgx, y - 2, bgw, LINE_H, ln->css_bg);
+    /* L5+: a "full-width" CSS bg only paints the window edge-to-edge
+     * when the line actually occupies the whole content area. Inside
+     * a flex/grid column (box_x > 0 or box_w < CONTENT_W) we paint
+     * only the column rectangle — otherwise an inline <span> with a
+     * dark .badge background turns into a giant black bar across the
+     * page. */
+    bool is_full = ln->full_width_bg &&
+                   ln->box_x == 0 &&
+                   ln->box_w >= CONTENT_W;
+    if (is_full) {
+      eid_draw_rect(fb, WIN_W, WIN_H, 0, y - 2, WIN_W, LINE_H, ln->css_bg);
+    } else if (ln->full_width_bg) {
+      /* Box-confined fill: paint just the column rectangle so the
+       * gap between flex children stays visible (no halo). */
+      int bg_x = CONTENT_X + ln->box_x;
+      int bg_w = ln->box_w;
+      if (bg_w < 12) bg_w = 12;
+      eid_draw_rect(fb, WIN_W, WIN_H, bg_x, y - 2, bg_w, LINE_H, ln->css_bg);
     } else {
       int bg_w = w + 12;
       if (bg_w < 24)
         bg_w = 24;
       eid_draw_rect(fb, WIN_W, WIN_H, x - 4, y - 2, bg_w, LINE_H, ln->css_bg);
     }
-  } else if (style == STYLE_CODE) {
+  } else if (style == STYLE_CODE && ln->color_run_count == 0) {
+    /* Pure code line (whole line is one <pre>/<code> run): paint the box
+     * edge to edge of the text. A *mixed* line (color_run_count > 0, e.g.
+     * inline <code> inside prose) instead paints a tight per-run chip box
+     * below, so the surrounding normal text doesn't get boxed too. */
     int bg_w = w + 8;
     if (bg_w < 24)
       bg_w = 24;
     if (bg_w > CONTENT_W)
       bg_w = CONTENT_W;
-    eid_draw_rect(fb, WIN_W, WIN_H, x - 4, y - 2, bg_w, LINE_H, CLR_CODE_BG);
+    eid_draw_rect(fb, WIN_W, WIN_H, x - 4, y - 2, bg_w, LINE_H, code_bg_for_theme(body_bg));
   }
 
   if (style == STYLE_HR) {
-    eid_draw_line(fb, WIN_W, WIN_H, cell_left, y + 8,
-                  cell_left + cell_width, y + 8, CLR_BORDER);
+    eid_draw_line(fb, WIN_W, WIN_H, CONTENT_X, y + 8, CONTENT_X + CONTENT_W,
+                  y + 8, CLR_BORDER);
     return;
   }
 
-  /* Bold: draw twice with offset if we don't have a bold font */
-  if (ln->css_bold) {
-    if (use_ttf && draw_font) {
-      eid_draw_text_ttf(&ui, draw_font, x + 1, y, text, color);
-    } else {
-      eid_draw_text(fb, WIN_W, WIN_H, x + 1, y, text, color);
-    }
-  }
-
+  /* Bold uses a faux-bold renderer that thickens each glyph AND adds a
+   * little tracking, so heavy words (e.g. "QEMU") stay legible instead of
+   * smearing into one blob. The old approach drew the whole string twice
+   * at x and x+1, thickening glyphs without widening their advance, which
+   * glued letters together. */
   if (use_ttf && draw_font) {
-    eid_draw_text_ttf(&ui, draw_font, x, y, text, color);
+    /* R6/B7: the TTF path can't measure per-segment advance, so multi-
+     * colour runs degrade to the line's single colour here (headings are
+     * rarely multi-colour anyway). */
+    if (ln->css_bold)
+      eid_draw_text_ttf_bold(&ui, draw_font, x, y, text, color);
+    else
+      eid_draw_text_ttf(&ui, draw_font, x, y, text, color);
+  } else if (ln->color_run_count > 0) {
+    /* R6/B7: per-run colour inside one line. The bitmap font is a fixed
+     * 8 px cell, so eid_text_width_utf8() gives the exact advance for each
+     * segment. A colour of 0 means "line default" → fall back to `color`. */
+    int tlen = (int)strlen(text);
+    int rx = x;
+    for (int r = 0; r < ln->color_run_count; r++) {
+      int s = ln->color_run_start[r];
+      int e = (r + 1 < ln->color_run_count) ? ln->color_run_start[r + 1] : tlen;
+      if (s >= tlen) break;
+      if (e > tlen) e = tlen;
+      if (e <= s) continue;
+      char seg[LINE_BYTES];
+      int sl = e - s;
+      if (sl >= (int)sizeof(seg)) sl = (int)sizeof(seg) - 1;
+      memcpy(seg, text + s, (size_t)sl);
+      seg[sl] = '\0';
+      int seg_w = eid_text_width_utf8(seg);
+      /* R6/B7b: tight inline background (a <code> chip) behind just this
+       * run's characters, before the glyphs are drawn over it. */
+      if (ln->color_run_bg[r])
+        eid_draw_rect(fb, WIN_W, WIN_H, rx - 2, y - 2, seg_w + 4, LINE_H,
+                      ln->color_run_bg[r]);
+      uint32_t rcol = ln->color_run_color[r] ? ln->color_run_color[r] : color;
+      if (ln->css_bold)
+        eid_draw_text_bold(fb, WIN_W, WIN_H, rx, y, seg, rcol);
+      else
+        eid_draw_text(fb, WIN_W, WIN_H, rx, y, seg, rcol);
+      rx += seg_w;
+    }
   } else {
-    eid_draw_text(fb, WIN_W, WIN_H, x, y, text, color);
+    /* Bitmap fallback: faux-bold via eid_draw_text_bold, which smears +1px
+     * for weight AND adds tracking after caps so all-caps runs like "QEMU"
+     * don't glue into a blob. Non-bold uses the plain renderer. */
+    if (ln->css_bold)
+      eid_draw_text_bold(fb, WIN_W, WIN_H, x, y, text, color);
+    else
+      eid_draw_text(fb, WIN_W, WIN_H, x, y, text, color);
   }
 
   /* Underline: from CSS or from default style rules */
@@ -1883,6 +4681,14 @@ static void draw_text_line(int x, int y, const line_t *ln) {
 }
 
 static void render(const char *filename) {
+  /* Immediate-mode focus reset: any fresh click clears focus_id at
+   * the top of the frame. Per-widget eid_process_interaction then
+   * re-sets focus_id for whichever widget the click landed on, if
+   * any. As a result, clicking on plain page text drops focus from
+   * a previously-focused <input> (and our STYLE_INPUT branch sees
+   * !focused → dispatches the synthetic `change` event). */
+  if (ui.m_clicked) ui.focus_id = 0;
+
   /* Main background (page) */
   eid_draw_rect(fb, WIN_W, WIN_H, 0, 0, WIN_W, WIN_H, body_bg);
 
@@ -1905,6 +4711,9 @@ static void render(const char *filename) {
     strcpy(current_url, history[history_ptr]);
     load_page(current_url);
     is_navigating_history = false;
+#ifdef BROWSER_BUILD
+    qjs_window_set_history_length(history_ptr + 1);
+#endif
   }
 
   /* Refresh Button */
@@ -1937,103 +4746,499 @@ static void render(const char *filename) {
   eid_draw_line(fb, WIN_W, WIN_H, 0, 65, WIN_W, 65, CLR_BORDER);
 
   int v_lines = visible_lines();
-  int max_scroll = line_count - v_lines;
-  if (max_scroll < 0)
-    max_scroll = 0;
-  if (scroll_line > max_scroll)
-    scroll_line = max_scroll;
 
-  int cur_y = CONTENT_Y + 14; /* Offset for the page title bar */
-  /* Per-column Y cursors for the grid renderer. per_col_y[c] tracks
-   * how far down column c has already been filled within the current
-   * grid run. When we hit a non-grid line (or the run ends), we
-   * sync cur_y up to max(per_col_y[*]) so the next full-width line
-   * starts below all cells. */
-  int per_col_y[6];
-  for (int c = 0; c < 6; c++)
-    per_col_y[c] = cur_y;
-  int last_grid_cols = 0;
-  int last_grid_row = -1;
-  /* The content area ends here. We can't just stop after v_lines
-   * iterations the way we used to — inside a grid run the lines
-   * stack column-by-column (col 0 first, then col 1...), so a
-   * naive "v_lines lines = v_lines * LINE_H pixels" assumption
-   * would chop off the entire right column. Instead, iterate every
-   * line that could plausibly be on screen and stop only when both
-   * the master cur_y AND every column cursor are past the bottom. */
-  int content_end_y = WIN_H - 20;
-  for (int i = 0;; i++) {
-    int idx = scroll_line + i;
-    if (idx >= line_count)
-      break;
+  /* R6/L1: pixel-anchored render. Each line carries its own
+   * (box_x, box_y, box_h) so we project box_y onto the screen via a
+   * single scroll offset.
+   *
+   * R6/L5b: scroll_line is a count of LINE_H *steps*, and scroll_y_px is
+   * derived as scroll_line * LINE_H — strictly monotonic in scroll_line.
+   * The previous model set scroll_y_px = lines[scroll_line].box_y, but
+   * lines[] is NOT sorted by box_y (flex/grid columns are appended in DOM
+   * order), so incrementing scroll_line could DECREASE box_y and the page
+   * would jump upward mid-scroll. A fixed pixel step removes that coupling
+   * entirely. Lines above/below the fold are clipped per-line by box_y. */
+  const int content_top    = CONTENT_Y + 14;
+  const int content_bottom = WIN_H - 18;
+  int view_px = content_bottom - content_top;
 
-    const line_t *ln = &lines[idx];
-    int g_cols = (ln->grid_cols > 1) ? ln->grid_cols : 0;
+  /* Actual rendered content height (line_count over-counts vertical rows
+   * when flex/grid rows span several lines, so derive height from box_y
+   * rather than a line count). */
+  int content_px_h = 0;
+  for (int li = 0; li < line_count; li++) {
+    int bottom_li = lines[li].box_y +
+                    (lines[li].box_h > 0 ? lines[li].box_h : LINE_H);
+    if (bottom_li > content_px_h) content_px_h = bottom_li;
+  }
+  int max_scroll_px = content_px_h - view_px;
+  if (max_scroll_px < 0) max_scroll_px = 0;
 
-    /* Grid-run transitions: when the column count or row index
-     * changes, sync cur_y so the next row / non-grid section
-     * starts BELOW everything that was already drawn. */
-    if (g_cols != last_grid_cols ||
-        (g_cols > 0 && ln->grid_row != last_grid_row)) {
-      int sync_y = cur_y;
-      int span = last_grid_cols > 0 ? last_grid_cols : 1;
-      for (int c = 0; c < span && c < 6; c++)
-        if (per_col_y[c] > sync_y)
-          sync_y = per_col_y[c];
-      cur_y = sync_y;
-      for (int c = 0; c < 6; c++)
-        per_col_y[c] = cur_y;
-      last_grid_cols = g_cols;
-      last_grid_row = ln->grid_row;
-    }
+  /* Max scroll expressed in LINE_H steps; published so main()'s key
+   * handler clamps against the same bound the painter enforces. */
+  int max_scroll = (max_scroll_px + LINE_H - 1) / LINE_H;
+  g_max_scroll_lines = max_scroll;
+  if (scroll_line > max_scroll) scroll_line = max_scroll;
+  if (scroll_line < 0)          scroll_line = 0;
 
-    int cur_x;
-    int draw_y;
-    if (g_cols > 0) {
-      int cell_w = (WIN_W - 36) / g_cols;
-      cur_x = CONTENT_X + ln->grid_col * cell_w + (ln->indent ? 18 : 0);
-      draw_y = per_col_y[ln->grid_col];
+  int scroll_y_px = scroll_line * LINE_H;
+  if (scroll_y_px > max_scroll_px) scroll_y_px = max_scroll_px;
+
+  /* Compatibility alias for branches further down that still
+   * advance a `cur_y` of their own (notably the link
+   * eid_process_interaction rect below). */
+  int cur_y = content_top;
+  (void)cur_y;
+
+  /* R6/L6: sticky region. Lines / box-bgs flagged sticky (an element
+   * with position:sticky|fixed, e.g. the top `.bar`) are PINNED to the
+   * top of the viewport — painted with no scroll offset and clipped to
+   * a band at the very top — while the normal scrollable content is
+   * pushed below them (scroll_content_top) so it never draws under the
+   * bar. The bar is shifted up by sticky_min_y so its top aligns to the
+   * content area regardless of its natural document Y. */
+  int sticky_min_y = 1 << 30, sticky_max_y = 0;
+  bool has_sticky = false;
+  for (int li = 0; li < line_count; li++) {
+    if (!lines[li].sticky) continue;
+    has_sticky = true;
+    int t = lines[li].box_y;
+    int b = lines[li].box_y + (lines[li].box_h > 0 ? lines[li].box_h : LINE_H);
+    if (t < sticky_min_y) sticky_min_y = t;
+    if (b > sticky_max_y) sticky_max_y = b;
+  }
+  for (int bi = 0; bi < box_bg_count; bi++) {
+    if (!box_bgs[bi].sticky) continue;
+    has_sticky = true;
+    if (box_bgs[bi].box_y < sticky_min_y) sticky_min_y = box_bgs[bi].box_y;
+    int b = box_bgs[bi].box_y + box_bgs[bi].box_h;
+    if (b > sticky_max_y) sticky_max_y = b;
+  }
+  int sticky_h = has_sticky ? (sticky_max_y - sticky_min_y) : 0;
+  if (sticky_h < 0) sticky_h = 0;
+  /* Cap the pinned strip so it can't dominate the viewport. On this
+   * narrow (604px) layout the bar's flex row degrades to a vertical
+   * stack (each nav link + the logo on its own line), which would pin
+   * ~half the screen. Keep the pinned bar to a compact strip — at most
+   * STICKY_MAX_PX, ~1/4 of the content area — and let the rest of the
+   * bar scroll off under it. */
+  const int STICKY_MAX_PX = (view_px * 2) / 5;
+  if (sticky_h > STICKY_MAX_PX) sticky_h = STICKY_MAX_PX;
+  if (!has_sticky) sticky_min_y = 0;
+  const int scroll_content_top = content_top + sticky_h;
+
+  /* R6/L5: paint box-level bgs first, *behind* all text. Painted in
+   * reverse record order so an outer container (recorded last, on
+   * element exit) paints before its inner children (recorded first),
+   * letting the inner box (e.g. the .terminal title bar) sit on top
+   * of the outer card. Each rect is clipped to the content area. */
+  for (int b = box_bg_count - 1; b >= 0; b--) {
+    box_bg_t *bb = &box_bgs[b];
+    int top, clip_top, clip_bot;
+    if (bb->sticky) {
+      top      = content_top + (bb->box_y - sticky_min_y);  /* pinned */
+      clip_top = content_top;
+      clip_bot = content_top + sticky_h;
     } else {
-      cur_x = CONTENT_X + (ln->indent ? 18 : 0);
-      draw_y = cur_y;
+      top      = content_top + bb->box_y - scroll_y_px;
+      clip_top = scroll_content_top;   /* never under the pinned bar */
+      clip_bot = content_bottom;
     }
-    draw_text_line(cur_x, draw_y, ln);
+    int bot = top + bb->box_h;
+    if (bot <= clip_top || top >= clip_bot)
+      continue;  /* fully outside its band */
+    if (top < clip_top) top = clip_top;
+    if (bot > clip_bot) bot = clip_bot;
+    int rx = CONTENT_X + bb->box_x;
+    eid_draw_rect(fb, WIN_W, WIN_H, rx, top - 2, bb->box_w,
+                  bot - top, bb->color);
+  }
+
+  /* R6/L5 fix: paint EVERY line that falls inside the visible band,
+   * not just `v_lines` lines starting at `scroll_line`. Multi-column
+   * flex/grid rows append several lines that share a single vertical
+   * row (a 3-column lang legend = 3 lines on one row), so a fixed
+   * budget of v_lines iterations is exhausted by columns long before
+   * the viewport is vertically filled — which left the lower half of
+   * the page blank and only "appeared" as you scrolled. Each line is
+   * independently projected via its own box_y and clipped to
+   * [content_top, content_bottom), so scanning all lines is correct
+   * regardless of DOM/column ordering. */
+  for (int idx = 0; idx < line_count; idx++) {
+    int line_h = lines[idx].box_h > 0 ? lines[idx].box_h : LINE_H;
+    /* cur_y for this line, derived from box_y rather than a running
+     * accumulator. Sticky lines (R6/L6) are pinned to the top band
+     * with no scroll offset; everything else scrolls and is clipped to
+     * the area below the pinned bar. */
+    int line_y, clip_top, clip_bot;
+    if (lines[idx].sticky) {
+      line_y   = content_top + (lines[idx].box_y - sticky_min_y);
+      clip_top = content_top;
+      clip_bot = content_top + sticky_h;
+    } else {
+      line_y   = content_top + lines[idx].box_y - scroll_y_px;
+      clip_top = scroll_content_top;
+      clip_bot = content_bottom;
+    }
+    cur_y = line_y;
+    if (line_y + line_h > clip_bot)
+      continue;  /* below its band; later DOM-order lines might still
+                  * be above (multi-column flex/grid) — keep scanning
+                  * instead of break. */
+    if (line_y < clip_top)
+      continue;  /* above its band; lines[] isn't sorted by box_y
+                  * since flex/grid column children are appended
+                  * in DOM order, so we can't break here either. */
+
+    /* box_x already includes the LAYOUT_DEFAULT_INDENT offset for
+     * indented lines (see push_line). Don't add it again. */
+    int cur_x = CONTENT_X + lines[idx].box_x;
+
+#ifdef BROWSER_BUILD
+    /* R4/F0: <button> widgets render as eid buttons and dispatch a
+     * 'click' event into the page JS session when clicked. */
+    if (lines[idx].style == STYLE_BUTTON && lines[idx].widget_node) {
+      int btn_w = eid_text_width_utf8(lines[idx].text) + 24;
+      if (btn_w < 80)  btn_w = 80;
+      if (btn_w > CONTENT_W) btn_w = CONTENT_W;
+      int btn_h = LINE_H + 4;
+      uint32_t state = eid_button(&ui, lines[idx].text,
+                                  cur_x, cur_y - 2, btn_w, btn_h);
+      if (state & EID_STATE_CLICKED) {
+        dom_node_t *wn = (dom_node_t *)lines[idx].widget_node;
+        int click_prevented = 0;
+        if (g_page) {
+          click_prevented = qjs_page_dispatch_event(g_page, wn, "click");
+          /* R5/N0+N1: handler may have navigated via location.* or
+           * history.*; if so, act on it and bail this frame. */
+          if (drain_pending_nav()) return;
+          if (qjs_page_consume_dirty(g_page)) {
+            rebuild_lines_from_dom();
+            /* Don't continue painting against the now-stale loop —
+             * next frame paints the fresh tree. */
+            return;
+          }
+        }
+        /* R4/F2: after the script handlers (if any) had their say,
+         * a submit-type widget navigates the enclosing form. R4/F3:
+         * unless the click was preventDefault'd, in which case neither
+         * the click default nor the implicit submit fires. */
+        if (!click_prevented && is_submit_widget(wn)) {
+          submit_form_for(wn);
+          return;
+        }
+      }
+      cur_y += LINE_H + 6;
+      continue;
+    }
+    /* R4/F1: <input type=text> widgets. The DOM `value` attribute
+     * holds the canonical text; we copy it into a local buffer,
+     * hand that to eid_text_input (which mutates it based on
+     * focused keyboard input), then if the buffer changed we
+     * write it back to the DOM and dispatch a synthetic 'input'
+     * event into JS. We don't trigger rebuild_lines_from_dom on
+     * every keystroke — only if JS itself mutated the DOM in
+     * response (qjs_page_consume_dirty). The input line's own
+     * `text[]` field re-syncs on the next full rebuild. */
+    if (lines[idx].style == STYLE_INPUT && lines[idx].widget_node) {
+      dom_node_t *n = (dom_node_t *)lines[idx].widget_node;
+      int in_w = CONTENT_W - 4;
+      if (in_w > 360) in_w = 360;
+      /* 8x16 PSF1 font ⇒ make the box just tall enough that the
+       * glyphs sit centred with ~2 px breathing room on each side.
+       * LINE_H+4 left visible vertical padding because the page-line
+       * advance is only LINE_H+6 below, which made the input look
+       * like it cropped the text. */
+      int in_h = 20;
+
+      char buf[LINE_CHARS + 1];
+      const char *cur_val = dom_get_attr(n, "value");
+      int  bn = 0;
+      if (cur_val) {
+        for (const char *t = cur_val; *t && bn < LINE_CHARS; t++) buf[bn++] = *t;
+      }
+      buf[bn] = 0;
+
+      /* Use the node pointer as part of the eid label so two empty
+       * inputs at the same column don't share an ID. */
+      char id_label[24];
+      sprintf(id_label, "input@%p", (void *)n);
+
+      /* R4/F2: snapshot last_key BEFORE eid_text_input — it consumes
+       * the key while focused, including Enter (which scancode_to_ascii
+       * maps to '\n' but eid_text_input filters as non-printable).
+       * If we saw Enter and the widget ends up focused, treat it as
+       * "submit the enclosing form". */
+      uint8_t key_before = ui.last_key;
+
+      uint32_t in_state = eid_text_input(&ui, id_label, cur_x, cur_y - 2,
+                                         in_w, in_h, buf, (int)sizeof buf);
+
+      if (!cur_val || strcmp(buf, cur_val) != 0) {
+        dom_set_attr(n, "value", buf);
+        if (g_page) {
+          qjs_page_dispatch_event(g_page, n, "input");
+          if (drain_pending_nav()) return;
+          if (qjs_page_consume_dirty(g_page)) {
+            rebuild_lines_from_dom();
+            return;
+          }
+        }
+      }
+      if ((in_state & EID_STATE_FOCUSED) && key_before == 0x1C) {
+        /* Enter while focused → submit enclosing form (if any). */
+        submit_form_for(n);
+        return;
+      }
+
+      /* R5/N2: emit a `change` event when focus leaves the input
+       * and the value differs from the snapshot taken at focus-in. */
+      bool now_focused = (in_state & EID_STATE_FOCUSED) != 0;
+      if (now_focused && focus_input_node != n) {
+        focus_input_node = n;
+        strncpy(focus_input_snapshot, buf, sizeof(focus_input_snapshot) - 1);
+        focus_input_snapshot[sizeof(focus_input_snapshot) - 1] = 0;
+      } else if (!now_focused && focus_input_node == n) {
+        if (strcmp(buf, focus_input_snapshot) != 0 && g_page) {
+          qjs_page_dispatch_event(g_page, n, "change");
+          focus_input_node = NULL;
+          focus_input_snapshot[0] = 0;
+          if (drain_pending_nav()) return;
+          if (qjs_page_consume_dirty(g_page)) {
+            rebuild_lines_from_dom();
+            return;
+          }
+        } else {
+          focus_input_node = NULL;
+          focus_input_snapshot[0] = 0;
+        }
+      }
+      cur_y += LINE_H + 6;
+      continue;
+    }
+    /* R5/N2: checkbox / radio toggle. */
+    if (lines[idx].style == STYLE_CHECKBOX && lines[idx].widget_node) {
+      dom_node_t *n = (dom_node_t *)lines[idx].widget_node;
+      const char *type = dom_get_attr(n, "type");
+      bool is_radio = type && strcasecmp(type, "radio") == 0;
+      bool checked  = dom_get_attr(n, "checked") != NULL;
+      bool prev     = checked;
+
+      /* eid_checkbox renders `label` as visible text next to the
+       * box. We want the surrounding HTML text (typically a sibling
+       * <label> or trailing text node) to provide the visible
+       * caption, so pass an empty string here. The id is derived
+       * from (label, x, y) — different checkboxes naturally get
+       * different ids via their y coordinate. */
+      eid_checkbox(&ui, "", cur_x, cur_y - 2, &checked);
+
+      if (checked != prev) {
+        bool fire_change = true;
+        if (is_radio) {
+          if (checked) {
+            /* Newly selected radio: uncheck siblings, persist. */
+            uncheck_radio_siblings(n);
+            dom_set_attr(n, "checked", "");
+          } else {
+            /* Radio can't be untoggled by a second click — restore
+             * and suppress the synthetic change. */
+            dom_set_attr(n, "checked", "");
+            fire_change = false;
+          }
+        } else {
+          if (checked) dom_set_attr(n, "checked", "");
+          else         dom_remove_attr(n, "checked");
+        }
+        if (fire_change && g_page) {
+          qjs_page_dispatch_event(g_page, n, "click");
+          qjs_page_dispatch_event(g_page, n, "change");
+          if (drain_pending_nav()) return;
+          if (qjs_page_consume_dirty(g_page)) {
+            rebuild_lines_from_dom();
+            return;
+          }
+        }
+      }
+      cur_y += LINE_H + 6;
+      continue;
+    }
+    /* R5/N2: <select> — click cycles to the next option. */
+    if (lines[idx].style == STYLE_SELECT && lines[idx].widget_node) {
+      dom_node_t *n = (dom_node_t *)lines[idx].widget_node;
+      char btn_label[LINE_CHARS + 4];
+      int  ll = (int)strlen(lines[idx].text);
+      if (ll > LINE_CHARS) ll = LINE_CHARS;
+      memcpy(btn_label, lines[idx].text, ll);
+      /* Append " v" so it visually reads as a dropdown. */
+      btn_label[ll++] = ' ';
+      btn_label[ll++] = 'v';
+      btn_label[ll]   = 0;
+
+      int btn_w = ll * 8 + 24;
+      if (btn_w < 100) btn_w = 100;
+      if (btn_w > CONTENT_W) btn_w = CONTENT_W;
+      int btn_h = LINE_H + 4;
+      uint32_t state = eid_button(&ui, btn_label, cur_x, cur_y - 2, btn_w, btn_h);
+      if (state & EID_STATE_CLICKED) {
+        const char *cur_v = dom_get_attr(n, "value");
+        dom_node_t *cur_opt = find_option_by_value(n, cur_v);
+        dom_node_t *nxt = next_option(n, cur_opt);
+        if (nxt && nxt != cur_opt) {
+          const char *nv = dom_get_attr(nxt, "value");
+          char otxt[64]; int ol = 0;
+          for (dom_node_t *t = nxt->first_child; t && ol < (int)sizeof(otxt) - 1; t = t->next_sibling) {
+            if (t->type == DOM_NODE_TEXT && t->text) {
+              for (const char *s = t->text; *s && ol < (int)sizeof(otxt) - 1; s++) otxt[ol++] = *s;
+            }
+          }
+          otxt[ol] = 0;
+          dom_set_attr(n, "value", (nv && nv[0]) ? nv : otxt);
+          /* Keep DOM in sync for scripts that inspect option.selected. */
+          for (dom_node_t *c = n->first_child; c; c = c->next_sibling) {
+            if (c->type == DOM_NODE_ELEMENT && c->tag_name &&
+                strcmp(c->tag_name, "option") == 0) dom_remove_attr(c, "selected");
+          }
+          dom_set_attr(nxt, "selected", "");
+          /* Rebuild lines so the visible label reflects the new
+           * selection right away. */
+          rebuild_lines_from_dom();
+          if (g_page) {
+            qjs_page_dispatch_event(g_page, n, "change");
+            if (drain_pending_nav()) return;
+            if (qjs_page_consume_dirty(g_page)) {
+              rebuild_lines_from_dom();
+            }
+          }
+          return;
+        }
+      }
+      cur_y += LINE_H + 6;
+      continue;
+    }
+#endif
+
+    /* R6/B4: image lines take their natural height from the decoded
+     * image rather than the fixed LINE_H. Blit directly into the
+     * framebuffer and skip the rest of the per-line tail. */
+#ifdef BROWSER_BUILD
+    if (lines[idx].style == STYLE_IMAGE) {
+      int ii = lines[idx].image_idx;
+      if (ii >= 0 && ii < g_image_count && g_images[ii].rgba) {
+        const eq_image_t *im = &g_images[ii];
+        /* L5+: honour the line's pixel box_x so an <img> inside
+         * a flex / grid column draws inside that column, not at
+         * the page's left margin. box_x is relative to the
+         * content area (frame.x), so add CONTENT_X to get fb
+         * coords. */
+        int box_x_px = lines[idx].box_x;
+        int box_w_px = lines[idx].box_w > 0 ? lines[idx].box_w : CONTENT_W;
+        int draw_x = CONTENT_X + box_x_px;
+        int draw_y = cur_y;
+        /* Honour center alignment if the parent set it (e.g. an
+         * <img> inside a <center> or text-align:center container). */
+        if (lines[idx].css_align == ALIGN_CENTER &&
+            im->w < box_w_px)
+          draw_x = CONTENT_X + box_x_px + (box_w_px - im->w) / 2;
+
+        /* R6/B5: paint the "card" behind the image in the *page*
+         * background colour, then alpha-composite the pixels on top.
+         * Earlier this was a fixed light-grey slab so a transparent
+         * white-on-nothing logo wouldn't vanish on a white page — but
+         * on a dark themed site that slab shows up as an ugly grey
+         * square around the logo. Matching body_bg means the
+         * transparent PNG reads as truly cut-out (logo sits straight
+         * on the page), while the alpha blend still smooths the edges. */
+        const uint32_t CLR_IMG_CARD = body_bg;
+        const int      PAD          = 6;
+        eid_draw_rect(fb, WIN_W, WIN_H,
+                      draw_x - PAD, draw_y - PAD,
+                      im->w + PAD * 2, im->h + PAD * 2, CLR_IMG_CARD);
+
+        for (int py = 0; py < im->h; py++) {
+          int fy = draw_y + py;
+          if (fy < 0 || fy >= WIN_H - 18) continue; /* clip status bar */
+          const uint8_t *src = im->rgba + (size_t)py * im->w * 4;
+          uint32_t      *dst = fb + (size_t)fy * WIN_W + draw_x;
+          for (int px = 0; px < im->w; px++) {
+            int fx = draw_x + px;
+            if (fx < 0 || fx >= WIN_W) { dst++; src += 4; continue; }
+            uint32_t a = src[3];
+            if (a == 0) { dst++; src += 4; continue; }
+            if (a == 255) {
+              *dst = ((uint32_t)src[0] << 16) |
+                     ((uint32_t)src[1] <<  8) |
+                     ((uint32_t)src[2]);
+            } else {
+              /* source-over over the already-drawn card pixel */
+              uint32_t bg = *dst;
+              uint32_t br = (bg >> 16) & 0xFF;
+              uint32_t bgc= (bg >>  8) & 0xFF;
+              uint32_t bb = (bg      ) & 0xFF;
+              uint32_t r  = (src[0] * a + br * (255 - a)) / 255;
+              uint32_t g  = (src[1] * a + bgc* (255 - a)) / 255;
+              uint32_t b  = (src[2] * a + bb * (255 - a)) / 255;
+              *dst = (r << 16) | (g << 8) | b;
+            }
+            dst++; src += 4;
+          }
+        }
+        cur_y += im->h + PAD * 2 + 6;
+      } else {
+        cur_y += LINE_H;
+      }
+      continue;
+    }
+#endif
+
+    draw_text_line(cur_x, cur_y, &lines[idx]);
 
     /* Handle link interaction */
-    if (ln->style == STYLE_LINK && ln->link_url[0]) {
-      uint32_t id = eid_get_id(ln->link_url, cur_x, draw_y);
+    if (lines[idx].style == STYLE_LINK && lines[idx].link_url[0]) {
+      uint32_t id = eid_get_id(lines[idx].link_url, cur_x, cur_y);
       uint32_t state = eid_process_interaction(
-          &ui, id, cur_x, draw_y, strlen(ln->text) * 8, LINE_H);
+          &ui, id, cur_x, cur_y, eid_text_width_utf8(lines[idx].text), LINE_H);
       if (state & EID_STATE_CLICKED) {
+        const char *lu = lines[idx].link_url;
+        /* R6/B5: in-page anchor (`#id`, `/#id`, or same-page URL + #id)
+         * → scroll to the recorded element instead of refetching the
+         * whole page. */
+        const char *hash = lu;
+        while (*hash && *hash != '#') hash++;
+        if (*hash == '#' && hash[1]) {
+          int prefix_len = (int)(hash - lu);
+          int same_page = (prefix_len == 0) ||
+                          (prefix_len == 1 && lu[0] == '/');
+          if (!same_page) {
+            char pre[128];
+            int n = prefix_len < 127 ? prefix_len : 127;
+            memcpy(pre, lu, n); pre[n] = '\0';
+            char rprefix[128];
+            resolve_url(current_url, pre, rprefix);
+            same_page = (strcmp(rprefix, current_url) == 0);
+          }
+          if (same_page) {
+            const char *frag = hash + 1;
+            int target_px = -1;
+            if (strcmp(frag, "top") == 0) target_px = 0;
+            for (int a = 0; a < g_anchor_count && target_px < 0; a++)
+              if (strcmp(g_anchors[a].id, frag) == 0)
+                target_px = g_anchors[a].y;
+            if (target_px >= 0) {
+              scroll_line = target_px / LINE_H;
+              if (scroll_line < 0) scroll_line = 0;
+            }
+            return; /* re-render next frame at the new scroll position */
+          }
+        }
         char resolved[128];
-        resolve_url(current_url, ln->link_url, resolved);
+        resolve_url(current_url, lu, resolved);
         strcpy(current_url, resolved);
         load_page(current_url);
         return; /* Avoid drawing more in this frame */
       }
     }
 
-    if (g_cols > 0) {
-      per_col_y[ln->grid_col] += LINE_H;
-    } else {
-      cur_y += LINE_H;
-      for (int c = 0; c < 6; c++)
-        per_col_y[c] = cur_y;
-    }
-
-    /* Early-exit when every cursor is past the bottom of the
-     * visible area — both the master cur_y and every per-column
-     * cursor inside an active grid run. */
-    bool all_below = cur_y > content_end_y;
-    if (all_below && g_cols > 0) {
-      for (int c = 0; c < g_cols && c < 6; c++)
-        if (per_col_y[c] <= content_end_y) {
-          all_below = false;
-          break;
-        }
-    }
-    if (all_below)
-      break;
+    cur_y += LINE_H;
   }
 
   /* Scrollbar */
@@ -2059,6 +5264,33 @@ static void render(const char *filename) {
   eid_draw_line(fb, WIN_W, WIN_H, 0, WIN_H - 18, WIN_W, WIN_H - 18, CLR_BORDER);
   eid_draw_text(fb, WIN_W, WIN_H, CONTENT_X, WIN_H - 14,
                 "L: Edit URL  Up/Down: Scroll  Esc: Exit", CLR_MUTED);
+
+  /* Software cursor.
+   *
+   * When the app calls SYS_DRAW_BUFFER it becomes the foreground app
+   * (see src/kernel.c sys_draw_app_buffer), and the kernel routes
+   * SYS_GET_MOUSE_FULL exclusively to it — sysgui's compositor stops
+   * receiving mouse coords, so its hardware-emulated cursor sprite
+   * goes stale / invisible inside our window. Draw our own arrow at
+   * the local mouse position so the user can aim at widgets. The
+   * coords in ui.mx/ui.my are already in window-local space (the
+   * main loop subtracts the window offset above). Clip to the
+   * window rect — eid_draw_rect/line already do bounds checks. */
+  {
+    int cx = ui.mx;
+    int cy = ui.my;
+    if (cx >= 0 && cx < WIN_W && cy >= 0 && cy < WIN_H) {
+      /* 12 px L-shaped arrow, white fill + 1 px black outline. */
+      for (int i = 0; i < 12; i++) {
+        int w = 12 - i;            /* triangle row width */
+        eid_draw_rect(fb, WIN_W, WIN_H, cx,         cy + i, 1, 1, 0x000000);
+        eid_draw_rect(fb, WIN_W, WIN_H, cx + 1,     cy + i, w - 2 > 0 ? w - 2 : 0, 1, 0xFFFFFF);
+        eid_draw_rect(fb, WIN_W, WIN_H, cx + w - 1, cy + i, 1, 1, 0x000000);
+      }
+      /* bottom edge */
+      eid_draw_line(fb, WIN_W, WIN_H, cx, cy + 12, cx + 6, cy + 12, 0x000000);
+    }
+  }
 }
 
 #ifdef BROWSER_BUILD
@@ -2082,6 +5314,100 @@ static void render(const char *filename) {
  * Stored in network byte order, zero = unused. */
 static uint32_t g_first_load_ip_override_be = 0;
 
+/* ── Phase R6/B4: <img> fetch + decode ───────────────────────────────
+ * Called from w_emit_node() while the DOM is being walked into the
+ * line stream. We block here on the network for the duration of one
+ * GET — that's OK for the kind of toy pages this browser is meant
+ * to render and keeps the renderer single-threaded. */
+static int load_image_for_src(const char *src) {
+  if (!src || !src[0]) return -1;
+  if (g_image_count >= MAX_DOC_IMAGES) return -1;
+
+  /* Resolve against current_url so site-relative paths like
+   * "/static/logo.png" become absolute. Local file:// style paths
+   * (anything that isn't http(s)://) fall back to SYS_READ_FILE. */
+  char resolved[256];
+  resolve_url(current_url, src, resolved);
+
+  uint8_t  *bytes  = NULL;
+  size_t    nbytes = 0;
+  eq_http_response_t resp;
+  memset(&resp, 0, sizeof resp);
+
+  if (strncasecmp(resolved, "http://",  7) == 0 ||
+      strncasecmp(resolved, "https://", 8) == 0) {
+    eq_http_options_t opts;
+    memset(&opts, 0, sizeof opts);
+    opts.trust_anchors     = TAs_MOZ;
+    opts.trust_anchors_num = TAs_MOZ_NUM;
+    opts.follow_redirects  = 3;
+    opts.recv_timeout_ms   = 10000;
+    opts.body_limit_bytes  = 1u * 1024u * 1024u;   /* 1 MiB cap */
+    opts.verbose           = 0;
+    int rc = eq_http_get(resolved, &opts, &resp);
+    if (rc != EQ_HTTP_OK || resp.status_code / 100 != 2 ||
+        !resp.body || resp.body_len == 0) {
+      eq_http_response_free(&resp);
+      return -1;
+    }
+    bytes  = (uint8_t *)resp.body;
+    nbytes = resp.body_len;
+  } else {
+    /* Local resource (iso_root/res/foo.png or similar). Strip any
+     * accidental query string. */
+    char fpath[128];
+    int fl = 0;
+    for (const char *t = resolved; *t && *t != '?' &&
+                                   fl < (int)sizeof fpath - 1; t++)
+      fpath[fl++] = *t;
+    fpath[fl] = 0;
+    uint32_t fsize = 0;
+    void *data = (void *)_syscall(SYS_READ_FILE, (uint64_t)fpath,
+                                  (uint64_t)&fsize, 0, 0, 0);
+    if (!data || fsize == 0) return -1;
+    bytes  = (uint8_t *)data;
+    nbytes = fsize;
+  }
+
+  eq_image_t img = {0};
+  int rc = eq_image_decode(bytes, nbytes, &img);
+  /* Drop the original encoded bytes immediately — the decoder
+   * already produced an owned RGBA copy. */
+  eq_http_response_free(&resp);
+  if (rc != 0 || !img.rgba) return -1;
+
+  /* Downscale by 2x repeatedly until it fits the content area. We
+   * cap the on-screen height at 320 px so a single hero image
+   * doesn't push the entire page below the fold. Nearest-neighbour
+   * halving in-place — sufficient for line art and screenshots and
+   * keeps the code one tight loop. */
+  const int max_w = CONTENT_W;
+  const int max_h = 320;
+  while ((img.w > max_w || img.h > max_h) && img.w > 1 && img.h > 1) {
+    int nw = img.w / 2; if (nw < 1) nw = 1;
+    int nh = img.h / 2; if (nh < 1) nh = 1;
+    uint8_t *dst = (uint8_t *)malloc((size_t)nw * nh * 4);
+    if (!dst) break;
+    for (int y = 0; y < nh; y++) {
+      const uint8_t *srow = img.rgba + (size_t)(y * 2) * img.w * 4;
+      uint8_t       *drow = dst       + (size_t) y      * nw   * 4;
+      for (int x = 0; x < nw; x++) {
+        const uint8_t *sp = srow + (size_t)(x * 2) * 4;
+        drow[x * 4 + 0] = sp[0];
+        drow[x * 4 + 1] = sp[1];
+        drow[x * 4 + 2] = sp[2];
+        drow[x * 4 + 3] = sp[3];
+      }
+    }
+    eq_image_free(&img);
+    img.rgba = dst; img.w = nw; img.h = nh;
+  }
+
+  int idx = g_image_count++;
+  g_images[idx] = img;
+  return idx;
+}
+
 static void load_page(const char *url) {
   print("[BROWSER] Navigating to: ");
   print(url);
@@ -2090,8 +5416,17 @@ static void load_page(const char *url) {
   /* --- File path (local resource) -------------------------------- */
   if (strncasecmp(url, "http://", 7) != 0 &&
       strncasecmp(url, "https://", 8) != 0) {
+    /* Form submission can append `?key=val` to a local-file action
+     * (R4/F2). The filesystem doesn't know what to do with the query,
+     * so strip it before SYS_READ_FILE while leaving `current_url`
+     * unchanged (so back/forward replay the same path). */
+    char fpath[128];
+    int fl = 0;
+    for (const char *t = url; *t && *t != '?' && fl < (int)sizeof fpath - 1; t++)
+      fpath[fl++] = *t;
+    fpath[fl] = 0;
     uint32_t fsize = 0;
-    char *data = (char *)_syscall(SYS_READ_FILE, (uint64_t)url,
+    char *data = (char *)_syscall(SYS_READ_FILE, (uint64_t)fpath,
                                   (uint64_t)&fsize, 0, 0, 0);
     if (!data) {
       line_count = 0;
@@ -2159,7 +5494,12 @@ static void load_page(const char *url) {
   char *html = NULL;
   uint32_t size = 0;
 
-  if (strstr(url, "http://") || strchr(url, '.')) {
+  /* Treat as URL only if there's an explicit scheme — the old
+   * heuristic ("contains a dot") fired on "index.html" and other
+   * local files, sending them through DNS. Pure-local htmlview.elf
+   * never has a use for implicit HTTP, so require "://". */
+  bool is_url = (strstr(url, "://") != NULL);
+  if (is_url) {
     const char *host = url;
     if (strncmp(url, "http://", 7) == 0)
       host += 7;
@@ -2223,23 +5563,34 @@ int main(int argc, char **argv) {
     h_font_large = eid_load_font((unsigned char *)f_data, 22.0f);
   }
 
-  if (argc > 1 && argv[1] != 0) {
-    /* User passed a target. Truncate quietly into current_url[]. */
-    size_t alen = strlen(argv[1]);
+  /* Scan argv for the global --legacy flag (compact pre-pass so the
+   * existing positional argv[1]/argv[2] semantics are preserved). */
+  int positional[8]; int p_count = 0;
+  for (int ai = 1; ai < argc && p_count < 8; ai++) {
+    if (argv[ai] && strcmp(argv[ai], "--legacy") == 0) {
+      g_use_legacy_parser = true;
+    } else {
+      positional[p_count++] = ai;
+    }
+  }
+  if (p_count > 0) {
+    char *arg1 = argv[positional[0]];
+    size_t alen = strlen(arg1);
     if (alen >= sizeof current_url) alen = sizeof current_url - 1;
-    memcpy(current_url, argv[1], alen);
+    memcpy(current_url, arg1, alen);
     current_url[alen] = '\0';
   }
 #ifdef BROWSER_BUILD
-  else {
+  if (p_count == 0) {
     /* browser.elf defaults to a real internet page; htmlview.elf keeps
      * its original "index.html" local-file default. */
     strcpy(current_url, "http://example.com/");
   }
-  /* Optional argv[2]: dotted-quad IP override for the first load_page().
-   * Same convention as urlget — useful while QEMU SLIRP DNS is flaky. */
-  if (argc > 2 && argv[2] != 0) {
-    uint32_t ip_be = net_dns_resolve(argv[2]);  /* parses dotted-quad too */
+  /* Optional 2nd positional arg: dotted-quad IP override for the first
+   * load_page() (same convention as urlget — useful while QEMU SLIRP
+   * DNS is flaky). */
+  if (p_count > 1 && argv[positional[1]] != 0) {
+    uint32_t ip_be = net_dns_resolve(argv[positional[1]]);
     if (ip_be) g_first_load_ip_override_be = ip_be;
   }
 #endif
@@ -2251,13 +5602,69 @@ int main(int argc, char **argv) {
 
   while (1) {
     eid_begin(&ui, fb, WIN_W, WIN_H);
+    /* eid_begin() no longer polls the keyboard itself (sysgui now owns the
+     * scancode FIFO and only feeds its own Lua apps). As a standalone app we
+     * pull the scancode directly; once we've blitted a frame we are the
+     * foreground app (fg_app_pid), so SYS_GET_SCANCODE returns our keys. */
+    ui.last_key = (uint8_t)_syscall(SYS_GET_SCANCODE, 0, 0, 0, 0, 0);
     ui.mx -= 120;
     ui.my -= 90;
 
     uint8_t key = ui.last_key;
-    int max_scroll = line_count - visible_lines();
+    /* Same scroll bound the painter uses (LINE_H steps, derived from the
+     * real pixel content height). Computed by the previous frame's
+     * render(); 0 on the very first frame before the first paint. */
+    int max_scroll = g_max_scroll_lines;
     if (max_scroll < 0)
       max_scroll = 0;
+
+    /* Esc is reserved as the universal "quit the browser" hotkey and
+     * is NOT exposed to JS — otherwise a runaway handler could trap
+     * the user inside a page. Check it before the keydown dispatch
+     * so preventDefault() can never block exit. */
+    if (key == 0x01)
+      break;
+
+#ifdef BROWSER_BUILD
+    /* R5/N5: per-frame timer tick. setInterval / setTimeout drive UI
+     * animation now that the host clock is plumbed in. Any DOM
+     * mutations from a timer callback get picked up immediately. */
+    if (g_page) {
+      uint64_t now_ms = _syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
+      qjs_page_tick(g_page, now_ms);
+      if (drain_pending_nav()) return 0;
+      if (qjs_page_consume_dirty(g_page)) {
+        rebuild_lines_from_dom();
+        max_scroll = line_count - visible_lines();
+        if (max_scroll < 0) max_scroll = 0;
+      }
+    }
+
+    /* R5/N5: dispatch keydown / keyup to a focused <input>. PS/2
+     * make codes are 0x01..0x80, break codes are 0x80+make. We
+     * report keyCode = scancode and key = scancode_to_ascii(make).
+     * If a handler preventDefault()'s, swallow the key so the
+     * default input widget doesn't also consume it. */
+    if (g_page && focus_input_node && key != 0 &&
+        key != 0x2A && key != 0x36 && key != 0xAA && key != 0xB6) {
+      bool is_break = (key & 0x80) != 0;
+      uint8_t make  = (uint8_t)(key & 0x7F);
+      char ascii    = scancode_to_ascii(make);
+      char keystr[2] = { ascii ? ascii : ' ', 0 };
+      const char *evname = is_break ? "keyup" : "keydown";
+      int prevented = qjs_page_dispatch_key(g_page, focus_input_node,
+                                            evname, keystr, (int)make);
+      if (drain_pending_nav()) return 0;
+      if (qjs_page_consume_dirty(g_page)) {
+        rebuild_lines_from_dom();
+      }
+      if (prevented) {
+        /* Hide the key from every widget this frame. */
+        ui.last_key = 0;
+        key = 0;
+      }
+    }
+#endif
 
     /* Track Shift across frames so typing ':', '/', '?', '#', etc. in the
      * URL bar works. The PS/2 driver delivers both make and break codes
@@ -2266,9 +5673,6 @@ int main(int argc, char **argv) {
     static bool shift_held = false;
     if (key == 0x2A || key == 0x36) shift_held = true;
     else if (key == 0xAA || key == 0xB6) shift_held = false;
-
-    if (key == 0x01)
-      break;
 
     if (is_typing_url) {
       if (key == 0x1C) {
@@ -2308,21 +5712,30 @@ int main(int argc, char **argv) {
         }
       }
     } else {
-      if (key == 0x26) {
+      /* R5/N2: if a text <input> currently has focus, drop the global
+       * shortcuts — the input widget will consume the keystroke this
+       * frame. Otherwise typing 'l' / 'j' / 'k' inside an input would
+       * fire L=Edit URL / J=ScrollDown / K=ScrollUp first. */
+#ifdef BROWSER_BUILD
+      bool input_focused = (focus_input_node != NULL);
+#else
+      bool input_focused = false;
+#endif
+      if (!input_focused && key == 0x26) {
         is_typing_url = true;
         url_cursor = 0;
         current_url[0] = '\0';
       }
-      if ((key == 0x50 || key == 0x1F) && scroll_line < max_scroll)
+      if (!input_focused && (key == 0x50 || key == 0x1F) && scroll_line < max_scroll)
         scroll_line++;
-      if ((key == 0x48 || key == 0x11) && scroll_line > 0)
+      if (!input_focused && (key == 0x48 || key == 0x11) && scroll_line > 0)
         scroll_line--;
-      if (key == 0x51) {
+      if (!input_focused && key == 0x51) {
         scroll_line += visible_lines();
         if (scroll_line > max_scroll)
           scroll_line = max_scroll;
       }
-      if (key == 0x49) {
+      if (!input_focused && key == 0x49) {
         scroll_line -= visible_lines();
         if (scroll_line < 0)
           scroll_line = 0;
@@ -2330,6 +5743,16 @@ int main(int argc, char **argv) {
     }
 
     render(current_url);
+    /* New sysgui window model: SYS_DRAW_BUFFER is a no-op unless the kernel's
+     * k_app_win_active flag is set, and that flag is only raised by
+     * SYS_SET_WINDOW_POS. The WM raises it for its own app-containers; an app
+     * launched from the terminal `run` must do it itself. We re-assert it
+     * every frame because while we're NOT yet the foreground app sysgui keeps
+     * resetting it to false (setAppWindowPos(0,0,0,0) per frame). Once our
+     * first frame lands we become fg_app_pid and sysgui pauses (it no longer
+     * touches k_app_win_active), so this just wins the initial bootstrap.
+     * Keep the rect in sync with the eid_end() blit offset (120,90). */
+    _syscall(SYS_SET_WINDOW_POS, 120, 90, WIN_W, WIN_H, 0);
     eid_end(&ui, 120, 90);
     sleep(20);
   }

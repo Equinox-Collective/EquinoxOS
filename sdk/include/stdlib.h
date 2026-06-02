@@ -19,6 +19,13 @@ char *getenv(const char *name);
 double strtod(const char *nptr, char **endptr);
 void abort(void);
 
+/* QuickJS uses alloca() for a few small scratch buffers. Provide the
+ * declaration here so callers that include <stdlib.h> (as glibc users
+ * do) see it without pulling in <alloca.h> explicitly. */
+#ifndef alloca
+#define alloca(size) __builtin_alloca(size)
+#endif
+
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
 #endif

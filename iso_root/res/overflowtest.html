@@ -1,0 +1,67 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>overflow test (RU)</title>
+<style>
+  body{background:#0b0b0f;color:#e7e7ea;font-family:Inter,sans-serif;margin:0;padding:14px}
+  h2{font-size:20px;margin:0 0 10px}
+  .feat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  .feat{background:#131318;border:1px solid #2a2a33;border-radius:12px;padding:14px}
+  .feat h3{margin:0 0 6px;font-size:16px;color:#fff}
+  .feat p{margin:0;color:#9a9aa3;font-size:13px}
+  .ctas{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0}
+  .cta-btn{background:#7dd3fc;color:#0a0a0e;padding:9px 16px;border-radius:9px;font-weight:600;overflow:hidden}
+  .ghost{background:transparent;color:#e7e7ea;border:1px solid #3a3a45}
+  .badges{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 16px}
+  .badge{font-size:12px;padding:4px 10px;border-radius:999px;background:#11202b;border:1px solid #2a2a33;color:#bfe6f7}
+  .hero-grid{display:grid;grid-template-columns:1.05fr .95fr;gap:24px;align-items:center;margin-bottom:18px}
+  .lead{color:#c8c8d0;font-size:15px;max-width:560px}
+  .term{background:#08080a;border:1px solid #2a2a33;border-radius:10px;padding:12px;color:#cfcfd4;font-family:monospace;font-size:12px}
+</style></head>
+<body>
+
+  <h2>1 · Hero (2 колонки)</h2>
+  <div class="hero-grid">
+    <div>
+      <p class="lead">EquinoxOS — монолитное ядро для x86_64 на C и ASM. Грузится через Limine, имеет композитный оконный менеджер с тенями и z-порядком, настоящую вытесняющую многозадачность, две файловые системы (FAT32 + EXT2), полный стек TCP/IP, звук AC97 — и портированный DOOM.</p>
+      <div class="ctas">
+        <a class="cta-btn" href="#">Исходники ↗</a>
+        <a class="cta-btn ghost" href="#">Что внутри</a>
+      </div>
+      <div class="badges">
+        <span class="badge">4-уровневая страничная память</span>
+        <span class="badge">Изоляция Ring 3</span>
+        <span class="badge">RTL8139 · TCP/IP</span>
+      </div>
+    </div>
+    <div class="term">user@equos:/$ uname -a<br>EquinoxOS x86_64<br>booting…</div>
+  </div>
+
+  <h2>2 · Сетка фич (3 колонки)</h2>
+  <div class="feat-grid">
+    <div class="feat"><h3>4-уровневая страничная память</h3><p>Bitmap PMM, отдельный PML4 на процесс, 64 МБ kernel heap, shared memory через shm_alloc.</p></div>
+    <div class="feat"><h3>Вытесняющая многозадачность</h3><p>Round-robin планировщик на IRQ0 (PIT 1 кГц). Ring 3 с изолированными адресными пространствами, ELF64-загрузчик.</p></div>
+    <div class="feat"><h3>10+ системных вызовов через int 0x80</h3><p>Чтение/запись файлов, мышь, клавиатура, звук, сеть (DNS/HTTP), pipes, очереди сообщений, exec.</p></div>
+    <div class="feat"><h3>Композитный WM</h3><p>VESA LFB, двойная буферизация, тени, z-порядок, программный курсор. Рабочий стол enGUI на Lua.</p></div>
+    <div class="feat"><h3>Стек TCP/IP</h3><p>RTL8139 · ARP · IPv4 · ICMP · UDP · TCP 3-way handshake · резолв DNS · HTTP GET · NTP. Всё в ядре.</p></div>
+    <div class="feat"><h3>Запускает DOOM</h3><p>Нативный ELF-порт работает в Ring 3, общается с ядром через ввод, фреймбуфер и звук.</p></div>
+  </div>
+
+  <h2>3 · Кнопки (длинные подписи)</h2>
+  <div class="ctas">
+    <a class="cta-btn" href="#">★ Поставить звезду EquinoxOS</a>
+    <a class="cta-btn ghost" href="#">★ Поставить звезду enGUI</a>
+  </div>
+
+  <p>Проверка: заголовки фич переносятся внутри колонки (не налезают на соседнюю), текст абзацев виден целиком (не обрезан), кнопки показывают подпись полностью, лид-абзац переносится по ширине колонки.</p>
+
+  <h2>4 · Инлайн-код (чипы) в тексте</h2>
+  <div class="hero-grid">
+    <div>
+      <p>Everything is open source. Build the ISO with <code>make</code>, boot with <code>qemu-system-x86_64 -cdrom equos.iso</code>.</p>
+    </div>
+    <div>
+      <p>Полностью open source. Собери ISO через <code>make</code>, запусти <code>qemu-system-x86_64 -cdrom equos.iso</code>.</p>
+    </div>
+  </div>
+  <p>Проверка: фон-«квадрат» обнимает только сам код (<code>make</code> и команду qemu), а не всю строку с обычным текстом; точка после <code>equos.iso</code> остаётся на той же строке, а не уезжает вниз отдельно.</p>
+
+</body></html>

@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+<head><title>F3 Event test</title></head>
+<body>
+<h2>F3: preventDefault / event object</h2>
+<p>Try both submit buttons. Status updates from JS.</p>
+
+<form id="f" action="jstest6_ok.html" method="get">
+  <input type="text" name="q" value="hi">
+  <button type="submit" id="ok">Allow submit</button>
+  <button type="submit" id="block">Block submit</button>
+</form>
+
+<p>Status: <span id="status">(idle)</span></p>
+<p>Last event: <span id="evt">(none)</span></p>
+
+<script>
+  var s = document.getElementById('status');
+  var e = document.getElementById('evt');
+  var form = document.getElementById('f');
+  var block = document.getElementById('block');
+
+  block.addEventListener('click', function(ev) {
+    e.textContent = 'click ' + ev.type + ' on ' + ev.target.tagName;
+    ev.preventDefault();
+    s.textContent = 'BLOCKED click on #block (preventDefault)';
+  });
+
+  form.addEventListener('submit', function(ev) {
+    e.textContent = 'submit ' + ev.type + ' on ' + ev.target.tagName;
+    s.textContent = 'submit fired, allowing navigation';
+  });
+</script>
+</body>
+</html>
