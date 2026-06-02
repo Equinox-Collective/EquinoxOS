@@ -123,13 +123,37 @@ The OS ships a full desktop environment with the following apps:
 | :--- | :--- | :--- |
 | `snake.elf` | Explorer / `run snake.elf` | Classic snake game |
 | `bmpview.elf` | `run bmpview.elf BG.BMP` | BMP image viewer |
-| `htmlview.elf` | Explorer | HTTP browser (no HTTPS) |
+| `htmlview.elf` | Explorer | Lightweight HTML/DOM viewer (HTTP only) |
+| `browser.elf` | `run bin/browser.elf <url>` | Full graphical web browser — HTTPS/TLS, DNS, HTML/CSS, JavaScript (QuickJS), DOM & images |
 | `niplay.elf` | `run niplay.elf terry.wav` | WAV music player via AC97 |
 | `widget_demo.elf` | Explorer | EID v2.0 widget showcase (button / checkbox / text input / slider + animations) |
 | `ipc_test.elf` | Explorer | Pipe & message-queue smoke test (syscalls 60–67) |
 | `doom.elf` | Explorer | **DOOM** port with AC97 audio |
 
 > 💡 The desktop / system shell itself is now the separate **enGUI** project, pulled in as the `app/sysgui` Git submodule and launched as the Ring 3 init process (`bin/sysgui.elf`). Older versions had Lua (`luagui.elf`) bundled — Lua was removed from the SDK and app set.
+
+### 🌐 Web Browser
+
+`browser.elf` is a from-scratch graphical web browser running as a Ring 3 userspace app. It drives the full network stack and renders real web pages — including this project's own landing page at `https://equinoxos.duckdns.org/`:
+
+<div align="center">
+
+<img width="625" alt="EquinoxOS browser rendering equinoxos.duckdns.org" src="https://raw.githubusercontent.com/Equinox-Collective/EquinoxOS/refs/heads/main/resources/browser.png" />
+
+</div>
+
+**Capabilities:**
+
+- 🔒 **HTTPS / TLS** via vendored **BearSSL** with a bundled Mozilla CA trust store
+- 🌐 **DNS + TCP/IP** over the `rtl8139` driver and the custom kernel network stack
+- 📄 **HTML + CSS** layout engine — selectors, custom properties (`var()`), inline images
+- 🟨 **JavaScript** through an embedded **QuickJS** engine with **DOM** bindings, a `window` object and `fetch()`
+- 🖼 **Image decoding** for inline page graphics
+- 🖱 Scrolling, link navigation and an address bar, drawn through the **EID v2.0** immediate-mode GUI toolkit
+
+```sh
+run bin/browser.elf https://equinoxos.duckdns.org/
+```
 
 ---
 
