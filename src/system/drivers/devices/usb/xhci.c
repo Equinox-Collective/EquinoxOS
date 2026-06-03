@@ -57,7 +57,7 @@ void xhci_init(uint8_t bus, uint8_t slot, uint8_t func, uintptr_t mmio_base) {
     uint32_t dboff = *(volatile uint32_t *)(mmio_base + 0x14);
     uint32_t rtsoff = *(volatile uint32_t *)(mmio_base + 0x18);
 
-    // 2. Выделяем одну страницу памяти и ювелирно нарезаем её под все структуры:
+    // 2. Выделяем одну страницу памяти и нарезаем её под все структуры:
     // Offset 0:    Command Ring (64 TRB * 16 байт = 1024 байта)
     // Offset 1024: Event Ring (64 TRB * 16 байт = 1024 байта)
     // Offset 2048: ERST Table (1 entry * 64 байта = 64 байта)
@@ -73,9 +73,8 @@ void xhci_init(uint8_t bus, uint8_t slot, uint8_t func, uintptr_t mmio_base) {
     xhci_trb_t *cmd_ring = (xhci_trb_t *)virt_page;
     xhci_trb_t *event_ring = (xhci_trb_t *)((uintptr_t)virt_page + 1024);
     xhci_erst_entry_t *erst = (xhci_erst_entry_t *)((uintptr_t)virt_page + 2048);
-    uint64_t *dcbaa = (uint64_t *)((uintptr_t)virt_page + 2112);
 
-    // Полностью зануляем выделенную память
+    // Полностью зануляем выделенную страницу
     for (uint32_t i = 0; i < 4096 / 4; i++) {
         ((uint32_t *)virt_page)[i] = 0;
     }
@@ -116,7 +115,6 @@ void xhci_init(uint8_t bus, uint8_t slot, uint8_t func, uintptr_t mmio_base) {
     *erdp_high   = (uint32_t)((phys_addr + 1024) >> 32);
 
     // ОБЯЗАТЕЛЬНО включаем прерывания на уровне интерраптера (IE = 1, бит 1)
-    // Без этого QEMU и реальное железо не будут отправлять события в Event Ring!
     *iman = (1 << 1); 
 
     // 7. Регистрируем Command Ring (Operational) двумя 32-битными порциями
@@ -131,7 +129,7 @@ void xhci_init(uint8_t bus, uint8_t slot, uint8_t func, uintptr_t mmio_base) {
     volatile uint32_t *dcbaap_high = (volatile uint32_t *)((uintptr_t)op_regs + 0x34);
     
     *dcbaap_low  = (uint32_t)(phys_addr + 2112);
-    *dcbaap_high = (uint32_t)((phys_addr + 2112) >> 32);
+    *dcbaap_high = (uint32_t)(phys_addr >> 32); // DCBAAP физический адрес
 
     // 9. Настраиваем количество доступных слотов устройств (MaxSlots)
     uint32_t hcsparams1 = *(volatile uint32_t *)(mmio_base + 0x04);
@@ -141,14 +139,14 @@ void xhci_init(uint8_t bus, uint8_t slot, uint8_t func, uintptr_t mmio_base) {
     // 10. Запускаем xHCI контроллер (Run/Stop бит = 1 в USBCMD)
     op_regs[0] |= (1 << 0);
 
-    // Ждем запуска (пока HCHalted в USBSTS очистится)
-    timeout = 10000;
-    while (op_regs[1] & (1 << 12)) {
+    // ИСПРАВЛЕНО: Ждем запуска (пока HCHalted (бит 0!) в USBSTS очистится)
+    timeout = 100;
+    while (op_regs[1] & (1 << 0)) {
         if (--timeout == 0) {
-            term_print("[xHCI] ERROR: Controller failed to start (HCHalted bit set)!\n");
+            term_print("[xHCI] ERROR: Controller failed to start (HCHalted bit remains set)!\n");
             return;
         }
-        __asm__ volatile("pause");
+        sleep(1); // Даем контроллеру переключить состояние
     }
     term_print("[xHCI] Controller is RUNNING!\n");
 
@@ -170,7 +168,7 @@ void xhci_init(uint8_t bus, uint8_t slot, uint8_t func, uintptr_t mmio_base) {
     volatile uint32_t *db = (volatile uint32_t *)(mmio_base + dboff);
     db[0] = 0; // Направляем звонок на Command Ring контроллера
 
-    // --- ОТЛАДОЧНЫЙ ВЫВОД РЕГИСТРОВ ПОСЛЕ ОТПРАВКОЙ ---
+    // --- ОТЛАДОЧНЫЙ ВЫВОД РЕГИСТРОВ ПОСЛЕ ОТПРАВКИ ---
     term_print("[xHCI Debug] Regs after Doorbell:\n");
     term_print("  USBSTS:  "); print_hex_32(op_regs[1]);
     term_print("\n");
