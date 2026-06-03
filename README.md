@@ -217,66 +217,84 @@ void render() {
 
 ```text
 EquinoxOS/
-├── src/
-│   ├── kernel.c                     # kmain() — boot entry, subsystem init
-│   ├── api.h                        # EquinoxAPI struct (app ↔ kernel contract)
-│   ├── boot/limine/                 # Limine protocol headers
-│   ├── gui/
-│   │   ├── gui.c / gui.h            # Compositing Window Manager
-│   │   ├── gui_apps.c               # Built-in app UIs (Paint, Notepad, Explorer…)
-│   │   └── terminal.c               # Shell terminal widget
-│   ├── syslibc/                     # Kernel-side stdio + string helpers
+├── src/                                  # Kernel source
+│   ├── kernel.c                          # kmain() — boot entry, subsystem init
+│   ├── api.h                             # EquinoxAPI struct (app ↔ kernel contract)
+│   ├── linker.ld                         # Kernel linker script
+│   ├── boot/                             # Boot glue
+│   │   ├── eqstart.c / eqstart.h         # Early boot init
+│   │   ├── boot_config.h                 # Boot configuration
+│   │   ├── nyan_data.h                   # Boot splash data
+│   │   └── limine/limine.h               # Limine protocol header
+│   ├── syslibc/                          # Kernel-side stdio + string helpers
 │   └── system/
-│       ├── core/                    # GDT, IDT, PIC, interrupt stubs (NASM)
+│       ├── core/                         # GDT, IDT, PIC, CPU, I/O ports, panic, NASM stubs
+│       ├── hal/                          # Hardware Abstraction Layer
 │       ├── mem/
-│       │   ├── pmm.c                # Bitmap Physical Memory Manager
-│       │   ├── vmm.c                # 4-level Virtual Memory Manager
-│       │   ├── memory.c             # kmalloc / kfree heap
-│       │   └── shm.c                # Shared Memory
+│       │   ├── pmm.c                      # Bitmap Physical Memory Manager
+│       │   ├── vmm.c                      # 4-level Virtual Memory Manager
+│       │   ├── memory.c                  # kmalloc / kfree heap
+│       │   └── shm.c                     # Shared Memory
 │       ├── usr/
-│       │   ├── task.c               # Scheduler + context switch
-│       │   └── syscall.c            # int 0x80 dispatch table
+│       │   ├── task.c                    # Scheduler + context switch
+│       │   ├── syscall.c                 # int 0x80 dispatch table
+│       │   ├── ipc.c                     # Pipes + message queues
+│       │   └── sync.c                    # Synchronization primitives
 │       ├── fs/
-│       │   ├── vfs.c / vfs.h        # Virtual File System abstraction
-│       │   ├── fat32.c              # FAT32 driver (R/W)
-│       │   ├── ext2.c               # EXT2 driver (R/W)
-│       │   └── elf.h                # ELF64 loader structures
+│       │   ├── vfs.c / vfs.h             # Virtual File System abstraction
+│       │   ├── fs.c                      # FS mount / registration layer
+│       │   ├── fat32.c                   # FAT32 driver (R/W)
+│       │   ├── ext2.c / ext2_tests.c     # EXT2 driver (R/W) + tests
+│       │   ├── gpt.c                     # GPT partition parsing
+│       │   └── elf.h                     # ELF64 loader structures
 │       ├── drivers/
-│       │   ├── vesa/                # VESA LFB, BMP encoder, PSF font
+│       │   ├── vesa/                     # VESA LFB, BMP encoder, PSF2 + 8x8 fonts
 │       │   ├── devices/
-│       │   │   ├── audio/ac97.c     # AC97 PCM audio driver
-│       │   │   ├── keyboard/        # PS/2 keyboard (scancodes)
-│       │   │   ├── mouse/           # PS/2 mouse (relative tracking)
-│       │   │   ├── pci/             # PCI bus scan
-│       │   │   └── pcspeaker/       # PC Speaker beeper
+│       │   │   ├── audio/ac97.c          # AC97 PCM audio driver
+│       │   │   ├── keyboard/             # PS/2 keyboard (scancodes)
+│       │   │   ├── mouse/                # PS/2 mouse (relative tracking)
+│       │   │   ├── pci/                  # PCI bus scan
+│       │   │   ├── pcspeaker/            # PC Speaker beeper
+│       │   │   └── usb/                  # USB host controllers: UHCI · OHCI · EHCI · xHCI
 │       │   └── hardware/
-│       │       ├── net/             # RTL8139 · ARP · IPv4 · TCP · UDP · DNS · HTTP · NTP
-│       │       ├── disk/            # ATA PIO disk driver
-│       │       └── serial/          # COM1 serial (QEMU log)
-│       ├── misc/timer.c             # PIT 8253 timer
-│       └── shell/                   # Shell command parser
-├── app/
-│   ├── snake.c                      # Snake game
-│   ├── bmpview.c                    # BMP image viewer
-│   ├── htmlview.c                   # HTTP browser
-│   ├── niplay.c                     # WAV music player
-│   ├── widget_demo.c                # EID v2.0 widget showcase
-│   ├── ipc_test.c                   # Pipe + message-queue test app
-│   ├── sysgui/                      # enGUI submodule (Ring 3 init process)
-│   └── doom/                        # DOOM port (doomgeneric)
-├── sdk/
-│   ├── include/                     # equos.h, eid.h, eid_ext.h, stb_truetype.h, libc headers
-│   ├── lib/                         # CRT0 (_start), syscall stubs, libc bits, eid + eid_ext
-│   └── codec/                       # WAV/audio codec helpers
-├── iso_root/                        # Bootable ISO staging area
-│   ├── sys/kernel.elf
-│   ├── bin/                         # Compiled ELF userspace apps
-│   └── res/                         # Fonts, wallpapers, assets
-├── Makefile                         # Windows build (mingw/msys2 cross-compiler)
-├── Makefile-linux                   # Linux build
-├── WINDOWS_ext2.py                  # Python script — generates hdd.img (EXT2)
-├── EID_SDK.md                       # Full EID + Syscall reference
-└── ROADMAP.md                       # Development phases & milestones
+│       │       ├── net/                  # RTL8139 · ARP · IPv4 · ICMP · TCP · UDP · DNS · sockets
+│       │       ├── disk/                 # ATA PIO disk driver
+│       │       └── serial/               # COM1 serial (QEMU log)
+│       ├── misc/                         # PIT 8253 timer, RTC, RNG
+│       └── shell/                        # Shell command parser
+├── app/                                  # Ring 3 userspace apps
+│   ├── snake.c                           # Snake game
+│   ├── bmpview.c                         # BMP image viewer
+│   ├── htmlview.c                        # HTML/HTTP browser (QuickJS-powered)
+│   ├── niplay.c                          # WAV music player
+│   ├── widget_demo.c                     # EID v2.0 widget showcase
+│   ├── ipc_test.c                        # Pipe + message-queue test app
+│   ├── doom/                             # DOOM port (doomgeneric)
+│   ├── sysgui/                           # enGUI submodule (Ring 3 init process)
+│   ├── urlget.c / httpsget.c / tlsboot.c # HTTP(S) / TLS client tools
+│   └── js*.c · *test*.c                  # JS/DOM, networking, socket & misc test apps
+├── sdk/                                  # Userspace SDK
+│   ├── include/                          # equos.h, eid.h/eid_ext.h, libc + DOM/QuickJS/HTTP headers
+│   ├── lib/                              # CRT0 (_start), syscall stubs, libc, eid, QuickJS glue
+│   ├── lib_dom/                          # DOM implementation
+│   ├── lib_qjs/                          # QuickJS bindings (fetch, window, page, DOM-JS)
+│   ├── lib_http/                         # HTTP client
+│   ├── lib_image/                        # Image decoding
+│   └── codec/                            # WAV / audio codec helpers
+├── iso_root/                             # Bootable ISO staging area
+│   ├── EFI/BOOT/ · boot/limine/          # Limine UEFI + BIOS boot files
+│   ├── bin/                              # Compiled ELF userspace apps
+│   └── res/                              # Fonts, wallpapers, HTML tests, Lua sysgui scripts
+├── tools/                                # Host build tools (CA bundle fetch · PEM → anchors)
+├── resources/                            # Branding & wallpaper assets
+├── Makefile                              # Windows build (mingw/msys2 cross-compiler)
+├── WINDOWS_ext2.py                       # Python script — generates hdd.img (EXT2)
+├── EID_SDK.md                            # Full EID + Syscall reference
+├── ROADMAP.md                            # Development phases & milestones
+├── CHANGES.md                            # Changelog
+├── CONTRIBUTING.md                       # Contribution guide
+├── ext2_plan.md / network_plan.md        # Design notes
+└── LICENSE                               # GPL-2.0
 ```
 
 ---
@@ -435,3 +453,15 @@ PCI initialized  |  GUI initialized  |  Shell initialized
 *Built from scratch, for the love of low-level programming.*
 
 </div>
+
+---
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=Equinox-Collective%2FEquinoxOS&type=timeline&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Equinox-Collective/EquinoxOS&type=timeline&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Equinox-Collective/EquinoxOS&type=timeline&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Equinox-Collective/EquinoxOS&type=timeline&legend=top-left" />
+ </picture>
+</a>
