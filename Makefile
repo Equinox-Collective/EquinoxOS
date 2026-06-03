@@ -545,8 +545,8 @@ QEMU_BASE  := -m 512M -boot d \
               -serial stdio \
               -netdev user,id=n0,hostfwd=tcp::2222-:22 \
               -device rtl8139,netdev=n0 \
-              -device piix3-usb-uhci,id=uhci \
-              -device pci-ohci,id=ohci \
+			  -device pci-ohci,id=ohci \
+              -device usb-mouse,bus=ohci.0 \
               -device usb-ehci,id=ehci \
               -device qemu-xhci,id=xhci \
               -device ac97,audiodev=snd0 -audiodev dsound,id=snd0
