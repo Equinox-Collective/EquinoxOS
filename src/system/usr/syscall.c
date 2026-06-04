@@ -100,8 +100,25 @@ void syscall_handler(syscall_regs_t *regs)
     const char *filename = (const char *)regs->rdi;
     uint32_t *out_size_ptr = (uint32_t *)regs->rsi;
 
+    // --- ДИАГНОСТИКА загрузки: имя файла + размер + время чтения ---
+    extern volatile uint32_t tick;
+    char _fn[64];
+    stac();
+    int _k = 0; while (_k < 63 && filename[_k]) { _fn[_k] = filename[_k]; _k++; }
+    _fn[_k] = 0;
+    clac();
+    uint32_t _t0 = tick;
+
     uint32_t size = 0;
     uint8_t *file_data = vfs_read_file(filename, &size);
+
+    {
+      extern void serial_puts(uint16_t port, const char *str);
+      char _b[160];
+      sprintf(_b, "[T=%ums] READ_FILE '%s' size=%u dt=%ums\n",
+              (unsigned)tick, _fn, (unsigned)size, (unsigned)(tick - _t0));
+      serial_puts(0x3F8 /*COM1*/, _b);
+    }
 
     if (!file_data)
     {
