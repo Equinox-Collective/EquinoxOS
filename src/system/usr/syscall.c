@@ -679,9 +679,13 @@ void syscall_handler(syscall_regs_t *regs)
      * on; total worst-case latency ~1.2 s, same order as the old
      * single-server 1000-tick wait. */
     static const uint32_t dns_servers[] = {
-        0x08080808, /* 8.8.8.8 — Google */
-        0x01010101, /* 1.1.1.1 — Cloudflare */
-        0x09090909, /* 9.9.9.9 — Quad9 */
+        0x0A000203, /* 10.0.2.3 — встроенный DNS-форвардер QEMU SLIRP:
+                     * резолвит через резолвер хоста (Windows), не через
+                     * NAT-проксирование UDP на публичные DNS. Самый надёжный
+                     * путь под whpx — пробуем его первым. */
+        0x08080808, /* 8.8.8.8 — Google (фолбэк) */
+        0x01010101, /* 1.1.1.1 — Cloudflare (фолбэк) */
+        0x09090909, /* 9.9.9.9 — Quad9 (фолбэк) */
     };
     uint32_t resolved = 0;
     for (unsigned s = 0;
