@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "api.h"
+#include "boot/boot_config.h"
 #include "boot/limine/limine.h"
 #include "system/fs/elf.h"
 #include "syslibc/string.h"
@@ -277,6 +278,41 @@ void exec_from_disk(const char *filename) {
   term_print("EXEC: File not found on any VFS device!\n");
 }
 
+// Инициализация «тяжёлого» железа, не нужного для первого кадра GUI:
+// PCI-скан (включает USB-контроллеры), PC-спикер, диспетчер ввода (USB/PS2),
+// сетевой поток. Вызывается либо инлайн в kmain (DEFER_HW_INIT==0), либо как
+// фоновый поток ПОСЛЕ запуска sysgui (DEFER_HW_INIT==1), чтобы рабочий стол
+// появлялся раньше.
+void hw_init_sequence(void) {
+  // 1. Инициализация PCI (обнаружит и включит USB контроллеры)
+  pci_init();
+  serial_puts(COM1, "PCI initialized\n");
+  pcspeaker_init();
+  serial_puts(COM1, "PC Speaker initialized\n");
+
+  // =========================================================================
+  //                  УМНЫЙ ДИСПЕТЧЕР ВВОДА (USB-First, PS/2 Fallback)
+  // =========================================================================
+  if (g_usb_mouse_found) {
+      char log_buf[128];
+      const char* controller_names[] = { "", "UHCI", "OHCI", "EHCI", "xHCI" };
+      sprintf(log_buf, "[INPUT] USB Mouse detected on %s controller. Bypassing PS/2.\n",
+              controller_names[g_usb_mouse_controller_type]);
+      serial_puts(COM1, log_buf);
+
+      // Создаем фоновый поток ядра под опрос USB мыши
+      task_create(usb_mouse_thread, 0, 0, 0);
+  } else {
+      serial_puts(COM1, "[INPUT] No USB mouse detected. Trying PS/2 mouse fallback...\n");
+      if (!init_mouse()) {
+          serial_puts(COM1, "[INPUT] No USB or PS/2 devices found, skipping.\n");
+      }
+  }
+
+  task_create(network_thread, 0, 0, 0);
+  serial_puts(COM1, "Network thread started\n");
+}
+
 void kmain(void) {
   serial_init(COM1);
   serial_puts(COM1, "\n=== EquinoxOS Kernel Starting ===\n");
@@ -326,10 +362,12 @@ void kmain(void) {
   __asm__("sti"); 
   serial_puts(COM1, "Interrupts enabled\n");
 
+#if !FAST_BOOT
   uint32_t start_tick = tick;
   while (tick < start_tick + 100) {
     __asm__ volatile("hlt");
   }
+#endif
   serial_puts(COM1, "Running kernel tests...\n");
   extern bool eqstart_perform_tests();
   if (!eqstart_perform_tests()) {
@@ -358,35 +396,17 @@ void kmain(void) {
       }
     }
   }
+#if !FAST_BOOT
   ext2_stress_test_phase1();
   ext2_stress_test_phase2();
   ext2_stress_test_phase3();
   ext2_stress_test_phase4();
-  
-  // 1. Инициализация PCI (обнаружит и включит USB контроллеры)
-  pci_init();
-  serial_puts(COM1, "PCI initialized\n");
-  pcspeaker_init();
-  serial_puts(COM1, "PC Speaker initialized\n");
+#endif
 
-  // =========================================================================
-  //                  УМНЫЙ ДИСПЕТЧЕР ВВОДА (USB-First, PS/2 Fallback)
-  // =========================================================================
-  if (g_usb_mouse_found) {
-      char log_buf[128];
-      const char* controller_names[] = { "", "UHCI", "OHCI", "EHCI", "xHCI" };
-      sprintf(log_buf, "[INPUT] USB Mouse detected on %s controller. Bypassing PS/2.\n", 
-              controller_names[g_usb_mouse_controller_type]);
-      serial_puts(COM1, log_buf);
-      
-      // Создаем фоновый поток ядра под опрос USB мыши
-      task_create(usb_mouse_thread, 0, 0, 0);
-  } else {
-      serial_puts(COM1, "[INPUT] No USB mouse detected. Trying PS/2 mouse fallback...\n");
-      if (!init_mouse()) {
-          serial_puts(COM1, "[INPUT] No USB or PS/2 devices found, skipping.\n");
-      }
-  }
+#if !DEFER_HW_INIT
+  // Поднимаем PCI/USB/звук/сеть/мышь до GUI (классический порядок).
+  hw_init_sequence();
+#endif
 
   shm_init();
   serial_puts(COM1, "Shared memory initialized\n");
@@ -395,8 +415,6 @@ void kmain(void) {
   hal_init();
   serial_puts(COM1, "HAL initialized\n");
 
-  task_create(network_thread, 0, 0, 0);
-  serial_puts(COM1, "Network thread started\n");
   uint64_t font_size = 0;
   void *font_ptr = sys_get_file("font.psf", &font_size);
   vesa_set_font(font_ptr);
@@ -405,6 +423,14 @@ void kmain(void) {
 
   exec_from_disk("bin/sysgui.elf"); 
   serial_puts(COM1, "enGUI spawned as Ring 3 init process\n");
+
+#if DEFER_HW_INIT
+  // Рабочий стол уже запускается — поднимаем тяжёлое железо (PCI/USB/звук/
+  // сеть/мышь) в фоновом потоке, чтобы не задерживать первый кадр GUI.
+  task_create(hw_init_sequence, 0, 0, 0);
+  serial_puts(COM1, "Deferred HW init thread started\n");
+#endif
+
   while (1) {
     {
       extern volatile uint32_t boot_measured_ms;

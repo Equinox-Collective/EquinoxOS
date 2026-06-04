@@ -276,6 +276,38 @@ bool test_cpu_fpu() {
 
 // 3. Главная точка входа диагностического лога
 bool eqstart_perform_tests() {
+#if FAST_BOOT
+  /* --- БЫСТРЫЙ ПУТЬ ---
+   * Только критичные проверки железа (µs), без диагностического лога и без
+   * стресс-теста PMM. Сразу показываем серый boot-экран. */
+  CERBERUS_ASSERT(hhdm_offset >= 0xFFFF800000000000, "HHDM Invalid offset");
+  if (!test_cpu_fpu()) {
+    CERBERUS_ASSERT(false, "FPU math error - CPU features not properly enabled");
+  }
+  {
+    uint32_t start_tick = tick;
+    uint32_t deadline = start_tick + 100;
+    while (tick == start_tick && tick < deadline) {
+      __asm__ volatile("hlt");
+    }
+    if (tick == start_tick) {
+      CERBERUS_ASSERT(false, "PIT Timer is not ticking. Interrupts dead?");
+    }
+  }
+  {
+    uint16_t tr;
+    __asm__ volatile("str %0" : "=r"(tr));
+    if (tr == 0) {
+      CERBERUS_ASSERT(false, "TSS not loaded. Multitasking will cause Triple Fault");
+    }
+  }
+  draw_rect_direct(0, 0, screen_width, screen_height, BOOT_GRAY_COLOR);
+  nyan_init_geometry();
+  nyan_draw_frame(0);
+  boot_progress_draw();
+  nyan_boot_active = 1;
+  return true;
+#else
   // Чистый черный экран
   draw_rect_direct(0, 0, screen_width, screen_height, 0x000000);
   tty_row = 0;
@@ -358,4 +390,5 @@ bool eqstart_perform_tests() {
   // sysgui.elf, а GUI догасит анимацию через syscall 88).
   nyan_boot_active = 1;
   return true;
+#endif /* FAST_BOOT */
 }
