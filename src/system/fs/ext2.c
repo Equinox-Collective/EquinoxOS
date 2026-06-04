@@ -35,38 +35,60 @@ uint32_t ext2_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, uint8_t
     return ext2_read(node->inode, offset, size, buffer);
 }
 
-struct vfs_dirent* ext2_vfs_readdir(vfs_node_t* node, uint32_t index) {
+// === КЭШ ЛИСТИНГА КАТАЛОГА ===
+// Раньше ext2_vfs_readdir(index) при КАЖДОМ вызове заново читал inode каталога
+// и сканировал его блоки С НАЧАЛА до нужного индекса. getFiles() в enGUI (и
+// обработчик SYS_READ_DIR) дёргают readdir(0..N) последовательно -> O(N^2)
+// чтений ATA PIO. На whpx каждый опрос порта ATA = дорогой VM-exit, поэтому
+// листинг корня (refresh_explorer при старте GUI) занимал ~15 c — это и был
+// «провал» между загрузкой ресурсов и первым кадром рабочего стола.
+// Теперь каталог читается ОДИН раз в кэш; повторные readdir(index) — O(1).
+// Кэш инвалидируется при создании файла (ext2_add_entry) и перезаписи
+// (ext2_overwrite), а также при смене каталога (другой inode).
+#define EXT2_DIRCACHE_MAX 256
+static struct {
+    char     name[128];
+    uint32_t inode;
+    uint32_t size;
+} ext2_dir_cache[EXT2_DIRCACHE_MAX];
+static uint32_t ext2_dir_cache_count = 0;
+static uint32_t ext2_dir_cache_inode = 0; // inode каталога в кэше (0 == пусто)
+
+void ext2_dir_cache_invalidate(void) {
+    ext2_dir_cache_inode = 0;
+    ext2_dir_cache_count = 0;
+}
+
+static void ext2_build_dir_cache(vfs_node_t* node) {
+    ext2_dir_cache_count = 0;
+    ext2_dir_cache_inode = node->inode;
+
     ext2_inode_t dir_inode;
     ext2_read_inode(node->inode, &dir_inode);
-    
-    if (!(dir_inode.mode & EXT2_S_IFDIR)) return NULL;
-    
+    if (!(dir_inode.mode & EXT2_S_IFDIR)) return;
+
     uint8_t* buffer = kmalloc(block_size);
-    uint32_t current_idx = 0;
-    
     for (uint32_t i = 0; i < dir_inode.blocks; i++) {
         uint32_t b = ext2_get_inode_block(&dir_inode, i);
         if (b == 0) break;
         ext2_read_block(b, buffer);
-        
+
         ext2_dir_entry_t* entry = (ext2_dir_entry_t*)buffer;
         uint32_t offset = 0;
-        
         while (offset < block_size) {
-            if (entry->inode != 0) {
-                if (current_idx == index) {
-                    memcpy(shared_dirent.name, (uint8_t*)entry + sizeof(ext2_dir_entry_t), entry->name_len);
-                    shared_dirent.name[entry->name_len] = '\0';
-                    shared_dirent.inode = entry->inode;
-                    
+            if (entry->inode != 0 && entry->name_len > 0 && entry->name_len < 128) {
+                if (ext2_dir_cache_count < EXT2_DIRCACHE_MAX) {
+                    uint32_t k = ext2_dir_cache_count;
+                    memcpy(ext2_dir_cache[k].name,
+                           (uint8_t*)entry + sizeof(ext2_dir_entry_t), entry->name_len);
+                    ext2_dir_cache[k].name[entry->name_len] = '\0';
+                    ext2_dir_cache[k].inode = entry->inode;
+
                     ext2_inode_t file_inode;
                     ext2_read_inode(entry->inode, &file_inode);
-                    shared_dirent.size = file_inode.size;
-                    
-                    kfree(buffer);
-                    return &shared_dirent;
+                    ext2_dir_cache[k].size = file_inode.size;
+                    ext2_dir_cache_count++;
                 }
-                current_idx++;
             }
             offset += entry->rec_len;
             if (entry->rec_len == 0) break;
@@ -74,7 +96,19 @@ struct vfs_dirent* ext2_vfs_readdir(vfs_node_t* node, uint32_t index) {
         }
     }
     kfree(buffer);
-    return NULL;
+}
+
+struct vfs_dirent* ext2_vfs_readdir(vfs_node_t* node, uint32_t index) {
+    // Перестраиваем кэш только если он от другого каталога или ещё пуст.
+    if (ext2_dir_cache_inode != node->inode || ext2_dir_cache_inode == 0) {
+        ext2_build_dir_cache(node);
+    }
+    if (index >= ext2_dir_cache_count) return NULL;
+
+    strcpy(shared_dirent.name, ext2_dir_cache[index].name);
+    shared_dirent.inode = ext2_dir_cache[index].inode;
+    shared_dirent.size  = ext2_dir_cache[index].size;
+    return &shared_dirent;
 }
 
 // O(n) поиск файла в каталоге за ОДИН проход по блокам каталога.
@@ -565,6 +599,11 @@ void ext2_overwrite(const char* name, const char* data, uint32_t size) {
     }
     
     ext2_write(ino, 0, size, (uint8_t*)data);
+
+    // Содержимое/размер каталога могли измениться — сбрасываем кэш листинга,
+    // чтобы refresh_explorer увидел новый/изменённый файл.
+    extern void ext2_dir_cache_invalidate(void);
+    ext2_dir_cache_invalidate();
 }
 
 uint32_t ext2_vfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, uint8_t* buffer) {
