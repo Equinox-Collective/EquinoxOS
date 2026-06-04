@@ -36,7 +36,7 @@
  *
  * Поставь 1 — и загрузка вернётся к серому экрану с неподвижным Nyan'ом.
  */
-#define BOOT_SCREEN_MODE 1
+#define BOOT_SCREEN_MODE 0
 
 /* Цвет "серого экрана" (0xRRGGBB). Используется только при BOOT_SCREEN_MODE==1. */
 #define BOOT_GRAY_COLOR 0x202225

@@ -301,10 +301,19 @@ bool eqstart_perform_tests() {
       CERBERUS_ASSERT(false, "TSS not loaded. Multitasking will cause Triple Fault");
     }
   }
+  // Фон под boot-экраном зависит от режима (чёрный для крутящегося Nyan,
+  // серый для статичного) — иначе прогресс-бар стирал бы «хвосты» цветом,
+  // не совпадающим с заливкой.
+#if BOOT_SCREEN_MODE == 0
+  draw_rect_direct(0, 0, screen_width, screen_height, 0x000000);
+#else
   draw_rect_direct(0, 0, screen_width, screen_height, BOOT_GRAY_COLOR);
+#endif
   nyan_init_geometry();
   nyan_draw_frame(0);
   boot_progress_draw();
+  // В режиме 0 гифку дальше крутит таймер (nyan_boot_anim_frame) — без
+  // блокирующего nyan_play(), чтобы не замедлять быструю загрузку.
   nyan_boot_active = 1;
   return true;
 #else
