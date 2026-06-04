@@ -15,6 +15,8 @@ void ext2_read_inode(uint32_t inode, ext2_inode_t* out_inode);
 void ext2_write_inode(uint32_t inode, ext2_inode_t* in_inode);
 uint32_t ext2_get_inode_block(ext2_inode_t* inode, uint32_t block);
 uint32_t ext2_read(uint32_t inode_num, uint32_t offset, uint32_t size, uint8_t* buffer);
+uint32_t ext2_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, uint8_t* buffer);
+struct vfs_node* ext2_vfs_finddir(vfs_node_t* node, char* name);
 uint32_t ext2_write(uint32_t inode_num, uint32_t offset, uint32_t size, uint8_t* buffer);
 uint32_t ext2_vfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, uint8_t* buffer);
 uint32_t ext2_allocate_block(void);
@@ -75,6 +77,59 @@ struct vfs_dirent* ext2_vfs_readdir(vfs_node_t* node, uint32_t index) {
     return NULL;
 }
 
+// O(n) поиск файла в каталоге за ОДИН проход по блокам каталога.
+// Раньше vfs_read_file звал ext2_vfs_readdir(index) для index=0..N, а каждый
+// такой вызов заново читал inode каталога и сканировал блоки С НАЧАЛА — итог
+// O(N^2) чтений ATA PIO на каждый открываемый файл. При большом числе файлов
+// в образе это давало десятки тысяч медленных PIO-чтений (~30 c на старте GUI).
+// finddir читает каталог один раз и сразу отдаёт узел с inode и размером.
+static vfs_node_t shared_find_node;
+struct vfs_node* ext2_vfs_finddir(vfs_node_t* node, char* name) {
+    ext2_inode_t dir_inode;
+    ext2_read_inode(node->inode, &dir_inode);
+
+    if (!(dir_inode.mode & EXT2_S_IFDIR)) return NULL;
+
+    uint8_t* buffer = kmalloc(block_size);
+
+    for (uint32_t i = 0; i < dir_inode.blocks; i++) {
+        uint32_t b = ext2_get_inode_block(&dir_inode, i);
+        if (b == 0) break;
+        ext2_read_block(b, buffer);
+
+        ext2_dir_entry_t* entry = (ext2_dir_entry_t*)buffer;
+        uint32_t offset = 0;
+
+        while (offset < block_size) {
+            if (entry->inode != 0 && entry->name_len > 0 && entry->name_len < 128) {
+                char ename[128];
+                memcpy(ename, (uint8_t*)entry + sizeof(ext2_dir_entry_t), entry->name_len);
+                ename[entry->name_len] = '\0';
+
+                if (strcmp(ename, name) == 0) {
+                    ext2_inode_t file_inode;
+                    ext2_read_inode(entry->inode, &file_inode);
+
+                    memset(&shared_find_node, 0, sizeof(shared_find_node));
+                    strcpy(shared_find_node.name, ename);
+                    shared_find_node.inode = entry->inode;
+                    shared_find_node.size  = file_inode.size;
+                    shared_find_node.read  = ext2_vfs_read;
+
+                    kfree(buffer);
+                    return &shared_find_node;
+                }
+            }
+            offset += entry->rec_len;
+            if (entry->rec_len == 0) break;
+            entry = (ext2_dir_entry_t*)(buffer + offset);
+        }
+    }
+
+    kfree(buffer);
+    return NULL;
+}
+
 vfs_node_t* ext2_get_root_node() {
     if (!sb) return NULL;
     vfs_node_t* node = kmalloc(sizeof(vfs_node_t));
@@ -84,6 +139,7 @@ vfs_node_t* ext2_get_root_node() {
     node->flags = 0x01; // Directory
     node->read = ext2_vfs_read;
     node->readdir = ext2_vfs_readdir;
+    node->finddir = ext2_vfs_finddir;
     node->write = ext2_vfs_write;
     return node;
 }

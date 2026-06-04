@@ -68,6 +68,20 @@ void vfs_ls(void) {
 uint8_t* vfs_read_file(const char* name, uint32_t* out_size) {
     vfs_node_t* dev = vfs_root->next;
     while (dev) {
+        // Быстрый путь: O(n) поиск за один проход по каталогу. Раньше шёл
+        // O(n^2) перебор readdir(index) ниже — он ОЧЕНЬ медленный на ATA PIO.
+        if (dev->finddir && dev->read) {
+            vfs_node_t* fn = dev->finddir(dev, (char*)name);
+            if (fn) {
+                *out_size = fn->size;
+                uint8_t* buf = kmalloc(fn->size);
+                if (buf && dev->read(fn, 0, fn->size, buf) > 0) return buf;
+                if (buf) kfree(buf);
+            }
+            // finddir авторитетен для этого устройства: не найдено — следующее.
+            dev = dev->next;
+            continue;
+        }
         if (dev->readdir && dev->read) {
             for (int i = 0; i < 256; i++) {
                 vfs_dirent_t* de = dev->readdir(dev, i);
