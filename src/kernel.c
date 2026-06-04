@@ -313,6 +313,19 @@ void hw_init_sequence(void) {
   serial_puts(COM1, "Network thread started\n");
 }
 
+#if DEFER_HW_INIT
+// Точка входа фонового потока инициализации железа. ВАЖНО: task_create НЕ кладёт
+// адрес возврата на стек потока, поэтому вход потока не должен делать `ret` —
+// иначе CPU прыгнет по мусору и словит #GP. hw_init_sequence() сама возвращается
+// (она рассчитана и на инлайн-вызов из kmain при DEFER_HW_INIT==0), поэтому здесь
+// после неё корректно завершаем поток через task_kill_self().
+static void hw_init_task_entry(void) {
+  hw_init_sequence();
+  task_kill_self();   // помечает поток мёртвым и навсегда уходит в планировщик
+  for (;;) { yield(); } // подстраховка: сюда уже не вернёмся
+}
+#endif
+
 void kmain(void) {
   serial_init(COM1);
   serial_puts(COM1, "\n=== EquinoxOS Kernel Starting ===\n");
@@ -427,7 +440,7 @@ void kmain(void) {
 #if DEFER_HW_INIT
   // Рабочий стол уже запускается — поднимаем тяжёлое железо (PCI/USB/звук/
   // сеть/мышь) в фоновом потоке, чтобы не задерживать первый кадр GUI.
-  task_create(hw_init_sequence, 0, 0, 0);
+  task_create(hw_init_task_entry, 0, 0, 0);
   serial_puts(COM1, "Deferred HW init thread started\n");
 #endif
 
