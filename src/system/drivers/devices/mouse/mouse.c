@@ -4,6 +4,14 @@
 #include <stdbool.h>
 
 extern void term_print(const char* str); 
+extern volatile uint32_t tick; // PIT 1кГц: tick == мс. Для тайм-аутов по времени.
+
+// Тайм-аут ожидания PS/2 ПО ВРЕМЕНИ, а не по числу итераций.
+// На whpx (Windows) каждый inb из I/O-порта — это дорогой VM-exit (~100мкс+),
+// поэтому старые 100000 итераций при «молчащем» контроллере давали ~15 СЕКУНД
+// зависания на старте. Ограничиваем каждое ожидание ~30 мс по таймеру PIT
+// (он тикает независимо от I/O), плюс грубая страховка от подвисшего tick.
+#define MOUSE_WAIT_MS 30
 
 // --- ПОРТЫ PS/2 КОНТРОЛЛЕРА ---
 #define PS2_DATA_PORT         0x60
@@ -54,13 +62,15 @@ void usb_mouse_update(int8_t dx, int8_t dy, uint8_t buttons) {
 // =========================================================================
 
 static void mouse_wait_input() {
-    uint32_t timeout = 100000; 
-    while ((inb(PS2_CMD_PORT) & 2) && timeout--);
+    uint32_t deadline = tick + MOUSE_WAIT_MS;
+    uint32_t guard = 200000; // страховка, если tick почему-то не идёт
+    while ((inb(PS2_CMD_PORT) & 2) && tick < deadline && guard--);
 }
 
 static void mouse_wait_output() {
-    uint32_t timeout = 100000;
-    while (!(inb(PS2_CMD_PORT) & 1) && timeout--);
+    uint32_t deadline = tick + MOUSE_WAIT_MS;
+    uint32_t guard = 200000;
+    while (!(inb(PS2_CMD_PORT) & 1) && tick < deadline && guard--);
 }
 
 static void mouse_write(uint8_t data) {
@@ -76,8 +86,9 @@ static uint8_t mouse_read() {
 }
 
 static void mouse_flush_buffer() {
-    uint32_t timeout = 100000;
-    while ((inb(PS2_CMD_PORT) & 1) && timeout--) {
+    uint32_t deadline = tick + MOUSE_WAIT_MS;
+    uint32_t guard = 200000;
+    while ((inb(PS2_CMD_PORT) & 1) && tick < deadline && guard--) {
         inb(PS2_DATA_PORT);
     }
 }
