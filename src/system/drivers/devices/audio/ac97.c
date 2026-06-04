@@ -9,6 +9,14 @@ static ac97_bdl_t* bdl;
 extern uint64_t hhdm_offset;
 static int current_bdl_idx = 0;
 
+// Готовность звуковой карты. AC'97 инициализируется внутри pci_init(), который
+// при быстрой загрузке (DEFER_HW_INIT) выполняется в фоновом потоке ПОСЛЕ старта
+// рабочего стола. Этот флаг позволяет sysgui дождаться готовности карты прежде
+// чем проигрывать звук запуска (иначе запись шла бы в неинициализированные
+// регистры и звука не было бы).
+static volatile int ac97_ready_flag = 0;
+int ac97_is_ready(void) { return ac97_ready_flag; }
+
 uint8_t ac97_get_civ() {
     return inb(bar_nab + 0x14); 
 }
@@ -64,6 +72,8 @@ void ac97_init(uint32_t nam, uint32_t nab) {
 
     outl(bar_nab + 0x10, (uint32_t)bdl_phys);
     outb(bar_nab + 0x15, 0); // LVI = 0
+
+    ac97_ready_flag = 1; // карта готова — sysgui может проигрывать звук
 }
 
 // src/drivers/audio/ac97.c

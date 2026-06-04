@@ -306,23 +306,24 @@ static void boot_intro_frame(uint32_t e) {
 //   во фронтбуфер из таймера. Перерисовываем не чаще ~30fps.
 // =========================================================================
 #if BOOT_SHOW_SPINNER
-#define SPIN_DOTS 5     // точек в «хвосте» (голова + 4)
-#define SPIN_SPAN 26    // угол между соседними точками, градусы
+#define SPIN_STEP  2     // шаг по углу при отрисовке кольца, градусы (мельче = глаже)
+#define SPIN_TRAIL 300   // длина яркого «хвоста» по дуге, градусы
+#define SPIN_FLOOR 40    // базовая яркость кольца (чтобы оно было сплошным)
 
 static int spin_inited = 0;
-static int spin_cx = 0, spin_cy = 0, spin_R = 0, spin_dot = 0, spin_clear = 0;
+static int spin_cx = 0, spin_cy = 0, spin_R = 0, spin_thick = 0, spin_clear = 0;
 
 static void boot_spinner_init(void) {
     if (spin_inited) return;
     spin_inited = 1;
     spin_cx = (int)screen_width / 2;
     spin_cy = (int)screen_height * BOOT_SPINNER_Y_PCT / 100;
-    spin_R = (int)screen_height / 30;
-    if (spin_R < 14) spin_R = 14;
-    if (spin_R > 28) spin_R = 28;
-    spin_dot = spin_R / 6;
-    if (spin_dot < 2) spin_dot = 2;
-    spin_clear = spin_R + spin_dot + 2;
+    spin_R = (int)screen_height / 28;
+    if (spin_R < 16) spin_R = 16;
+    if (spin_R > 30) spin_R = 30;
+    spin_thick = spin_R / 5;          // толщина линии кольца
+    if (spin_thick < 3) spin_thick = 3;
+    spin_clear = spin_R + spin_thick + 2;
 }
 
 static void draw_disk(int cx, int cy, int r, uint32_t col) {
@@ -333,6 +334,9 @@ static void draw_disk(int cx, int cy, int r, uint32_t col) {
                 put_pixel_direct(cx + dx, cy + dy, col);
 }
 
+// Сплошное кольцо с вращающимся ярким сектором (стиль Windows 11): по всей
+// окружности рисуем перекрывающиеся точки -> непрерывная линия; яркость каждой
+// точки = базовый уровень + затухающий «хвост» позади вращающейся «головы».
 static void boot_spinner_frame(uint32_t e) {
     boot_spinner_init();
 
@@ -345,14 +349,17 @@ static void boot_spinner_frame(uint32_t e) {
                      spin_clear * 2, spin_clear * 2, 0x000000);
 
     int head = (int)((e * 360 / BOOT_SPINNER_ROT_MS) % 360);
-    for (int i = 0; i < SPIN_DOTS; i++) {
-        int a = head - i * SPIN_SPAN;
-        int x = spin_cx + spin_R * boot_cos1000(a) / 1000;
-        int y = spin_cy + spin_R * boot_sin1000_d(a) / 1000;
-        int b = 255 - i * 45;          // голова ярче, хвост тусклее
-        if (b < 40) b = 40;
+    for (int deg = 0; deg < 360; deg += SPIN_STEP) {
+        int d = (head - deg + 360) % 360;   // расстояние по дуге позади головы
+        int b;
+        if (d <= SPIN_TRAIL)
+            b = SPIN_FLOOR + (255 - SPIN_FLOOR) * (SPIN_TRAIL - d) / SPIN_TRAIL;
+        else
+            b = SPIN_FLOOR;
+        int x = spin_cx + spin_R * boot_cos1000(deg) / 1000;
+        int y = spin_cy + spin_R * boot_sin1000_d(deg) / 1000;
         uint32_t col = ((uint32_t)b << 16) | ((uint32_t)b << 8) | (uint32_t)b;
-        draw_disk(x, y, spin_dot, col);
+        draw_disk(x, y, spin_thick, col);
     }
 }
 #endif /* BOOT_SHOW_SPINNER */

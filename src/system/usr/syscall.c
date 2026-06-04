@@ -479,6 +479,8 @@ void syscall_handler(syscall_regs_t *regs)
   }
   case 20:
   { // SYS_AUDIO_PLAY
+    extern int ac97_is_ready(void);
+    if (!ac97_is_ready()) break; // карта ещё не инициализирована — тихо выходим
     uintptr_t user_ptr = regs->rdi;
     uint32_t size = (uint32_t)regs->rsi;
     if (size == 0) {
@@ -541,8 +543,16 @@ void syscall_handler(syscall_regs_t *regs)
   }
   case 21:
   { // SYS_AUDIO_SET_RATE
+    extern int ac97_is_ready(void);
+    if (!ac97_is_ready()) break;
     extern void ac97_set_rate(uint32_t rate);
     ac97_set_rate((uint32_t)regs->rdi);
+    break;
+  }
+  case 22:
+  { // SYS_AUDIO_READY — готова ли звуковая карта (AC'97 инициализирован)
+    extern int ac97_is_ready(void);
+    regs->rax = (uint64_t)ac97_is_ready();
     break;
   }
   case 30:

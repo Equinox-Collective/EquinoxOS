@@ -28,6 +28,7 @@ typedef struct {
 void ac97_init(uint32_t nam, uint32_t nab);
 void ac97_play_at_idx(int idx, void* phys_addr, uint32_t len);
 void ac97_stop();
+int  ac97_is_ready(void);
 
 
 #endif
