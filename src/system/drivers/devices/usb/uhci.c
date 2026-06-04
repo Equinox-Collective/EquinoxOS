@@ -4,6 +4,7 @@
 #include "../../../mem/vmm.h"
 #include "../../../misc/timer.h"
 #include <stddef.h>
+#include <stdint.h>
 
 extern void term_print(const char* str);
 
@@ -67,6 +68,13 @@ struct uhci_control_block {
     uint8_t   setup_data[8];
     uint8_t   response_data[64];
 } __attribute__((packed, aligned(16)));
+
+static void *uhci_poll_phys_block = NULL;
+static uhci_td_t *uhci_poll_virt_td = NULL;
+static uint8_t *uhci_poll_virt_buf = NULL;
+static uint32_t uhci_poll_phys_td = 0;
+static uint32_t uhci_poll_phys_buf = 0;
+static uint8_t uhci_poll_toggle = 0;
 
 // --- ХЕЛПЕРЫ ДИАГНОСТИКИ ---
 
@@ -224,127 +232,63 @@ void uhci_get_device_descriptor(uint32_t io_base) {
     }
 }
 
-// --- ЧТЕНИЕ И ОПРОС ДАННЫХ МЫШИ (USB Mouse Driver Loop) ---
-
-void uhci_test_mouse(uint32_t io_base, uint8_t dev_addr, uint8_t endpoint) {
-    term_print("[UHCI] Starting mouse test! Move your mouse in QEMU window...\n");
-
-    // --- Экранная подсказка пользователю на время теста мыши ---
-    // term_print уходит только в serial, поэтому отдельно рисуем крупную
-    // надпись прямо во фронтбуфер по центру сверху. Подложку рисуем тёмной
-    // плашкой, чтобы текст читался поверх диагностического лога.
-    const char *prompt = "MOVE YOUR MOUSE";
-    int prompt_chars = 15;                 // длина строки в символах (8px/символ)
-    int prompt_w = prompt_chars * 8;
-    int prompt_x = (int)screen_width / 2 - prompt_w / 2;
-    int prompt_y = (int)screen_height / 6; // верхняя треть, выше зоны Nyan Cat
-    draw_rect_direct(prompt_x - 12, prompt_y - 8, prompt_w + 24, 32, 0x101830);
-    vesa_draw_string_direct(prompt, prompt_x, prompt_y, 0x00FFFF);
-
-    // Выделяем страницу под один TD опроса и буфер
-    void *phys_block = pmm_alloc();
-    if (!phys_block) return;
-
-    // ИСПРАВЛЕНО: убран "struct", так как uhci_td_t — это typedef
-    uhci_td_t *virt_td = (uhci_td_t *)VIRT(phys_block);
-    uint8_t *virt_buf = (uint8_t *)virt_td + 32; // Буфер прямо в той же странице за пределами TD
-    
-    uint32_t phys_td = (uint32_t)(uintptr_t)phys_block;
-    uint32_t phys_buf = phys_td + 32;
-
-    uint8_t toggle = 0; // Начинаем с DATA0
-    int packets_received = 0;
-
-    // Считываем 100 успешных перемещений мыши
-    // (Nyan Cat при этом крутится сам — его подрисовывает PIT-таймер, пока
-    //  активен флаг nyan_boot_active, см. src/system/misc/timer.c.)
-    while (packets_received < 100) {
-        // Конфигурируем TD прерывания на опрос
-        virt_td->link_ptr = 1; // Конец списка
-        
-        // Active (бит 23) + 3 попытки (биты 28-27)
-        uint32_t base_status = (1 << 23) | (3 << 27);
-        if (dev_is_low_speed) base_status |= (1 << 26);
-        virt_td->ctrl_status = base_status;
-
-        // PID 0x69 (IN), размер данных 4 байта (max 3), toggle, адрес, конечная точка
-        virt_td->token = (3 << 21) | (toggle << 19) | (endpoint << 15) | (dev_addr << 8) | 0x69;
-        virt_td->buffer_ptr = phys_buf;
-
-        // Помещаем TD во фрейм-лист (ставим его напрямую как элемент фрейма, бит 1 = 0 (это TD))
-        for (int i = 0; i < 1024; i++) {
-            virt_frame_list[i] = phys_td; 
-        }
-
-        // Ждем выполнения или таймаута (если мышь не двигалась, контроллер вернет NAK)
-        int timeout = 50000;
-        while ((virt_td->ctrl_status & (1 << 23)) && --timeout > 0) {
-            __asm__ volatile("pause");
-        }
-
-        // Сразу убираем TD из фрейм-листа
-        for (int i = 0; i < 1024; i++) {
-            virt_frame_list[i] = 1;
-        }
-
-        uint32_t status = virt_td->ctrl_status;
-
-        // Если TD выполнен успешно (нет бита Active и нет ошибок)
-        if (!(status & (1 << 23)) && !(status & 0x00070000)) {
-            uint8_t buttons = virt_buf[0];
-            int8_t dx = (int8_t)virt_buf[1];
-            int8_t dy = (int8_t)virt_buf[2];
-
-            term_print("[USB Mouse] Btn: ");
-            print_hex_16(buttons);
-            term_print(" | dX: ");
-            if (dx < 0) { term_print("-"); dx = -dx; } else { term_print("+"); }
-            print_hex_16(dx);
-            term_print(" | dY: ");
-            if (dy < 0) { term_print("-"); dy = -dy; } else { term_print("+"); }
-            print_hex_16(dy);
-            term_print("\n");
-
-            toggle ^= 1; // Чередуем Toggle DATA0 / DATA1 только при успешном приёме
-            packets_received++;
-        }
-
-        sleep(10); // Опрос каждые 10 мс
-    }
-
-    // Убираем экранную подсказку — дальше управление уходит к GUI.
-    draw_rect_direct(prompt_x - 12, prompt_y - 8, prompt_w + 24, 32, 0x000000);
-
-    // ВАЖНО: освобождаем USB-мышь (SET_CONFIGURATION 0 = unconfigure). Пока
-    // устройство сконфигурировано, QEMU считает USB-мышь активным указателем
-    // и шлёт движения именно ей, а её после теста уже никто не опрашивает ->
-    // курсор в GUI (он работает от PS/2-мыши, IRQ12) НЕ двигается. После
-    // unconfigure QEMU возвращает фокус указателя на PS/2-мышь.
-    {
-        struct usb_setup_packet release;
-        release.request_type = 0x00; // Host->Device, Standard, Device
-        release.request      = 0x09; // SET_CONFIGURATION
-        release.value        = 0;    // 0 = unconfigure (отпускаем устройство)
-        release.index        = 0;
-        release.length       = 0;
-        uhci_control_transfer(io_base, dev_addr, &release, NULL, 0);
-        term_print("[UHCI] USB Mouse released (unconfigured); PS/2 regains pointer.\n");
-    }
-
-    term_print("[UHCI] Mouse test completed successfully. Booting to GUI...\n");
-    pmm_free(phys_block);
-}
-
 // --- НАСТРОЙКА И КОНФИГУРАЦИЯ МЫШИ ---
+
+void uhci_poll_mouse_step(uint32_t io_base) {
+    if (!uhci_poll_phys_block) {
+        uhci_poll_phys_block = pmm_alloc();
+        uhci_poll_virt_td = (uhci_td_t *)VIRT(uhci_poll_phys_block);
+        uhci_poll_virt_buf = (uint8_t *)uhci_poll_virt_td + 32;
+        uhci_poll_phys_td = (uint32_t)(uintptr_t)uhci_poll_phys_block;
+        uhci_poll_phys_buf = uhci_poll_phys_td + 32;
+    }
+
+    uhci_poll_virt_td->link_ptr = 1; // Terminate
+    
+    uint32_t base_status = (1 << 23) | (3 << 27);
+    if (dev_is_low_speed) base_status |= (1 << 26);
+    uhci_poll_virt_td->ctrl_status = base_status;
+
+    // Endpoint 1, Device Addr 1, PID IN (0x69)
+    uhci_poll_virt_td->token = (3 << 21) | (uhci_poll_toggle << 19) | (1 << 15) | (1 << 8) | 0x69;
+    uhci_poll_virt_td->buffer_ptr = uhci_poll_phys_buf;
+
+    // Прописываем TD во фрейм-лист
+    for (int i = 0; i < 1024; i++) {
+        virt_frame_list[i] = uhci_poll_phys_td;
+    }
+
+    // Ждем выполнения или таймаута NAK
+    int timeout = 1000;
+    while ((uhci_poll_virt_td->ctrl_status & (1 << 23)) && --timeout > 0) {
+        __asm__ volatile("pause");
+    }
+
+    // Снимаем со фрейм-листа
+    for (int i = 0; i < 1024; i++) {
+        virt_frame_list[i] = 1;
+    }
+
+    uint32_t status = uhci_poll_virt_td->ctrl_status;
+    if (!(status & (1 << 23)) && !(status & 0x00070000)) {
+        uint8_t buttons = uhci_poll_virt_buf[0];
+        int8_t dx = (int8_t)uhci_poll_virt_buf[1];
+        int8_t dy = (int8_t)uhci_poll_virt_buf[2];
+
+        // Пишем напрямую в систему!
+        usb_mouse_update(dx, dy, buttons);
+
+        uhci_poll_toggle ^= 1; // Переключаем Data Toggle
+    }
+}
 
 void uhci_configure_mouse(uint32_t io_base) {
     term_print("[UHCI] Configuring USB Device...\n");
 
-    // 1. Устанавливаем адрес устройства в 1 (SET_ADDRESS)
     struct usb_setup_packet setup;
-    setup.request_type = 0x00; // Направление: Host-to-Device, Standard, Device
-    setup.request      = 0x05; // SET_ADDRESS
-    setup.value        = 1;    // Новый адрес устройства = 1
+    setup.request_type = 0x00;
+    setup.request      = 0x05; 
+    setup.value        = 1;    // Адрес мыши = 1
     setup.index        = 0;
     setup.length       = 0;
 
@@ -352,28 +296,25 @@ void uhci_configure_mouse(uint32_t io_base) {
         term_print("[UHCI] Error: SET_ADDRESS failed!\n");
         return;
     }
-    sleep(10); // Set Address Recovery Time (10 мс по спецификации)
+    sleep(10); 
 
-    // 2. Получаем Configuration Descriptor (Config)
     uint8_t config_buf[64];
-    setup.request_type = 0x80; // Направление: Device-to-Host, Standard, Device
-    setup.request      = 0x06; // GET_DESCRIPTOR
-    setup.value        = 0x0200; // Type = Config (02), Index = 0
+    setup.request_type = 0x80;
+    setup.request      = 0x06; 
+    setup.value        = 0x0200; 
     setup.index        = 0;
-    setup.length       = 9; // Сначала запрашиваем только шапку, чтобы узнать общую длину
+    setup.length       = 9; 
 
     if (uhci_control_transfer(io_base, 1, &setup, config_buf, 9) < 0) {
         term_print("[UHCI] Error: GET_DESCRIPTOR (Config Header) failed!\n");
         return;
     }
 
-    // Извлекаем wTotalLength (смещение 2)
     uint16_t total_len = config_buf[2] | (config_buf[3] << 8);
     if (total_len > sizeof(config_buf)) {
         total_len = sizeof(config_buf);
     }
 
-    // Запрашиваем дескриптор конфигурации целиком
     setup.length = total_len;
     if (uhci_control_transfer(io_base, 1, &setup, config_buf, total_len) < 0) {
         term_print("[UHCI] Error: GET_DESCRIPTOR (Full Config) failed!\n");
@@ -381,9 +322,8 @@ void uhci_configure_mouse(uint32_t io_base) {
     }
     term_print("[UHCI] Configuration Descriptor retrieved.\n");
 
-    // 3. Выбираем конфигурацию устройства (SET_CONFIGURATION)
     setup.request_type = 0x00;
-    setup.request      = 0x09; // SET_CONFIGURATION
+    setup.request      = 0x09; 
     setup.value        = 1;    // Конфигурация 1
     setup.index        = 0;
     setup.length       = 0;
@@ -395,12 +335,9 @@ void uhci_configure_mouse(uint32_t io_base) {
     sleep(10);
     term_print("[UHCI] USB Mouse is CONFIGURED!\n");
 
-    // 4. Запускаем тест циклического опроса мыши
-    // В QEMU стандартная мышь находится на Endpoint 1 (IN)
-    uhci_test_mouse(io_base, 1, 1);
+    // БЛОКИРУЮЩИЙ ЦИКЛ ОПРОСА УДАЛЕН. 
+    // Теперь опрос будет происходить параллельно через планировщик в ядре!
 }
-
-// --- ИНИЦИАЛИЗАЦИЯ КОНТРОЛЛЕРА ---
 
 void uhci_probe_ports(uint32_t io_base) {
     term_print("[UHCI] Probing ports...\n");
@@ -505,11 +442,18 @@ void uhci_init(uint8_t bus, uint8_t slot, uint8_t func, uint32_t io_base) {
 
     term_print("[UHCI] Controller is RUNNING!\n");
 
-    // Опрос портов
     uhci_probe_ports(io_base);
 
-    // Если мышь обнаружена, настраиваем её и переходим к опросу координат
+    // Если устройство обнаружено, настраиваем её
     if (dev_is_connected) {
         uhci_configure_mouse(io_base);
+        
+        // РЕГИСТРИРУЕМ В ДИСПЕТЧЕРЕ ЯДРА, ЧТО НАШЛИ USB МЫШЬ НА UHCI
+        extern volatile int g_usb_mouse_found;
+        extern volatile int g_usb_mouse_controller_type;
+        extern volatile uint32_t g_usb_mouse_io_base;
+        g_usb_mouse_found = 1;
+        g_usb_mouse_controller_type = 1; // 1 = UHCI
+        g_usb_mouse_io_base = io_base;
     }
 }
