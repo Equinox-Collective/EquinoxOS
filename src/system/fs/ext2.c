@@ -382,36 +382,117 @@ void ext2_add_entry(uint32_t dir_inode_num, uint32_t file_inode, const char* nam
     kfree(buffer);
 }
 
+// Преобразует диапазон ЛОГИЧЕСКИХ блоков файла в ФИЗИЧЕСКИЕ номера блоков,
+// КЭШируя indirect/doubly-indirect блоки. Раньше ext2_get_inode_block для
+// КАЖДОГО блока данных заново читал indirect-блок (kmalloc+read+kfree) — при
+// block_size=4096 файл 4.5МБ лежит в single-indirect, и тот же indirect-блок
+// перечитывался ~1024 раза. Тут читаем каждый indirect/doubly максимум 1 раз
+// подряд (последовательный доступ). count*4 байт под результат.
+static void ext2_map_blocks(ext2_inode_t* inode, uint32_t start,
+                            uint32_t count, uint32_t* out) {
+    uint32_t ppb = block_size / 4; // указателей в блоке
+    uint32_t* ind = kmalloc(block_size); // кэш single-indirect
+    uint32_t* dbl = kmalloc(block_size); // кэш doubly-indirect
+    uint32_t ind_cached = 0; // какой физ. блок сейчас в ind[] (0 == пусто)
+    uint32_t dbl_cached = 0;
+
+    for (uint32_t k = 0; k < count; k++) {
+        uint32_t block = start + k;
+
+        if (block < 12) { out[k] = inode->block[block]; continue; }
+        uint32_t b = block - 12;
+
+        if (b < ppb) { // single indirect
+            uint32_t iblk = inode->block[12];
+            if (iblk == 0) { out[k] = 0; continue; }
+            if (ind_cached != iblk) { ext2_read_block(iblk, (uint8_t*)ind); ind_cached = iblk; }
+            out[k] = ind[b];
+            continue;
+        }
+        b -= ppb;
+
+        if (b < ppb * ppb) { // doubly indirect
+            uint32_t dblk = inode->block[13];
+            if (dblk == 0) { out[k] = 0; continue; }
+            if (dbl_cached != dblk) { ext2_read_block(dblk, (uint8_t*)dbl); dbl_cached = dblk; }
+            uint32_t idx = b / ppb;
+            uint32_t iblk = dbl[idx];
+            if (iblk == 0) { out[k] = 0; continue; }
+            if (ind_cached != iblk) { ext2_read_block(iblk, (uint8_t*)ind); ind_cached = iblk; }
+            out[k] = ind[b % ppb];
+            continue;
+        }
+
+        // triply indirect не поддерживается
+        out[k] = 0;
+    }
+
+    kfree(ind);
+    kfree(dbl);
+}
+
 uint32_t ext2_read(uint32_t inode_num, uint32_t offset, uint32_t size, uint8_t* buffer) {
     if (!sb) return 0;
     ext2_inode_t inode;
     ext2_read_inode(inode_num, &inode);
-    
+
     if (offset >= inode.size) return 0;
     if (offset + size > inode.size) size = inode.size - offset;
-    
-    uint32_t block_size = 1024 << sb->log_block_size;
-    uint8_t* block_buf = kmalloc(block_size);
+    if (size == 0) return 0;
+
+    uint32_t bs  = block_size;     // реальный размер блока (статик, как в ext2_read_block)
+    uint32_t spb = bs / 512;       // секторов в блоке
+
+    uint32_t first_block = offset / bs;
+    uint32_t last_block  = (offset + size - 1) / bs;
+    uint32_t nblocks     = last_block - first_block + 1;
+
+    // Карта физических блоков (с кэшем indirect).
+    uint32_t* phys = kmalloc(nblocks * sizeof(uint32_t));
+    ext2_map_blocks(&inode, first_block, nblocks, phys);
+
+    uint8_t* tmp = NULL; // ленивый буфер под частичные блоки/дыры
     uint32_t bytes_read = 0;
-    
-    while (bytes_read < size) {
-        uint32_t block_index = (offset + bytes_read) / block_size;
-        uint32_t block_offset = (offset + bytes_read) % block_size;
-        uint32_t b = ext2_get_inode_block(&inode, block_index);
-        
-        if (b == 0) {
-            memset(block_buf, 0, block_size);
-        } else {
-            ext2_read_block(b, block_buf);
+
+    for (uint32_t i = 0; i < nblocks; ) {
+        uint32_t logical    = first_block + i;
+        uint64_t blk_start  = (uint64_t)logical * bs;          // смещение начала блока в файле
+        uint32_t in_off     = (uint32_t)((offset + bytes_read) - blk_start); // !=0 только для первого
+        uint32_t avail      = bs - in_off;
+        uint32_t remaining  = size - bytes_read;
+        uint32_t to_copy    = (avail < remaining) ? avail : remaining;
+        uint32_t b          = phys[i];
+
+        // Быстрый путь: целый блок с начала, не дыра — батчим непрерывный прогон
+        // физически соседних блоков в ОДНО чтение ATA прямо в buffer.
+        if (in_off == 0 && to_copy == bs && b != 0) {
+            uint32_t run = 1;
+            while (i + run < nblocks
+                   && phys[i + run] == b + run
+                   && (size - (bytes_read + (uint64_t)run * bs)) >= bs) {
+                run++;
+            }
+            read_sectors_ata_pio((uintptr_t)(buffer + bytes_read),
+                                 (uint64_t)b * spb, run * spb);
+            bytes_read += run * bs;
+            i += run;
+            continue;
         }
-        uint32_t to_copy = block_size - block_offset;
-        if (to_copy > size - bytes_read) to_copy = size - bytes_read;
-        
-        memcpy(buffer + bytes_read, block_buf + block_offset, to_copy);
+
+        // Медленный путь: частичный блок (голова/хвост) или дыра.
+        if (b == 0) {
+            memset(buffer + bytes_read, 0, to_copy);
+        } else {
+            if (!tmp) tmp = kmalloc(bs);
+            ext2_read_block(b, tmp);
+            memcpy(buffer + bytes_read, tmp + in_off, to_copy);
+        }
         bytes_read += to_copy;
+        i++;
     }
-    
-    kfree(block_buf);
+
+    if (tmp) kfree(tmp);
+    kfree(phys);
     return bytes_read;
 }
 
