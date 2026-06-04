@@ -1042,6 +1042,8 @@ void syscall_handler(syscall_regs_t *regs)
     extern volatile uint32_t boot_measured_ms;
     if (boot_measured_ms == 0) {
       boot_measured_ms = tick;
+      extern void klog_t(const char *tag);
+      klog_t("GUI first frame (syscall 88)");
     }
     nyan_boot_active = 0;
     // Анимация закончилась — возвращаем int 0x80 в режим interrupt gate,

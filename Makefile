@@ -574,6 +574,11 @@ run-usb:
 run-tcg:
 	$(QEMU) $(QEMU_BASE) -accel tcg
 
+# Запуск с выводом COM1 в консоль — для профилирования загрузки.
+# Смотри строки [T=...ms]: зазоры между ними показывают, что тормозит старт.
+run-log:
+	$(QEMU) $(QEMU_BASE) $(QEMU_ACCEL) -serial stdio
+
 run-debug:
 	$(QEMU) $(QEMU_BASE) -d int,guest_errors,mmu -D qemu.log
 

@@ -99,6 +99,14 @@ void *sys_get_file(const char *name, uint64_t *size) {
 char sys_get_key() { return 0; } 
 uint32_t sys_get_time_ms() { return tick; }
 
+// Лёгкая метка времени в COM1 для профилирования загрузки. tick == мс (PIT 1кГц).
+// Смотри зазоры между метками в логе `make run-log`, чтобы найти, что тормозит.
+void klog_t(const char *tag) {
+  char b[96];
+  sprintf(b, "[T=%ums] %s\n", (unsigned)tick, tag);
+  serial_puts(COM1, b);
+}
+
 uint8_t sys_get_scancode() {
   uint8_t code = last_scancode;
   last_scancode = 0;
@@ -284,8 +292,10 @@ void exec_from_disk(const char *filename) {
 // фоновый поток ПОСЛЕ запуска sysgui (DEFER_HW_INIT==1), чтобы рабочий стол
 // появлялся раньше.
 void hw_init_sequence(void) {
+  klog_t("hw_init: begin");
   // 1. Инициализация PCI (обнаружит и включит USB контроллеры)
   pci_init();
+  klog_t("hw_init: pci_init/USB done");
   serial_puts(COM1, "PCI initialized\n");
   pcspeaker_init();
   serial_puts(COM1, "PC Speaker initialized\n");
@@ -309,8 +319,10 @@ void hw_init_sequence(void) {
       }
   }
 
+  klog_t("hw_init: input done");
   task_create(network_thread, 0, 0, 0);
   serial_puts(COM1, "Network thread started\n");
+  klog_t("hw_init: end");
 }
 
 #if DEFER_HW_INIT
@@ -397,6 +409,7 @@ void kmain(void) {
   vfs_register_device(ext2_get_root_node());
   vfs_register_device(fat32_get_root_node());
   serial_puts(COM1, "EXT2 initialized\n");
+  klog_t("EXT2 ready (timing ref)");
 
   {
     extern void boot_eta_set(uint32_t ms);
@@ -433,15 +446,18 @@ void kmain(void) {
   vesa_set_font(font_ptr);
   vesa_set_font_size(font_size); 
   serial_puts(COM1, "=== EquinoxOS Ready ===\n");
+  klog_t("exec sysgui begin");
 
   exec_from_disk("bin/sysgui.elf"); 
   serial_puts(COM1, "enGUI spawned as Ring 3 init process\n");
+  klog_t("enGUI spawned");
 
 #if DEFER_HW_INIT
   // Рабочий стол уже запускается — поднимаем тяжёлое железо (PCI/USB/звук/
   // сеть/мышь) в фоновом потоке, чтобы не задерживать первый кадр GUI.
   task_create(hw_init_task_entry, 0, 0, 0);
   serial_puts(COM1, "Deferred HW init thread started\n");
+  klog_t("deferred hw thread created");
 #endif
 
   while (1) {
@@ -452,7 +468,7 @@ void kmain(void) {
         boottime_saved = 1;
         uint32_t v = boot_measured_ms;
         ext2_overwrite("/boottime", (const char *)&v, sizeof(v));
-        serial_puts(COM1, "Boot time saved to /boottime\n");
+        char bb[80]; sprintf(bb, "Boot time (to first GUI frame) = %u ms\n", (unsigned)v); serial_puts(COM1, bb);
       }
     }
     if (should_run_app) {
