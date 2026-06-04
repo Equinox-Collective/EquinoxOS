@@ -6,6 +6,7 @@
 #include "../syslibc/stdio.h"
 #include "nyan_data.h"
 #include "equinox_logo.h"
+#include "boot_sin.h"
 #include "boot_config.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -298,6 +299,64 @@ static void boot_intro_frame(uint32_t e) {
     }
 }
 
+// =========================================================================
+//   КРУГОВОЙ СПИННЕР В СТИЛЕ WINDOWS 11
+//   Кластер из нескольких точек («комета») вращается по окружности; голова
+//   яркая, хвост затухает. Целочисленная тригонометрия (boot_sin.h), рисуем
+//   во фронтбуфер из таймера. Перерисовываем не чаще ~30fps.
+// =========================================================================
+#if BOOT_SHOW_SPINNER
+#define SPIN_DOTS 5     // точек в «хвосте» (голова + 4)
+#define SPIN_SPAN 26    // угол между соседними точками, градусы
+
+static int spin_inited = 0;
+static int spin_cx = 0, spin_cy = 0, spin_R = 0, spin_dot = 0, spin_clear = 0;
+
+static void boot_spinner_init(void) {
+    if (spin_inited) return;
+    spin_inited = 1;
+    spin_cx = (int)screen_width / 2;
+    spin_cy = (int)screen_height * BOOT_SPINNER_Y_PCT / 100;
+    spin_R = (int)screen_height / 30;
+    if (spin_R < 14) spin_R = 14;
+    if (spin_R > 28) spin_R = 28;
+    spin_dot = spin_R / 6;
+    if (spin_dot < 2) spin_dot = 2;
+    spin_clear = spin_R + spin_dot + 2;
+}
+
+static void draw_disk(int cx, int cy, int r, uint32_t col) {
+    int r2 = r * r;
+    for (int dy = -r; dy <= r; dy++)
+        for (int dx = -r; dx <= r; dx++)
+            if (dx * dx + dy * dy <= r2)
+                put_pixel_direct(cx + dx, cy + dy, col);
+}
+
+static void boot_spinner_frame(uint32_t e) {
+    boot_spinner_init();
+
+    static uint32_t s_last = 0;
+    if (s_last != 0 && (tick - s_last) < 30) return;
+    s_last = tick;
+
+    // Стираем прошлую зону спиннера (фон чёрный).
+    draw_rect_direct(spin_cx - spin_clear, spin_cy - spin_clear,
+                     spin_clear * 2, spin_clear * 2, 0x000000);
+
+    int head = (int)((e * 360 / BOOT_SPINNER_ROT_MS) % 360);
+    for (int i = 0; i < SPIN_DOTS; i++) {
+        int a = head - i * SPIN_SPAN;
+        int x = spin_cx + spin_R * boot_cos1000(a) / 1000;
+        int y = spin_cy + spin_R * boot_sin1000_d(a) / 1000;
+        int b = 255 - i * 45;          // голова ярче, хвост тусклее
+        if (b < 40) b = 40;
+        uint32_t col = ((uint32_t)b << 16) | ((uint32_t)b << 8) | (uint32_t)b;
+        draw_disk(x, y, spin_dot, col);
+    }
+}
+#endif /* BOOT_SHOW_SPINNER */
+
 // --- ПРОГРЕСС-БАР ЗАГРУЗКИ ---
 // Оценка прогресса по времени: tick (= мс, PIT на 1 кГц) против BOOT_ETA_MS из
 // boot_config.h. Это намеренно ПРИМЕРНАЯ оценка (как и просил пользователь):
@@ -417,24 +476,32 @@ void nyan_boot_anim_frame(void) {
         nyan_init_geometry();
     }
 #if BOOT_SCREEN_MODE == 0
-    // Режим 0: крутим гифку Nyan Cat (перерисовываем только при смене кадра).
+#if BOOT_SHOW_NYAN
+    // Nyan Cat внизу (перерисовываем только при смене кадра).
     static int nyan_last_drawn = -1;
     int frame = (int)((tick / 100) % NYAN_FRAMES);
     if (frame != nyan_last_drawn) {
         nyan_draw_frame(frame);
         nyan_last_drawn = frame;
     }
+#endif
     // Интро: знак EquinoxOS + надпись + "booting..." (сверху по центру).
     if (intro_start_set) {
         boot_intro_frame(tick - intro_start_tick);
     }
+#if BOOT_SHOW_SPINNER
+    if (intro_start_set) {
+        boot_spinner_frame(tick - intro_start_tick);
+    }
+#endif
 #else
     // Режим 1 (серый экран): Nyan статичный — фон и кадр уже нарисованы один
     // раз в eqstart_perform_tests(), перерисовывать каждый тик не нужно.
 #endif
-    // Прогресс-бар обновляется в обоих режимах (сам пропускает кадры без
-    // изменения процента).
+#if BOOT_SHOW_PROGRESS || BOOT_SCREEN_MODE != 0
+    // Прогресс-бар (сам пропускает кадры без изменения процента).
     boot_progress_draw();
+#endif
 }
 
 // Простой вывод строки в TTY-стиле на черный экран
@@ -532,12 +599,16 @@ bool eqstart_perform_tests() {
 #else
   draw_rect_direct(0, 0, screen_width, screen_height, BOOT_GRAY_COLOR);
 #endif
+#if BOOT_SHOW_NYAN
   nyan_init_geometry();
   nyan_draw_frame(0);
+#endif
+#if BOOT_SHOW_PROGRESS
   boot_progress_draw();
-  // В режиме 0 гифку дальше крутит таймер (nyan_boot_anim_frame) — без
-  // блокирующего nyan_play(), чтобы не замедлять быструю загрузку. Тогда же
-  // запускаем интро (логотип + надпись + booting...), привязав его к тику.
+#endif
+  // Анимацию (интро + опционально кот/спиннер) дальше крутит таймер
+  // (nyan_boot_anim_frame) — без блокирующего nyan_play(), чтобы не замедлять
+  // загрузку. Привязываем интро к текущему тику.
   intro_start_tick = tick;
   intro_start_set  = 1;
   nyan_boot_active = 1;
