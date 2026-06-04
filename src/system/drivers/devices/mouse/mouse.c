@@ -1,6 +1,7 @@
 #include "mouse.h"
 #include "../../../core/io.h"
 #include "../../vesa/vesa.h"
+#include <stdbool.h>
 
 extern void term_print(const char* str); 
 

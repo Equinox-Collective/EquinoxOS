@@ -1,17 +1,15 @@
-// src/drivers/mouse/mouse.h
 #ifndef MOUSE_H
 #define MOUSE_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
-// Глобальные переменные для хранения состояния мыши
-// ОБЯЗАТЕЛЬНО volatile, так как они меняются в прерывании и читаются в основном цикле
-extern volatile int32_t mouse_x;
-extern volatile int32_t mouse_y;
-extern volatile uint8_t mouse_left_button;
-extern volatile uint8_t mouse_right_button;
+// init_mouse теперь возвращает bool, чтобы ядро знало, 
+// успешно ли прошла диагностика PS/2-контроллера.
+bool init_mouse(void);
+void mouse_callback(void);
 
-// Функция инициализации PS/2 мыши
-void init_mouse();
+// Универсальный обработчик координат для USB мышей
+void usb_mouse_update(int8_t dx, int8_t dy, uint8_t buttons);
 
 #endif
