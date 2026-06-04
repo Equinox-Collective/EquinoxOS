@@ -5,6 +5,7 @@
 #include "../system/mem/vmm.h"
 #include "../syslibc/stdio.h"
 #include "nyan_data.h"
+#include "equinox_logo.h"
 #include "boot_config.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -54,12 +55,14 @@ void nyan_init_geometry(void) {
     int nyan_w = NYAN_W * nyan_scale;
     int nyan_h = NYAN_H * nyan_scale;
 
-    // Центр зоны, обведённой пользователем на скрине (1281x794 -> доли экрана).
-    int cx = (int)((uint64_t)screen_width * 384 / 1281);
-    int cy = (int)((uint64_t)screen_height * 508 / 794);
-
+    // Nyan Cat теперь живёт ВНИЗУ по центру (логотип/надпись — сверху,
+    // прогресс-бар — по центру). Центрируем по горизонтали, прижимаем к низу.
+    int cx = (int)screen_width / 2;
     nyan_ox = cx - nyan_w / 2;
-    nyan_oy = cy - nyan_h / 2;
+    if (nyan_ox < 0) nyan_ox = 0;
+    nyan_oy = (int)screen_height - nyan_h - 24; // отступ от нижнего края
+    if (nyan_oy < (int)screen_height * 60 / 100)
+        nyan_oy = (int)screen_height * 60 / 100; // не залезаем выше нижней трети
 }
 
 // Рисуем один кадр с целочисленным масштабированием (nearest-neighbor).
@@ -75,6 +78,222 @@ void nyan_draw_frame(int frame) {
                     put_pixel_direct(px + dx, py + dy, color);
                 }
             }
+        }
+    }
+}
+
+// =========================================================================
+//   BOOT-ИНТРО: логотип EquinoxOS + надпись + "booting..." (только режим 0)
+//   Хореография: знак красиво появляется по центру сверху (pop + fade),
+//   отъезжает влево, справа от него проявляется надпись "EquinoxOS", ниже
+//   мелким шрифтом — "booting" с анимированными точками. Рисуется во
+//   фронтбуфер из PIT-таймера (как и Nyan), на чёрном фоне — поэтому fade
+//   делаем простым умножением яркости (без чтения фреймбуфера).
+// =========================================================================
+
+// Метка старта интро (тик, когда включилась boot-анимация) — задаётся в
+// eqstart_perform_tests одновременно с nyan_boot_active = 1.
+static volatile int      intro_start_set  = 0;
+static volatile uint32_t intro_start_tick = 0;
+
+// Раскладка (вычисляется один раз).
+static int intro_inited   = 0;
+static int band_cy        = 0;  // центр верхней полосы (логотип/надпись)
+static int logo_full      = 0;  // итоговый размер знака (квадрат), px
+static int logo_top_y     = 0;  // y верхнего края знака в финале
+static int logo_center_x  = 0;  // x знака, когда он по центру (фаза A)
+static int logo_left_x    = 0;  // x знака после отъезда влево
+static int title_x        = 0;
+static int title_y        = 0;
+static int title_scale    = 0;
+static int booting_x      = 0;
+static int booting_y      = 0;
+static int booting_scale  = 0;
+static int booting_maxw   = 0;
+
+// Тайминг фаз (мс от старта интро).
+#define INTRO_A_END   600   // pop + fade-in знака по центру
+#define INTRO_B_END   1200  // отъезд влево
+#define INTRO_C_START 1100  // проявление надписи "EquinoxOS"
+#define INTRO_C_END   1750
+#define INTRO_D_START 1750  // проявление "booting"
+#define INTRO_D_END   2250
+
+// ease-out (квадратичный), p и результат в диапазоне 0..1000.
+static int ease_out_1000(int p) {
+    if (p < 0) p = 0;
+    if (p > 1000) p = 1000;
+    return 1000 - (1000 - p) * (1000 - p) / 1000;
+}
+
+extern char font8x8_basic[128][8];
+
+// Ширина строки масштабированным шрифтом 8x8 (advance = 9*scale на символ).
+static int text_w_scaled(const char *s, int scale) {
+    int n = 0;
+    while (s[n]) n++;
+    if (n == 0) return 0;
+    return n * 9 * scale - scale;
+}
+
+// Рисуем строку масштабированным шрифтом 8x8 (каждый «пиксель» — блок
+// scale x scale). Цвет — сплошной (для fade передаём grayscale).
+static void draw_text_scaled(const char *s, int x, int y, int scale, uint32_t color) {
+    int cx = x;
+    for (const char *p = s; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c <= 127) {
+            for (int row = 0; row < 8; row++) {
+                uint8_t bits = (uint8_t)font8x8_basic[c][row];
+                for (int col = 0; col < 8; col++) {
+                    if (bits & (1 << col)) {
+                        draw_rect_direct(cx + col * scale, y + row * scale,
+                                         scale, scale, color);
+                    }
+                }
+            }
+        }
+        cx += 9 * scale;
+    }
+}
+
+// Блит знака в прямоугольник dw x dh с nearest-масштабированием и затуханием
+// (fade 0..256). Знак белый, фон чёрный -> цвет пикселя = grayscale(alpha).
+static void draw_logo_scaled(int dst_x, int dst_y, int dw, int dh, int fade) {
+    if (dw <= 0 || dh <= 0) return;
+    for (int yy = 0; yy < dh; yy++) {
+        int sy = yy * LOGO_H / dh;
+        for (int xx = 0; xx < dw; xx++) {
+            int sx = xx * LOGO_W / dw;
+            int a = equinox_logo_alpha[sy * LOGO_W + sx];
+            a = (a * fade) >> 8;
+            if (a <= 3) continue; // почти-прозрачное не трогаем (фон чёрный)
+            if (a > 255) a = 255;
+            uint32_t col = ((uint32_t)a << 16) | ((uint32_t)a << 8) | (uint32_t)a;
+            put_pixel_direct(dst_x + xx, dst_y + yy, col);
+        }
+    }
+}
+
+static void boot_intro_init(void) {
+    if (intro_inited) return;
+    intro_inited = 1;
+    if (nyan_scale == 0) nyan_init_geometry();
+
+    int W = (int)screen_width;
+    int H = (int)screen_height;
+
+    logo_full = H / 6;
+    if (logo_full < 72)  logo_full = 72;
+    if (logo_full > 150) logo_full = 150;
+
+    title_scale = (logo_full * 45 / 100) / 8;
+    if (title_scale < 2) title_scale = 2;
+    if (title_scale > 6) title_scale = 6;
+
+    int tw  = text_w_scaled("EquinoxOS", title_scale);
+    int gap = logo_full / 6;
+    if (gap < 8) gap = 8;
+
+    int group_w = logo_full + gap + tw;
+    int group_x = (W - group_w) / 2;
+    if (group_x < 8) group_x = 8;
+
+    band_cy       = H * 22 / 100;
+    logo_top_y    = band_cy - logo_full / 2;
+    logo_left_x   = group_x;
+    logo_center_x = (W - logo_full) / 2;
+
+    title_x = group_x + logo_full + gap;
+    title_y = band_cy - (8 * title_scale) / 2;
+
+    booting_scale = title_scale / 2;
+    if (booting_scale < 1) booting_scale = 1;
+    int bw = text_w_scaled("booting...", booting_scale);
+    booting_maxw = bw + 4;
+    int group_cx = group_x + group_w / 2;
+    booting_x = group_cx - bw / 2;
+    if (booting_x < 8) booting_x = 8;
+    booting_y = logo_top_y + logo_full + 12;
+}
+
+// Один «кадр» интро: e = мс от старта интро. Перерисовываем элементы только
+// при изменении их состояния (экономим время в IRQ); кадрируем до ~60 fps.
+static void boot_intro_frame(uint32_t e) {
+    boot_intro_init();
+
+    static uint32_t s_last_tick = 0;
+    if (s_last_tick != 0 && (tick - s_last_tick) < 16) return;
+    s_last_tick = tick;
+
+    int W = (int)screen_width;
+
+    // ---------- ЗНАК ----------
+    int lx, ly, lcur, lfade;
+    if (e < INTRO_A_END) {
+        int p = (int)(e * 1000 / INTRO_A_END);
+        int ez = ease_out_1000(p);
+        lcur  = logo_full * (700 + 300 * ez / 1000) / 1000; // 70% -> 100%
+        lfade = 256 * ez / 1000;
+        if (lfade > 256) lfade = 256;
+        lx = (W - lcur) / 2;
+        ly = band_cy - lcur / 2;
+    } else if (e < INTRO_B_END) {
+        int p = (int)((e - INTRO_A_END) * 1000 / (INTRO_B_END - INTRO_A_END));
+        int ez = ease_out_1000(p);
+        lcur  = logo_full;
+        lfade = 256;
+        lx = logo_center_x + (logo_left_x - logo_center_x) * ez / 1000;
+        ly = logo_top_y;
+    } else {
+        lcur  = logo_full;
+        lfade = 256;
+        lx = logo_left_x;
+        ly = logo_top_y;
+    }
+
+    static int s_lx = -1, s_ly = -1, s_lcur = 0, s_lfade = -1;
+    if (lx != s_lx || ly != s_ly || lcur != s_lcur || lfade != s_lfade) {
+        if (s_lcur > 0) // стираем прошлую позицию знака (фон чёрный)
+            draw_rect_direct(s_lx, s_ly, s_lcur, s_lcur, 0x000000);
+        draw_logo_scaled(lx, ly, lcur, lcur, lfade);
+        s_lx = lx; s_ly = ly; s_lcur = lcur; s_lfade = lfade;
+    }
+
+    // ---------- НАДПИСЬ "EquinoxOS" ----------
+    if (e >= INTRO_C_START) {
+        int tf = (int)((e - INTRO_C_START) * 256 / (INTRO_C_END - INTRO_C_START));
+        if (tf > 256) tf = 256;
+        int g = tf > 0 ? tf - 1 : 0;
+        if (g > 255) g = 255;
+        static int s_title_g = -1;
+        if (g != s_title_g) {
+            uint32_t col = ((uint32_t)g << 16) | ((uint32_t)g << 8) | (uint32_t)g;
+            draw_text_scaled("EquinoxOS", title_x, title_y, title_scale, col);
+            s_title_g = g;
+        }
+    }
+
+    // ---------- "booting" + анимированные точки ----------
+    if (e >= INTRO_D_START) {
+        int bf = (int)((e - INTRO_D_START) * 256 / (INTRO_D_END - INTRO_D_START));
+        if (bf > 256) bf = 256;
+        int g = bf > 0 ? bf - 1 : 0;
+        if (g > 255) g = 255;
+        int ndots = (e > INTRO_D_END) ? (int)(((e - INTRO_D_END) / 400) % 4) : 0;
+        static int s_boot_g = -1, s_boot_dots = -1;
+        if (g != s_boot_g || ndots != s_boot_dots) {
+            draw_rect_direct(booting_x, booting_y, booting_maxw,
+                             8 * booting_scale, 0x000000); // стираем строку
+            char buf[16];
+            int k = 0;
+            const char *bw = "booting";
+            while (bw[k]) { buf[k] = bw[k]; k++; }
+            for (int d = 0; d < ndots && k < 12; d++) buf[k++] = '.';
+            buf[k] = 0;
+            uint32_t col = ((uint32_t)g << 16) | ((uint32_t)g << 8) | (uint32_t)g;
+            draw_text_scaled(buf, booting_x, booting_y, booting_scale, col);
+            s_boot_g = g; s_boot_dots = ndots;
         }
     }
 }
@@ -205,6 +424,10 @@ void nyan_boot_anim_frame(void) {
         nyan_draw_frame(frame);
         nyan_last_drawn = frame;
     }
+    // Интро: знак EquinoxOS + надпись + "booting..." (сверху по центру).
+    if (intro_start_set) {
+        boot_intro_frame(tick - intro_start_tick);
+    }
 #else
     // Режим 1 (серый экран): Nyan статичный — фон и кадр уже нарисованы один
     // раз в eqstart_perform_tests(), перерисовывать каждый тик не нужно.
@@ -313,7 +536,10 @@ bool eqstart_perform_tests() {
   nyan_draw_frame(0);
   boot_progress_draw();
   // В режиме 0 гифку дальше крутит таймер (nyan_boot_anim_frame) — без
-  // блокирующего nyan_play(), чтобы не замедлять быструю загрузку.
+  // блокирующего nyan_play(), чтобы не замедлять быструю загрузку. Тогда же
+  // запускаем интро (логотип + надпись + booting...), привязав его к тику.
+  intro_start_tick = tick;
+  intro_start_set  = 1;
   nyan_boot_active = 1;
   return true;
 #else

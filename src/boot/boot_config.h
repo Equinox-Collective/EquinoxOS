@@ -72,9 +72,10 @@
  *   BOOT_BAR_CX_PCT — центр бара по горизонтали (0=левый край, 100=правый).
  *   BOOT_BAR_Y_PCT  — верх бара по вертикали     (0=верх,       100=низ).
  *   BOOT_BAR_W_PCT  — ширина бара.
- * По умолчанию бар поднят выше и сдвинут вправо, чтобы не лез под кота. */
-#define BOOT_BAR_CX_PCT 62
-#define BOOT_BAR_Y_PCT  24
-#define BOOT_BAR_W_PCT  34
+ * Новая раскладка: логотип/надпись — сверху, прогресс-бар — по центру,
+ * Nyan Cat — внизу. Поэтому бар по центру экрана. */
+#define BOOT_BAR_CX_PCT 50
+#define BOOT_BAR_Y_PCT  50
+#define BOOT_BAR_W_PCT  36
 
 #endif /* BOOT_CONFIG_H */
