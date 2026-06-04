@@ -18,7 +18,9 @@ int access(const char *pathname, int mode) {
     return 0; 
 }
 
-#define DEBUG_POSIX
+// #define DEBUG_POSIX  // вкл. для отладки: печатает строку на каждый fopen.
+// Выключено — печать на КАЖДЫЙ fopen шла в COM1 и заметно тормозила старт
+// (sysgui открывает window/terminal/monitor/paint/explorer/notepad подряд).
 
 FILE* fopen(const char* filename, const char* mode) {
 #ifdef DEBUG_POSIX

@@ -546,13 +546,15 @@ QEMU_BASE  := -m 512M -boot d \
               -netdev user,id=n0,hostfwd=tcp::2222-:22 \
               -device rtl8139,netdev=n0 \
 			  -device pci-ohci,id=ohci \
-              -device usb-mouse,bus=ohci.0 \
               -device usb-ehci,id=ehci \
               -device qemu-xhci,id=xhci \
               -device ac97,audiodev=snd0 -audiodev dsound,id=snd0
 # Перебор акселераторов: первый рабочий используется, иначе TCG.
 QEMU_ACCEL := -accel whpx,kernel-irqchip=off -accel kvm -accel hvf -accel tcg
 
+# Обычный запуск: БЕЗ USB-мыши, поэтому QEMU отдаёт указатель PS/2-мыши и
+# курсор в десктопе работает сразу (без `mouse_set` в мониторе). USB-мышь
+# смотри в run-usb.
 run:
 	$(QEMU) $(QEMU_BASE) $(QEMU_ACCEL)
 
