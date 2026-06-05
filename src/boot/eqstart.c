@@ -314,6 +314,7 @@ static void boot_intro_frame(uint32_t e) {
 #define SPIN_STEP      2    // шаг по углу при отрисовке дуги, градусы (мельче = глаже)
 #define SPIN_MAX_SWEEP 290  // максимальная длина дуги, градусы
 #define SPIN_MIN_ARC   16   // минимальная длина дуги (чтобы не схлопывалась в точку)
+#define SPIN_SPIN_MS   1600 // период одного полного оборота непрерывного вращения, мс
 
 static int spin_inited = 0;
 static int spin_cx = 0, spin_cy = 0, spin_R = 0, spin_thick = 0, spin_clear = 0;
@@ -377,8 +378,11 @@ static void boot_spinner_frame(uint32_t e) {
         start_grow = SPIN_MAX_SWEEP * spin_ease1000(t) / 1000;
     }
 
-    // Сдвиг за каждый цикл = SPIN_MAX_SWEEP -> непрерывная прокрутка без рывка.
-    int off  = (int)((cycles * (uint32_t)SPIN_MAX_SWEEP) % 360);
+    // Непрерывное вращение всей дуги (SPIN_SPIN_MS на оборот) + сдвиг за цикл
+    // (SPIN_MAX_SWEEP, для бесшовности) -> кольцо ВСЁ ВРЕМЯ едет по кругу, пока
+    // параллельно идёт рост/укорачивание; оба конца дуги всегда в движении.
+    int base = (int)(e * 360 / (SPIN_SPIN_MS ? SPIN_SPIN_MS : 1600));
+    int off  = (int)(((cycles * (uint32_t)SPIN_MAX_SWEEP) + (uint32_t)base) % 360);
     int a0   = (off + start_grow) % 360;            // хвост (начало дуги)
     int span = (end_grow - start_grow) + SPIN_MIN_ARC;  // длина дуги, >= SPIN_MIN_ARC
 
