@@ -300,15 +300,20 @@ static void boot_intro_frame(uint32_t e) {
 }
 
 // =========================================================================
-//   КРУГОВОЙ СПИННЕР В СТИЛЕ WINDOWS 11
-//   Кластер из нескольких точек («комета») вращается по окружности; голова
-//   яркая, хвост затухает. Целочисленная тригонометрия (boot_sin.h), рисуем
-//   во фронтбуфер из таймера. Перерисовываем не чаще ~30fps.
+//   КРУГОВОЙ СПИННЕР В СТИЛЕ WINDOWS 11 (Fluent ProgressRing)
+//   Тонкая ОДИНОЧНАЯ дуга (со скруглёнными концами) на чёрном фоне: она
+//   растёт и укорачивается, плавно прокручиваясь по кругу — ровно как
+//   «крутилка» при загрузке Windows 11 (НЕ точки и НЕ сплошное кольцо).
+//   Модель анимации как в Material/Fluent: за один цикл сначала вперёд бежит
+//   «голова» (дуга растёт), потом её догоняет «хвост» (дуга укорачивается);
+//   суммарный сдвиг за цикл = SPIN_MAX_SWEEP, поэтому движение непрерывное,
+//   без рывка на стыке циклов. Целочисленная тригонометрия (boot_sin.h),
+//   рисуем во фронтбуфер из таймера, ~60fps.
 // =========================================================================
 #if BOOT_SHOW_SPINNER
-#define SPIN_STEP  2     // шаг по углу при отрисовке кольца, градусы (мельче = глаже)
-#define SPIN_TRAIL 300   // длина яркого «хвоста» по дуге, градусы
-#define SPIN_FLOOR 40    // базовая яркость кольца (чтобы оно было сплошным)
+#define SPIN_STEP      2    // шаг по углу при отрисовке дуги, градусы (мельче = глаже)
+#define SPIN_MAX_SWEEP 290  // максимальная длина дуги, градусы
+#define SPIN_MIN_ARC   16   // минимальная длина дуги (чтобы не схлопывалась в точку)
 
 static int spin_inited = 0;
 static int spin_cx = 0, spin_cy = 0, spin_R = 0, spin_thick = 0, spin_clear = 0;
@@ -321,8 +326,8 @@ static void boot_spinner_init(void) {
     spin_R = (int)screen_height / 28;
     if (spin_R < 16) spin_R = 16;
     if (spin_R > 30) spin_R = 30;
-    spin_thick = spin_R / 5;          // толщина линии кольца
-    if (spin_thick < 3) spin_thick = 3;
+    spin_thick = spin_R / 9;          // половина толщины линии (тонкая, как на Win11)
+    if (spin_thick < 2) spin_thick = 2;
     spin_clear = spin_R + spin_thick + 2;
 }
 
@@ -334,32 +339,54 @@ static void draw_disk(int cx, int cy, int r, uint32_t col) {
                 put_pixel_direct(cx + dx, cy + dy, col);
 }
 
-// Сплошное кольцо с вращающимся ярким сектором (стиль Windows 11): по всей
-// окружности рисуем перекрывающиеся точки -> непрерывная линия; яркость каждой
-// точки = базовый уровень + затухающий «хвост» позади вращающейся «головы».
+// Плавная функция «ease-in-out» через косинус: x:0..1000 -> 0..1000.
+// (1 - cos(pi*x/1000)) / 2, считаем целочисленно через таблицу boot_cos1000.
+static int spin_ease1000(int x) {
+    if (x < 0) x = 0;
+    if (x > 1000) x = 1000;
+    return (1000 - boot_cos1000(180 * x / 1000)) / 2;
+}
+
+// Тонкая одиночная дуга, которая растёт/укорачивается и прокручивается —
+// «крутилка» Windows 11. Рисуем только саму дугу (фон чёрный), концы скруглены
+// засчёт перекрывающихся дисков. Длина дуги = SPIN_MIN_ARC..(MAX_SWEEP+MIN_ARC).
 static void boot_spinner_frame(uint32_t e) {
     boot_spinner_init();
 
     static uint32_t s_last = 0;
-    if (s_last != 0 && (tick - s_last) < 30) return;
+    if (s_last != 0 && (tick - s_last) < 16) return;   // ~60fps
     s_last = tick;
 
     // Стираем прошлую зону спиннера (фон чёрный).
     draw_rect_direct(spin_cx - spin_clear, spin_cy - spin_clear,
                      spin_clear * 2, spin_clear * 2, 0x000000);
 
-    int head = (int)((e * 360 / BOOT_SPINNER_ROT_MS) % 360);
-    for (int deg = 0; deg < 360; deg += SPIN_STEP) {
-        int d = (head - deg + 360) % 360;   // расстояние по дуге позади головы
-        int b;
-        if (d <= SPIN_TRAIL)
-            b = SPIN_FLOOR + (255 - SPIN_FLOOR) * (SPIN_TRAIL - d) / SPIN_TRAIL;
-        else
-            b = SPIN_FLOOR;
+    // Период одного цикла «рост+укорачивание» = BOOT_SPINNER_ROT_MS.
+    uint32_t period = BOOT_SPINNER_ROT_MS ? BOOT_SPINNER_ROT_MS : 1200;
+    uint32_t cycles = e / period;
+    int p = (int)((e % period) * 1000 / period);   // фаза цикла 0..999
+
+    int start_grow, end_grow;
+    if (p < 500) {
+        int t = p * 2;                                  // 0..1000: голова бежит вперёд
+        start_grow = 0;
+        end_grow   = SPIN_MAX_SWEEP * spin_ease1000(t) / 1000;
+    } else {
+        int t = (p - 500) * 2;                          // 0..1000: хвост догоняет
+        end_grow   = SPIN_MAX_SWEEP;
+        start_grow = SPIN_MAX_SWEEP * spin_ease1000(t) / 1000;
+    }
+
+    // Сдвиг за каждый цикл = SPIN_MAX_SWEEP -> непрерывная прокрутка без рывка.
+    int off  = (int)((cycles * (uint32_t)SPIN_MAX_SWEEP) % 360);
+    int a0   = (off + start_grow) % 360;            // хвост (начало дуги)
+    int span = (end_grow - start_grow) + SPIN_MIN_ARC;  // длина дуги, >= SPIN_MIN_ARC
+
+    for (int s = 0; s <= span; s += SPIN_STEP) {
+        int deg = (a0 + s) % 360;
         int x = spin_cx + spin_R * boot_cos1000(deg) / 1000;
         int y = spin_cy + spin_R * boot_sin1000_d(deg) / 1000;
-        uint32_t col = ((uint32_t)b << 16) | ((uint32_t)b << 8) | (uint32_t)b;
-        draw_disk(x, y, spin_thick, col);
+        draw_disk(x, y, spin_thick, 0xFFFFFF);
     }
 }
 #endif /* BOOT_SHOW_SPINNER */
