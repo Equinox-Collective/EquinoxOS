@@ -12,11 +12,41 @@ _G.ctrl_pressed = false
 _G.alt_pressed = false
 
 local Window = dofile("res/sysgui/window.lua")
-local draw_terminal = dofile("res/sysgui/terminal.lua")
-local draw_monitor = dofile("res/sysgui/monitor.lua")
-local draw_paint = dofile("res/sysgui/paint.lua")
+
+-- ЛЕНИВАЯ ЗАГРУЗКА. Парсинг каждого lua-модуля стоит ~0.6-0.9с (узкое место
+-- старта). Тяжёлые приложения (terminal/monitor/paint/notepad) не нужны, чтобы
+-- показать рабочий стол — грузим их при ПЕРВОМ открытии окна (окна создаются
+-- неактивными, draw_cb вызывается только когда окно активно). window.lua и
+-- explorer.lua нужны на старте (explorer регистрирует _G.refresh_explorer).
+local function _make_lazy(path)
+    local mod = nil
+    return function()
+        if mod == nil then mod = dofile(path) end
+        return mod
+    end
+end
+-- Единая обёртка: модуль может вернуть либо таблицу {draw, handle_key}
+-- (terminal/notepad/monitor), либо просто функцию рисования (paint). Повторяет
+-- логику Window.new, но загрузка модуля откладывается до первого вызова.
+local function lazy_win(path)
+    local get = _make_lazy(path)
+    local draw_cb = function(...)
+        local m = get()
+        if type(m) == "table" then return m.draw(...) end
+        return m(...)
+    end
+    local key_cb = function(...)
+        local m = get()
+        if type(m) == "table" and m.handle_key then return m.handle_key(...) end
+    end
+    return draw_cb, key_cb
+end
+
+local draw_terminal, key_terminal = lazy_win("res/sysgui/terminal.lua")
+local draw_notepad, key_notepad = lazy_win("res/sysgui/notepad.lua")
+local draw_monitor, key_monitor = lazy_win("res/sysgui/monitor.lua")
+local draw_paint, key_paint = lazy_win("res/sysgui/paint.lua")
 local draw_explorer = dofile("res/sysgui/explorer.lua")
-local draw_notepad = dofile("res/sysgui/notepad.lua")
 
 local app_container = Window.new("External Application", 250, 150, 640, 400, nil)
 app_container.is_app_container = true
@@ -118,11 +148,11 @@ local desktop_icons = {
     { label = "Doom",     icon_col = 0xE06C75, text = "",   exec = "bin/doom.elf -iwad res/doom1.wad", pixels = doom_pixels },
 }
 
-table.insert(windows, Window.new("Equinox Terminal", 50, 80, 520, 340, draw_terminal.draw, draw_terminal.handle_key))
-table.insert(windows, Window.new("System Monitor", 620, 80, 340, 220, draw_monitor))
-table.insert(windows, Window.new("Vector Paint Brush", 120, 200, 440, 320, draw_paint))
+table.insert(windows, Window.new("Equinox Terminal", 50, 80, 520, 340, draw_terminal, key_terminal))
+table.insert(windows, Window.new("System Monitor", 620, 80, 340, 220, draw_monitor, key_monitor))
+table.insert(windows, Window.new("Vector Paint Brush", 120, 200, 440, 320, draw_paint, key_paint))
 table.insert(windows, Window.new("VFS File Explorer", 400, 150, 360, 280, draw_explorer))
-table.insert(windows, Window.new("Notepad Text Editor", 100, 100, 420, 280, draw_notepad, draw_notepad.handle_key))
+table.insert(windows, Window.new("Notepad Text Editor", 100, 100, 420, 280, draw_notepad, key_notepad))
 
 -- Все окна остаются неактивными при запуске
 for _, win in ipairs(windows) do win.active = false end

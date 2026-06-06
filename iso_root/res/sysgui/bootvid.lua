@@ -1,5 +1,32 @@
 local bootvid = {}
 
+-- ============================================================================
+--  НАСТРОЙКА ЗВУКА ПРИ СТАРТЕ СИСТЕМЫ  (boot-конфиг)
+--  ---------------------------------------------------------------------------
+--  Хочешь выключить музыку при загрузке ОС — поставь здесь false и пересобери
+--  (make all). true = играть звук запуска, false = тишина.
+--
+--  Это ГЛОБАЛЬНАЯ переменная: её читает код на C (api_preload_boot_sound в
+--  api_gui.c) до запуска рабочего стола. Звук грузится с диска заранее (под
+--  ещё крутящимся сплэшем) и стартует, как только готова звуковая карта AC'97.
+-- ============================================================================
+BOOT_SOUND_ENABLED = true
+
+-- === БЫСТРАЯ ЗАГРУЗКА ===
+-- Раньше сплэш искусственно держался ~6.5 c (1.2 c появление + 4.5 c удержание
+-- "под длину звука" + 0.8 c растворение) и СИНХРОННО грузил WAV с диска через
+-- ATA PIO, тормозя первый кадр рабочего стола.
+-- FAST_BOOT: короткий брендинг и без блокировки на звуке.
+-- ЗВУК ЗАПУСКА проигрывается из C (api_preload_boot_sound + api_try_boot_sound
+-- в main.c) ровно один раз. Поэтому Lua-проигрывание PLAY_BOOT_SOUND здесь
+-- ВЫКЛЮЧЕНО, чтобы звук не запускался дважды. Пользовательский переключатель
+-- музыки — это глобальная BOOT_SOUND_ENABLED выше.
+local FAST_BOOT       = true
+local PLAY_BOOT_SOUND = false
+local FADE_IN_MS  = FAST_BOOT and 250  or 1200
+local HOLD_MS     = FAST_BOOT and 150  or 4500
+local FADE_OUT_MS = FAST_BOOT and 250  or 800
+
 local alpha_anim = nil
 local fade_out_anim = nil
 local hold_timer = 0
@@ -8,7 +35,7 @@ local sound_started = false
 
 function bootvid.init()
     if type(animCreate) == "function" then
-        alpha_anim = animCreate(1200, 3) -- Плавное появление (1.2 сек)
+        alpha_anim = animCreate(FADE_IN_MS, 3) -- Плавное появление
         if type(animTo) == "function" then
             animTo(alpha_anim, 255)
         end
@@ -26,8 +53,9 @@ function bootvid.draw(dt)
         drawRect(0, 0, sw, sh, 0x07080B)
     end
     
-    -- Запускаем звук один раз на старте
-    if not sound_started then
+    -- Запускаем звук один раз на старте (по умолчанию выключено для скорости:
+    -- загрузка 846КБ WAV с диска блокирует первый кадр).
+    if PLAY_BOOT_SOUND and not sound_started then
         if type(playSound) == "function" then
             playSound("res/sysgui/BOOTSOUND.wav")
         end
@@ -73,15 +101,14 @@ function bootvid.draw(dt)
     if type(drawText) == "function" then
         drawText("E Q U I N O X   O S", lx - 80, ly, col_text1)
         drawText("loading modular core...", lx - 90, ly + 30, col_text2)
-        drawText("DEBUG ALPHA: " .. tostring(alpha), 20, 20, 0xFFFFFF)
     end
     
     -- Фаза удержания и растворения
     if alpha >= 254 then
         hold_timer = hold_timer + dt
-        if hold_timer > 4500 then -- Удерживаем текст под длину звука
+        if hold_timer > HOLD_MS then -- Длительность удержания текста
             if not fade_out_anim and type(animCreate) == "function" then
-                fade_out_anim = animCreate(800, 3)
+                fade_out_anim = animCreate(FADE_OUT_MS, 3)
                 if type(animTo) == "function" then
                     animTo(fade_out_anim, 0)
                 end
