@@ -1,1 +1,0 @@
-Future codecs for system to understand for such like MP3, JPG, PNG, and go on.
