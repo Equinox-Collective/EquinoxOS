@@ -1,10 +1,10 @@
 #include <eid.h>
 #include <equos.h>
+#include <codec_wav.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
 
 #define WIN_W 400
 #define WIN_H 220
@@ -20,28 +20,7 @@
 static eid_ctx_t gui;
 static uint32_t fb[WIN_W * WIN_H];
 
-// Храним данные WAV
-#pragma pack(push, 1)
-typedef struct {
-  char id[4];
-  uint32_t size;
-  char wave[4];
-} WavHeader;
-typedef struct {
-  char id[4];
-  uint32_t size;
-} ChunkHeader;
-typedef struct {
-  uint16_t fmt;
-  uint16_t ch;
-  uint32_t rate;
-  uint32_t brate;
-  uint16_t align;
-  uint16_t bps;
-} FmtChunk;
-#pragma pack(pop)
-
-void draw_niplay_ui(const char *name, uint32_t processed, uint32_t total) {
+void draw_niplay_ui(const char *name, uint64_t processed_bytes, uint64_t total_bytes) {
   eid_begin(&gui, fb, WIN_W, WIN_H);
   gui.mx -= WIN_X;
   gui.my -= WIN_Y;
@@ -73,28 +52,25 @@ void draw_niplay_ui(const char *name, uint32_t processed, uint32_t total) {
   int bar_w = WIN_W - 40;
   int bar_h = 6;
 
-  eid_draw_rect(fb, WIN_W, WIN_H, bar_x, bar_y, bar_w, bar_h,
-                0x333333); // Фон бара
-  if (total > 0) {
-    int progress = (int)((uint64_t)processed * bar_w / total);
+  eid_draw_rect(fb, WIN_W, WIN_H, bar_x, bar_y, bar_w, bar_h, 0x333333); // Фон бара
+  if (total_bytes > 0) {
+    int progress = (int)((uint64_t)processed_bytes * bar_w / total_bytes);
+    if (progress > bar_w) progress = bar_w;
     eid_draw_rect(fb, WIN_W, WIN_H, bar_x, bar_y, progress, bar_h, CLR_ACCENT);
     // "Свечение" на конце бара
-    eid_draw_rect(fb, WIN_W, WIN_H, bar_x + progress - 2, bar_y - 2, 4, 10,
-                  0xFFFFFF);
+    eid_draw_rect(fb, WIN_W, WIN_H, bar_x + progress - 2, bar_y - 2, 4, 10, 0xFFFFFF);
   }
 
   // 5. Визуализатор (Спектрограмма)
   for (int i = 0; i < 20; i++) {
-    int v_h = rand() % 40 + 5; // Пока рандом, позже прикрутим реальный FFT
-    eid_draw_rect(fb, WIN_W, WIN_H, 20 + i * 18, 180 - v_h, 12, v_h,
-                  CLR_ACCENT);
-    eid_draw_rect(fb, WIN_W, WIN_H, 20 + i * 18, 180 - v_h - 4, 12, 2,
-                  0x555555); // "Пики"
+    int v_h = rand() % 40 + 5;
+    eid_draw_rect(fb, WIN_W, WIN_H, 20 + i * 18, 180 - v_h, 12, v_h, CLR_ACCENT);
+    eid_draw_rect(fb, WIN_W, WIN_H, 20 + i * 18, 180 - v_h - 4, 12, 2, 0x555555); // "Пики"
   }
 
-  // 6. Таймер
+  // 6. Таймер (для вывода 16-бит стерео 44100 Гц: 1 секунда = 176400 байт)
   char time_str[16];
-  uint32_t sec = processed / 176400; // Примерно для 44100/16/stereo
+  uint32_t sec = processed_bytes / 176400; 
   sprintf(time_str, "%02d:%02d", sec / 60, sec % 60);
   eid_draw_text(fb, WIN_W, WIN_H, WIN_W - 70, 125, time_str, CLR_DIM);
 
@@ -111,52 +87,55 @@ int main(int argc, char **argv) {
   uint8_t *file_data = (uint8_t *)_syscall(SYS_READ_FILE, (uintptr_t)filename,
                                            (uintptr_t)&file_size, 0, 0, 0);
 
-  if (!file_data)
+  if (!file_data) {
+    _syscall(SYS_PRINT, (uint64_t)"[NiPlay] Failed to read file!\n", 0, 0, 0, 0);
     return 1;
-
-  // Парсинг WAV
-  FmtChunk fmt;
-  uint8_t *audio_ptr = NULL;
-  uint32_t audio_len = 0;
-  uint32_t offset = 12;
-
-  while (offset < file_size - 8) {
-    ChunkHeader *ch = (ChunkHeader *)(file_data + offset);
-    if (strncmp(ch->id, "fmt ", 4) == 0)
-      memcpy(&fmt, file_data + offset + 8, 16);
-    else if (strncmp(ch->id, "data", 4) == 0) {
-      audio_len = ch->size;
-      audio_ptr = file_data + offset + 8;
-      break;
-    }
-    offset += 8 + ch->size;
   }
 
-  if (!audio_ptr)
+  // Инициализируем наш новый кодек из SDK
+  wav_decoder_t decoder;
+  if (wav_init(&decoder, file_data, file_size) < 0) {
+    _syscall(SYS_PRINT, (uint64_t)"[NiPlay] Unsupported WAV format!\n", 0, 0, 0, 0);
     return 1;
+  }
 
-  _syscall(SYS_AUDIO_SET_RATE, fmt.rate, 0, 0, 0, 0);
+  // Жестко задаем аппаратуре частоту 44100 (кодек сам сделает ресемплинг любой частоты под нее!)
+  uint32_t target_rate = 44100;
+  _syscall(SYS_AUDIO_SET_RATE, target_rate, 0, 0, 0, 0);
 
-  uint32_t processed = 0;
-  uint32_t chunk_size = 8192;
+  // Локальный потоковый буфер декодирования (16-бит стерео, 2048 сэмплов = 8192 байта)
+  #define CHUNK_SAMPLES 2048
+  int16_t play_buffer[CHUNK_SAMPLES * 2];
+  
+  uint64_t total_played_bytes = 0;
+  // Считаем эквивалентный размер файла в целевом формате для прогресс-бара
+  double rate_ratio = (double)target_rate / (double)decoder.sample_rate;
+  size_t src_frame_size = decoder.channels * (decoder.bits_per_sample / 8);
+  size_t total_src_frames = decoder.data_size / src_frame_size;
+  uint64_t target_total_bytes = (uint64_t)(total_src_frames * rate_ratio) * 4; // 4 байта на стерео сэмпл 16-бит
+
   int ui_counter = 0;
 
-  while (processed < audio_len) {
-    uint32_t to_play = (audio_len - processed > chunk_size)
-                           ? chunk_size
-                           : (audio_len - processed);
+  while (1) {
+    // Декодируем и ресемплируем очередную порцию
+    size_t decoded_samples = wav_decode(&decoder, play_buffer, CHUNK_SAMPLES, target_rate);
+    if (decoded_samples == 0) {
+      break; // Доиграли до конца
+    }
 
-    _syscall(SYS_AUDIO_PLAY, (uintptr_t)(audio_ptr + processed),
-             (uint64_t)to_play, 0, 0, 0);
-    processed += to_play;
+    uint32_t bytes_to_play = decoded_samples * 4; // 16-бит стерео = 4 байта на сэмпл
 
-    // Обновляем UI каждые 8 чанков (~15 FPS), чтобы не тормозить звук
+    // Отправляем на воспроизведение
+    _syscall(SYS_AUDIO_PLAY, (uintptr_t)play_buffer, (uint64_t)bytes_to_play, 0, 0, 0);
+    total_played_bytes += bytes_to_play;
+
+    // Обновляем GUI каждые 8 чанков (~15 FPS)
     if (ui_counter++ % 8 == 0) {
-      draw_niplay_ui(filename, processed, audio_len);
+      draw_niplay_ui(filename, total_played_bytes, target_total_bytes);
     }
 
     if ((uint8_t)_syscall(SYS_GET_SCANCODE, 0, 0, 0, 0, 0) == 0x01)
-      break;
+      break; // ESC для выхода
     sys_yield();
   }
 
