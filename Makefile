@@ -274,7 +274,7 @@ doom.elf: setup $(SDK_OBJS) $(DOOM_OBJS)
 # --- APPS BUILD RULES --------------------------------------------------------
 APP_SRCS = $(wildcard app/*.c)
 APP_OBJS = $(patsubst app/%.c,app/%.o,$(APP_SRCS))
-APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_ROOT)/bin/htmlview.elf $(ISO_ROOT)/bin/niplay.elf $(ISO_ROOT)/bin/widget_demo.elf $(ISO_ROOT)/bin/ipc_test.elf $(ISO_ROOT)/bin/randtest.elf $(ISO_ROOT)/bin/socktest.elf
+APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_ROOT)/bin/htmlview.elf $(ISO_ROOT)/bin/niplay.elf $(ISO_ROOT)/bin/widget_demo.elf $(ISO_ROOT)/bin/ipc_test.elf $(ISO_ROOT)/bin/randtest.elf $(ISO_ROOT)/bin/socktest.elf 
 
 # Apps that link against libbearssl.a (phase 3b+). These get their own
 # explicit rules below because they need (a) BearSSL public headers in the
@@ -301,7 +301,7 @@ $(KERNEL_OBJS) $(SDK_OBJS) $(APP_OBJS) $(DOOM_OBJS): | setup
 
 # BearSSL / TLS / QuickJS deps are dynamic (see SKIP= switch above) so a
 # `make SKIP=bearssl` minimal build drops them cleanly.
-apps: setup $(SDK_OBJS) $(BEARSSL_DEP) $(QUICKJS_DEP) $(APP_ELFS_SIMPLE) $(TLS_APPS_DEP) $(QJS_APPS_DEP) sysgui_app
+apps: setup $(SDK_OBJS) $(BEARSSL_DEP) $(QUICKJS_DEP) $(SDL_LIB) $(APP_ELFS_SIMPLE) $(TLS_APPS_DEP) $(QJS_APPS_DEP) sysgui_app
 
 $(ISO_ROOT)/bin/%.elf: app/%.o $(SDK_OBJS)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< -o $@
@@ -324,6 +324,12 @@ $(ISO_ROOT)/bin/tlstest.elf: app/tlstest.o $(SDK_OBJS) $(BEARSSL_LIB)
 
 app/catest.o: app/catest.c third_party/ca_bundle/ca_bundle.h
 	$(CC) $(USER_CFLAGS) -I./third_party/bearssl/inc -c $< -o $@
+
+app/sdltest.o: app/sdltest.c
+	$(CC) $(USER_CFLAGS) -I./third_party/sdl2/include -c $< -o $@
+
+$(ISO_ROOT)/bin/sdltest.elf: app/sdltest.o $(SDK_OBJS) $(SDL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(SDL_LIB) -o $@
 
 $(ISO_ROOT)/bin/catest.elf: app/catest.o $(SDK_OBJS) $(BEARSSL_LIB)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(BEARSSL_LIB) -o $@
@@ -430,6 +436,43 @@ sdk/lib_qjs/qjs_fetch.o: sdk/lib_qjs/qjs_fetch.c sdk/include/qjs_fetch.h sdk/inc
 app/jsfetchtest.o: app/jsfetchtest.c sdk/include/qjs_helpers.h sdk/include/qjs_fetch.h
 	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
 
+# --- SDL2 (vendored under third_party/sdl2) -----------------------------------
+SDL_DIR := third_party/sdl2
+SDL_INC := -I./$(SDL_DIR)
+SDL_SRCS := \
+    $(SDL_DIR)/SDL.c \
+    $(SDL_DIR)/SDL_assert.c \
+    $(SDL_DIR)/SDL_dataqueue.c \
+    $(SDL_DIR)/SDL_error.c \
+    $(SDL_DIR)/SDL_guid.c \
+    $(SDL_DIR)/SDL_hints.c \
+    $(SDL_DIR)/SDL_log.c \
+    $(SDL_DIR)/SDL_utils.c \
+    $(SDL_DIR)/file/SDL_rwops.c \
+    $(wildcard $(SDL_DIR)/stdlib/*.c) \
+    $(wildcard $(SDL_DIR)/cpuinfo/*.c) \
+    $(wildcard $(SDL_DIR)/events/*.c) \
+    $(wildcard $(SDL_DIR)/video/*.c) \
+    $(wildcard $(SDL_DIR)/video/equinox/*.c) \
+    $(SDL_DIR)/render/SDL_render.c \
+    $(SDL_DIR)/render/SDL_yuv_sw.c \
+    $(wildcard $(SDL_DIR)/render/software/*.c) \
+    $(SDL_DIR)/timer/SDL_timer.c \
+    $(SDL_DIR)/timer/dummy/SDL_systimer.c
+
+SDL_OBJS    := $(SDL_SRCS:.c=.o)
+SDL_LIB     := $(SDL_DIR)/libSDL2.a
+SDL_CFLAGS  := $(USER_CFLAGS) $(SDL_INC) -Os
+
+$(SDL_DIR)/%.o: $(SDL_DIR)/%.c
+	$(CC) $(SDL_CFLAGS) -c $< -o $@
+
+$(SDL_LIB): $(SDL_OBJS)
+	@echo === Building libSDL2.a ===
+	$(AR) -rcs $@ $(SDL_OBJS)
+
+libsdl2: $(SDL_LIB)
+
 $(ISO_ROOT)/bin/jsfetchtest.elf: app/jsfetchtest.o $(QJS_HELPERS_OBJ) $(QJS_FETCH_OBJ) $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(QUICKJS_LIB) $(BEARSSL_LIB)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(QJS_HELPERS_OBJ) $(QJS_FETCH_OBJ) $(HTTP_CLIENT_OBJ) $(QUICKJS_LIB) $(BEARSSL_LIB) -o $@
 
@@ -491,6 +534,9 @@ clean:
 	@if exist app\sysgui\lua\*.d del /q app\sysgui\lua\*.d
 	@if exist kernel.elf del /q kernel.elf
 	@if exist equos.iso del /q equos.iso
+	@if exist third_party\sdl2\*.o del /q /s third_party\sdl2\*.o
+	@if exist third_party\sdl2\*.d del /q /s third_party\sdl2\*.d
+	@if exist third_party\sdl2\libSDL2.a del /q third_party\sdl2\libSDL2.a
 	@if exist app\sysgui\sysgui.elf del /q app\sysgui\sysgui.elf
 	@for /R third_party\bearssl %%f in (*.o *.d) do @if exist "%%f" del /q "%%f"
 	@if exist third_party\bearssl\libbearssl.a del /q third_party\bearssl\libbearssl.a
@@ -504,6 +550,8 @@ clean:
 	@rm -f app/*.o app/*.d
 	@rm -f kernel.elf equos.iso
 	@rm -f app/sysgui/sysgui.elf
+	@find third_party/sdl2 -name '*.o' -delete -o -name '*.d' -delete
+	@rm -f third_party/sdl2/libSDL2.a
 	@find third_party/bearssl -name '*.o' -delete -o -name '*.d' -delete
 	@rm -f third_party/bearssl/libbearssl.a
 endif
