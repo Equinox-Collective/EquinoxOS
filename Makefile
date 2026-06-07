@@ -274,7 +274,7 @@ doom.elf: setup $(SDK_OBJS) $(DOOM_OBJS)
 # --- APPS BUILD RULES --------------------------------------------------------
 APP_SRCS = $(wildcard app/*.c)
 APP_OBJS = $(patsubst app/%.c,app/%.o,$(APP_SRCS))
-APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_ROOT)/bin/htmlview.elf $(ISO_ROOT)/bin/niplay.elf $(ISO_ROOT)/bin/widget_demo.elf $(ISO_ROOT)/bin/ipc_test.elf $(ISO_ROOT)/bin/randtest.elf $(ISO_ROOT)/bin/socktest.elf 
+APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_ROOT)/bin/htmlview.elf $(ISO_ROOT)/bin/niplay.elf $(ISO_ROOT)/bin/widget_demo.elf $(ISO_ROOT)/bin/ipc_test.elf $(ISO_ROOT)/bin/randtest.elf $(ISO_ROOT)/bin/socktest.elf $(ISO_ROOT)/bin/sdltest.elf
 
 # Apps that link against libbearssl.a (phase 3b+). These get their own
 # explicit rules below because they need (a) BearSSL public headers in the
@@ -326,7 +326,7 @@ app/catest.o: app/catest.c third_party/ca_bundle/ca_bundle.h
 	$(CC) $(USER_CFLAGS) -I./third_party/bearssl/inc -c $< -o $@
 
 app/sdltest.o: app/sdltest.c
-	$(CC) $(USER_CFLAGS) -I./third_party/sdl2/include -c $< -o $@
+	$(CC) $(USER_CFLAGS) -I./third_party/sdl2 -c $< -o $@
 
 $(ISO_ROOT)/bin/sdltest.elf: app/sdltest.o $(SDK_OBJS) $(SDL_LIB)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(SDL_LIB) -o $@
