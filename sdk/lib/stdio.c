@@ -3,6 +3,7 @@
 #include "../include/equos.h"
 #include <stdarg.h>
 #include <stdlib.h>
+#include <stdarg.h>
 
 static FILE _stdin = {0};
 static FILE _stdout = {0};
@@ -160,4 +161,154 @@ int vfprintf(FILE* stream, const char* format, va_list ap) {
         fwrite(buffer, 1, len, stream);
     }
     return len;
+}
+
+int vsscanf(const char *str, const char *format, va_list ap) {
+    int num_matched = 0;
+    const char *p = format;
+    const char *s = str;
+
+    while (*p) {
+        /* Пропускаем пробельные символы */
+        if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {
+            while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') {
+                s++;
+            }
+            p++;
+            continue;
+        }
+
+        if (*p != '%') {
+            if (*s != *p) {
+                break;
+            }
+            s++;
+            p++;
+            continue;
+        }
+
+        p++; /* Пропускаем '%' */
+
+        int suppress = 0;
+        if (*p == '*') {
+            suppress = 1;
+            p++;
+        }
+
+        int width = 0;
+        while (*p >= '0' && *p <= '9') {
+            width = width * 10 + (*p - '0');
+            p++;
+        }
+
+        /* Проверяем модификатор длины 'l' */
+        int is_long = 0;
+        if (*p == 'l') {
+            is_long = 1;
+            p++;
+        }
+
+        char spec = *p++;
+        if (spec == '\0') {
+            break;
+        }
+
+        if (spec == '%') {
+            if (*s != '%') break;
+            s++;
+            continue;
+        }
+
+        /* Пропускаем ведущие пробелы для всех спецификаторов, кроме %c */
+        if (spec != 'c') {
+            while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') {
+                s++;
+            }
+        }
+
+        if (*s == '\0') {
+            break;
+        }
+
+        if (spec == 'c') {
+            int len = width ? width : 1;
+            if (!suppress) {
+                char *dst = va_arg(ap, char *);
+                for (int i = 0; i < len && *s; i++) {
+                    *dst++ = *s++;
+                }
+            } else {
+                s += len;
+            }
+            if (!suppress) num_matched++;
+        } else if (spec == 's') {
+            if (!suppress) {
+                char *dst = va_arg(ap, char *);
+                int count = 0;
+                while (*s && *s != ' ' && *s != '\t' && *s != '\n' && *s != '\r') {
+                    if (width && count >= width) break;
+                    *dst++ = *s++;
+                    count++;
+                }
+                *dst = '\0';
+            } else {
+                int count = 0;
+                while (*s && *s != ' ' && *s != '\t' && *s != '\n' && *s != '\r') {
+                    if (width && count >= width) break;
+                    s++;
+                    count++;
+                }
+            }
+            if (!suppress) num_matched++;
+        } else if (spec == 'd' || spec == 'i' || spec == 'u' || spec == 'x' || spec == 'X') {
+            int base = 10;
+            if (spec == 'x' || spec == 'X') {
+                base = 16;
+            } else if (spec == 'i') {
+                base = 0; /* Автоопределение */
+            }
+
+            char *end;
+            if (spec == 'd' || spec == 'i') {
+                long val = strtol(s, &end, base);
+                if (end == s) {
+                    break;
+                }
+                s = end;
+                if (!suppress) {
+                    if (is_long) {
+                        *va_arg(ap, long *) = val;
+                    } else {
+                        *va_arg(ap, int *) = (int)val;
+                    }
+                }
+            } else {
+                unsigned long val = strtoul(s, &end, base);
+                if (end == s) {
+                    break;
+                }
+                s = end;
+                if (!suppress) {
+                    if (is_long) {
+                        *va_arg(ap, unsigned long *) = val;
+                    } else {
+                        *va_arg(ap, unsigned int *) = (unsigned int)val;
+                    }
+                }
+            }
+            if (!suppress) num_matched++;
+        } else {
+            break;
+        }
+    }
+
+    return num_matched;
+}
+
+int sscanf(const char *str, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    int count = vsscanf(str, format, args);
+    va_end(args);
+    return count;
 }
