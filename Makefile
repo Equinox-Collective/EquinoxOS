@@ -59,7 +59,7 @@ ASMFLAGS = -f elf64
 # --- SDK FLAGS (APPS) ---
 SDK_INC = -I./sdk/include
 USER_CFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -g \
-              -fno-omit-frame-pointer $(SDK_INC) -MMD -MP
+              -fno-omit-frame-pointer $(SDK_INC) -MMD -MP -DSDL_DYNAMIC_API=0
 
 # --- KERNEL SOURCES ---
 SRC_DIRS = src src/boot src/syslibc \
@@ -175,6 +175,43 @@ $(QUICKJS_LIB): $(QUICKJS_OBJS)
 	$(AR) -rcs $@ $(QUICKJS_OBJS)
 
 libquickjs: $(QUICKJS_LIB)
+
+SDL_DIR := third_party/sdl2
+SDL_INC := -I./$(SDL_DIR) -I./$(SDL_DIR)/include
+SDL_SRCS := \
+    $(SDL_DIR)/SDL.c \
+    $(SDL_DIR)/SDL_assert.c \
+    $(SDL_DIR)/SDL_dataqueue.c \
+    $(SDL_DIR)/SDL_error.c \
+    $(SDL_DIR)/SDL_guid.c \
+    $(SDL_DIR)/SDL_hints.c \
+    $(SDL_DIR)/SDL_log.c \
+    $(SDL_DIR)/SDL_utils.c \
+    $(SDL_DIR)/file/SDL_rwops.c \
+    $(wildcard $(SDL_DIR)/stdlib/*.c) \
+    $(wildcard $(SDL_DIR)/cpuinfo/*.c) \
+    $(wildcard $(SDL_DIR)/events/*.c) \
+    $(wildcard $(SDL_DIR)/video/*.c) \
+    $(wildcard $(SDL_DIR)/video/equinox/*.c) \
+    $(SDL_DIR)/render/SDL_render.c \
+    $(SDL_DIR)/render/SDL_yuv_sw.c \
+    $(wildcard $(SDL_DIR)/render/software/*.c) \
+    $(SDL_DIR)/timer/SDL_timer.c \
+    $(SDL_DIR)/timer/dummy/SDL_systimer.c
+
+SDL_OBJS    := $(SDL_SRCS:.c=.o)
+SDL_LIB     := $(SDL_DIR)/libSDL2.a
+SDL_CFLAGS  := $(USER_CFLAGS) $(SDL_INC) -Os
+
+$(SDL_DIR)/%.o: $(SDL_DIR)/%.c
+	$(CC) $(SDL_CFLAGS) -c $< -o $@
+
+$(SDL_LIB): $(SDL_OBJS)
+	@echo === Building libSDL2.a ===
+	$(AR) -rcs $@ $(SDL_OBJS)
+
+libsdl2: $(SDL_LIB)
+
 
 # --- DOOM ---
 DOOM_DIR = app/doom
@@ -326,7 +363,7 @@ app/catest.o: app/catest.c third_party/ca_bundle/ca_bundle.h
 	$(CC) $(USER_CFLAGS) -I./third_party/bearssl/inc -c $< -o $@
 
 app/sdltest.o: app/sdltest.c
-	$(CC) $(USER_CFLAGS) -I./third_party/sdl2/include -c $< -o $@
+	$(CC) $(USER_CFLAGS) -I./third_party/sdl2/include/ -c $< -o $@
 
 $(ISO_ROOT)/bin/sdltest.elf: app/sdltest.o $(SDK_OBJS) $(SDL_LIB)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(SDL_LIB) -o $@
@@ -437,41 +474,6 @@ app/jsfetchtest.o: app/jsfetchtest.c sdk/include/qjs_helpers.h sdk/include/qjs_f
 	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
 
 # --- SDL2 (vendored under third_party/sdl2) -----------------------------------
-SDL_DIR := third_party/sdl2
-SDL_INC := -I./$(SDL_DIR)
-SDL_SRCS := \
-    $(SDL_DIR)/SDL.c \
-    $(SDL_DIR)/SDL_assert.c \
-    $(SDL_DIR)/SDL_dataqueue.c \
-    $(SDL_DIR)/SDL_error.c \
-    $(SDL_DIR)/SDL_guid.c \
-    $(SDL_DIR)/SDL_hints.c \
-    $(SDL_DIR)/SDL_log.c \
-    $(SDL_DIR)/SDL_utils.c \
-    $(SDL_DIR)/file/SDL_rwops.c \
-    $(wildcard $(SDL_DIR)/stdlib/*.c) \
-    $(wildcard $(SDL_DIR)/cpuinfo/*.c) \
-    $(wildcard $(SDL_DIR)/events/*.c) \
-    $(wildcard $(SDL_DIR)/video/*.c) \
-    $(wildcard $(SDL_DIR)/video/equinox/*.c) \
-    $(SDL_DIR)/render/SDL_render.c \
-    $(SDL_DIR)/render/SDL_yuv_sw.c \
-    $(wildcard $(SDL_DIR)/render/software/*.c) \
-    $(SDL_DIR)/timer/SDL_timer.c \
-    $(SDL_DIR)/timer/dummy/SDL_systimer.c
-
-SDL_OBJS    := $(SDL_SRCS:.c=.o)
-SDL_LIB     := $(SDL_DIR)/libSDL2.a
-SDL_CFLAGS  := $(USER_CFLAGS) $(SDL_INC) -Os
-
-$(SDL_DIR)/%.o: $(SDL_DIR)/%.c
-	$(CC) $(SDL_CFLAGS) -c $< -o $@
-
-$(SDL_LIB): $(SDL_OBJS)
-	@echo === Building libSDL2.a ===
-	$(AR) -rcs $@ $(SDL_OBJS)
-
-libsdl2: $(SDL_LIB)
 
 $(ISO_ROOT)/bin/jsfetchtest.elf: app/jsfetchtest.o $(QJS_HELPERS_OBJ) $(QJS_FETCH_OBJ) $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(QUICKJS_LIB) $(BEARSSL_LIB)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(QJS_HELPERS_OBJ) $(QJS_FETCH_OBJ) $(HTTP_CLIENT_OBJ) $(QUICKJS_LIB) $(BEARSSL_LIB) -o $@
