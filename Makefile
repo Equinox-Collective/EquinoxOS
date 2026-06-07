@@ -326,7 +326,7 @@ app/catest.o: app/catest.c third_party/ca_bundle/ca_bundle.h
 	$(CC) $(USER_CFLAGS) -I./third_party/bearssl/inc -c $< -o $@
 
 app/sdltest.o: app/sdltest.c
-	$(CC) $(USER_CFLAGS) -I./third_party/sdl2 -c $< -o $@
+	$(CC) $(USER_CFLAGS) -I./third_party/sdl2/include -c $< -o $@
 
 $(ISO_ROOT)/bin/sdltest.elf: app/sdltest.o $(SDK_OBJS) $(SDL_LIB)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(SDL_LIB) -o $@
