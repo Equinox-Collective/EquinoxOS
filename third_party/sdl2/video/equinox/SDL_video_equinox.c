@@ -2,8 +2,10 @@
 #include "../SDL_sysvideo.h"
 #include "../SDL_pixels_c.h"
 #include "../../events/SDL_events_c.h"
+#include "../../events/scancodes_ascii.h"
+#include "../../events/SDL_keyboard_c.h"
+#include "../../events/SDL_mouse_c.h"
 #include "SDL_video_equinox.h"
-#include <stdint.h>
 
 /* Кастомные обертки системных вызовов EquinoxOS */
 static inline uint64_t equos_syscall(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
@@ -38,6 +40,61 @@ static inline void equos_get_window_pos(int *x, int *y) {
     if (y) *y = (int)rb;
 }
 
+/* Таблица маппинга PS/2 Set 1 скан-кодов на SDL Scancodes */
+static const SDL_Scancode equos_scancode_table[128] = {
+    [0x01] = SDL_SCANCODE_ESCAPE,
+    [0x02] = SDL_SCANCODE_1,
+    [0x03] = SDL_SCANCODE_2,
+    [0x04] = SDL_SCANCODE_3,
+    [0x05] = SDL_SCANCODE_4,
+    [0x06] = SDL_SCANCODE_5,
+    [0x07] = SDL_SCANCODE_6,
+    [0x08] = SDL_SCANCODE_7,
+    [0x09] = SDL_SCANCODE_8,
+    [0x0A] = SDL_SCANCODE_9,
+    [0x0B] = SDL_SCANCODE_0,
+    [0x0C] = SDL_SCANCODE_MINUS,
+    [0x0D] = SDL_SCANCODE_EQUALS,
+    [0x0E] = SDL_SCANCODE_BACKSPACE,
+    [0x0F] = SDL_SCANCODE_TAB,
+    [0x10] = SDL_SCANCODE_Q,
+    [0x11] = SDL_SCANCODE_W,
+    [0x12] = SDL_SCANCODE_E,
+    [0x13] = SDL_SCANCODE_R,
+    [0x14] = SDL_SCANCODE_T,
+    [0x15] = SDL_SCANCODE_Y,
+    [0x16] = SDL_SCANCODE_U,
+    [0x17] = SDL_SCANCODE_I,
+    [0x18] = SDL_SCANCODE_O,
+    [0x19] = SDL_SCANCODE_P,
+    [0x1C] = SDL_SCANCODE_RETURN,
+    [0x1D] = SDL_SCANCODE_LCTRL,
+    [0x1E] = SDL_SCANCODE_A,
+    [0x1F] = SDL_SCANCODE_S,
+    [0x20] = SDL_SCANCODE_D,
+    [0x21] = SDL_SCANCODE_F,
+    [0x22] = SDL_SCANCODE_G,
+    [0x23] = SDL_SCANCODE_H,
+    [0x24] = SDL_SCANCODE_J,
+    [0x25] = SDL_SCANCODE_K,
+    [0x26] = SDL_SCANCODE_L,
+    [0x2C] = SDL_SCANCODE_Z,
+    [0x2D] = SDL_SCANCODE_X,
+    [0x2E] = SDL_SCANCODE_C,
+    [0x2F] = SDL_SCANCODE_V,
+    [0x30] = SDL_SCANCODE_B,
+    [0x31] = SDL_SCANCODE_N,
+    [0x32] = SDL_SCANCODE_M,
+    [0x39] = SDL_SCANCODE_SPACE,
+    [0x2A] = SDL_SCANCODE_LSHIFT,
+    [0x36] = SDL_SCANCODE_RSHIFT,
+    [0x38] = SDL_SCANCODE_LALT,
+    [0x48] = SDL_SCANCODE_UP,
+    [0x50] = SDL_SCANCODE_DOWN,
+    [0x4B] = SDL_SCANCODE_LEFT,
+    [0x4D] = SDL_SCANCODE_RIGHT,
+};
+
 static int Equinox_VideoInit(SDL_VideoDevice *_this) {
     SDL_VideoDisplay display;
     SDL_DisplayMode current_mode;
@@ -45,7 +102,6 @@ static int Equinox_VideoInit(SDL_VideoDevice *_this) {
     uint64_t width = 1024;
     uint64_t height = 768;
     
-    /* Опрашиваем VESA информацию через сисколл 32 */
     uint64_t r_ax = 0, r_bx = 0, r_cx = 0, r_dx = 0;
     __asm__ volatile(
         "mov $32, %%rax\n\t"
@@ -80,30 +136,25 @@ static int Equinox_VideoInit(SDL_VideoDevice *_this) {
 }
 
 static void Equinox_VideoQuit(SDL_VideoDevice *_this) {
-    /* Очистка ресурсов при закрытии */
 }
 
 static int Equinox_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window) {
-    /* Просто возвращаем 0, так как само окно создается силами композитора */
     return 0;
 }
 
 static void Equinox_DestroyWindow(SDL_VideoDevice *_this, SDL_Window *window) {
-    /* Заглушка деструктора окна */
 }
 
-/* Создаем программный буфер кадра для окна */
 static int Equinox_CreateWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window *window, Uint32 *format, void **pixels, int *pitch) {
     int w = window->w;
     int h = window->h;
     
-    void *buffer = SDL_malloc(w * h * 4); /* 32-битный ARGB */
+    void *buffer = SDL_malloc(w * h * 4);
     if (!buffer) {
         return SDL_OutOfMemory();
     }
     
     SDL_memset(buffer, 0, w * h * 4);
-    
     window->driverdata = buffer;
     
     *format = SDL_PIXELFORMAT_ARGB8888;
@@ -113,7 +164,6 @@ static int Equinox_CreateWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window *w
     return 0;
 }
 
-/* Копируем наш буфер на экран в координаты окна */
 static int Equinox_UpdateWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window *window, const SDL_Rect *rects, int numrects) {
     void *buffer = window->driverdata;
     if (!buffer) {
@@ -124,9 +174,7 @@ static int Equinox_UpdateWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window *w
     int y = 100;
     equos_get_window_pos(&x, &y);
     
-    /* Сисколл 5 (SYS_DRAW_BUFFER) */
     equos_syscall(5, (uint64_t)x, (uint64_t)y, (uint64_t)window->w, (uint64_t)window->h, (uint64_t)buffer);
-    
     return 0;
 }
 
@@ -134,6 +182,77 @@ static void Equinox_DestroyWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window 
     if (window->driverdata) {
         SDL_free(window->driverdata);
         window->driverdata = NULL;
+    }
+}
+
+/* --- ОБРАБОТКА ВВОДА КЛАВИАТУРЫ И МЫШИ (PUMP EVENTS) --- */
+static void Equinox_PumpEvents(SDL_VideoDevice *_this) {
+    /* 1. Клавиатура */
+    static SDL_bool pending_extended = SDL_FALSE;
+    while (1) {
+        uint8_t scancode = (uint8_t)equos_syscall(9, 0, 0, 0, 0, 0);
+        if (scancode == 0) {
+            break;
+        }
+        
+        if (scancode == 0xE0) {
+            pending_extended = SDL_TRUE;
+            continue;
+        }
+        
+        SDL_bool released = (scancode & 0x80) ? SDL_TRUE : SDL_FALSE;
+        uint8_t key_index = scancode & ~0x80;
+        
+        if (key_index < 128) {
+            SDL_Scancode sdl_scancode = equos_scancode_table[key_index];
+            if (sdl_scancode != SDL_SCANCODE_UNKNOWN) {
+                SDL_SendKeyboardKey(released ? SDL_RELEASED : SDL_PRESSED, sdl_scancode);
+            }
+        }
+        pending_extended = SDL_FALSE;
+    }
+    
+    /* 2. Мышь */
+    uint64_t mx = 0, my = 0, m_btn = 0;
+    __asm__ volatile(
+        "mov $7, %%rax\n\t"
+        "int $0x80\n\t"
+        "mov %%rax, %0\n\t"
+        "mov %%rbx, %1\n\t"
+        "mov %%rcx, %2\n\t"
+        : "=r"(mx), "=r"(my), "=r"(m_btn)
+        :
+        : "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r8", "memory"
+    );
+    
+    int win_x = 100;
+    int win_y = 100;
+    equos_get_window_pos(&win_x, &win_y);
+    
+    /* Переводим глобальные координаты мыши в локальные оконные */
+    int local_x = (int)mx - win_x;
+    int local_y = (int)my - win_y;
+    
+    SDL_Window *focus = _this->windows;
+    if (focus) {
+        /* Передаем координаты только если мышь находится в границах окна */
+        if (local_x >= 0 && local_x < focus->w && local_y >= 0 && local_y < focus->h) {
+            SDL_SendMouseMotion(focus, 0, 0, local_x, local_y);
+            
+            static Uint8 last_buttons = 0;
+            Uint8 current_buttons = 0;
+            if (m_btn & 1) current_buttons |= SDL_BUTTON_LMASK;
+            if (m_btn & 2) current_buttons |= SDL_BUTTON_RMASK;
+            
+            /* Сравниваем маску кнопок */
+            if ((current_buttons & SDL_BUTTON_LMASK) != (last_buttons & SDL_BUTTON_LMASK)) {
+                SDL_SendMouseButton(focus, 0, (current_buttons & SDL_BUTTON_LMASK) ? SDL_PRESSED : SDL_RELEASED, SDL_BUTTON_LEFT);
+            }
+            if ((current_buttons & SDL_BUTTON_RMASK) != (last_buttons & SDL_BUTTON_RMASK)) {
+                SDL_SendMouseButton(focus, 0, (current_buttons & SDL_BUTTON_RMASK) ? SDL_PRESSED : SDL_RELEASED, SDL_BUTTON_RIGHT);
+            }
+            last_buttons = current_buttons;
+        }
     }
 }
 
@@ -157,6 +276,9 @@ static SDL_VideoDevice *Equinox_CreateDevice(void) {
     device->CreateWindowFramebuffer = Equinox_CreateWindowFramebuffer;
     device->UpdateWindowFramebuffer = Equinox_UpdateWindowFramebuffer;
     device->DestroyWindowFramebuffer = Equinox_DestroyWindowFramebuffer;
+    
+    /* Добавляем обработчик прерываний/событий */
+    device->PumpEvents = Equinox_PumpEvents;
     
     device->free = Equinox_DeleteDevice;
     
