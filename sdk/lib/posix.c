@@ -11,6 +11,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <time.h>
+#include <limits.h>
 
 int errno = 0;
 
@@ -284,4 +285,147 @@ int rand(void) {
 }
 void srand(unsigned int seed) {
     next = seed;
+}
+
+void _exit(int status) {
+    exit(status);
+}
+
+long strtol(const char *nptr, char **endptr, int base) {
+    const char *s = nptr;
+    unsigned long acc;
+    int c;
+    unsigned long any;
+    int neg = 0;
+
+    /* Пропускаем пробелы и считываем знак */
+    do {
+        c = *s++;
+    } while (c == ' ' || (c >= '\t' && c <= '\r'));
+    if (c == '-') {
+        neg = 1;
+        c = *s++;
+    } else if (c == '+') {
+        c = *s++;
+    }
+
+    /* Автоопределение системы счисления (0x для Hex, 0 для Octal) */
+    if ((base == 0 || base == 16) &&
+        c == '0' && (*s == 'x' || *s == 'X')) {
+        c = s[1];
+        s += 2;
+        base = 16;
+    }
+    if (base == 0) {
+        base = (c == '0') ? 8 : 10;
+    }
+
+    acc = 0;
+    any = 0;
+    for (;; c = *s++) {
+        if (c >= '0' && c <= '9') {
+            c -= '0';
+        } else if (c >= 'A' && c <= 'Z') {
+            c -= 'A' - 10;
+        } else if (c >= 'a' && c <= 'z') {
+            c -= 'a' - 10;
+        } else {
+            break;
+        }
+        if (c >= base) {
+            break;
+        }
+        if (any < 0) {
+            continue;
+        }
+        if (neg) {
+            if (acc > (unsigned long)LONG_MAX + 1) {
+                any = -1;
+            } else {
+                any = 1;
+                acc = acc * base + c;
+            }
+        } else {
+            if (acc > LONG_MAX) {
+                any = -1;
+            } else {
+                any = 1;
+                acc = acc * base + c;
+            }
+        }
+    }
+    if (any < 0) {
+        acc = neg ? LONG_MIN : LONG_MAX;
+        errno = ERANGE;
+    } else if (neg) {
+        acc = -acc;
+    }
+    if (endptr != 0) {
+        *endptr = (char *)(any ? s - 1 : nptr);
+    }
+    return (long)acc;
+}
+
+unsigned long strtoul(const char *nptr, char **endptr, int base) {
+    const char *s = nptr;
+    unsigned long acc;
+    int c;
+    unsigned long any;
+    int neg = 0;
+
+    do {
+        c = *s++;
+    } while (c == ' ' || (c >= '\t' && c <= '\r'));
+    if (c == '-') {
+        neg = 1;
+        c = *s++;
+    } else if (c == '+') {
+        c = *s++;
+    }
+
+    if ((base == 0 || base == 16) &&
+        c == '0' && (*s == 'x' || *s == 'X')) {
+        c = s[1];
+        s += 2;
+        base = 16;
+    }
+    if (base == 0) {
+        base = (c == '0') ? 8 : 10;
+    }
+
+    acc = 0;
+    any = 0;
+    for (;; c = *s++) {
+        if (c >= '0' && c <= '9') {
+            c -= '0';
+        } else if (c >= 'A' && c <= 'Z') {
+            c -= 'A' - 10;
+        } else if (c >= 'a' && c <= 'z') {
+            c -= 'a' - 10;
+        } else {
+            break;
+        }
+        if (c >= base) {
+            break;
+        }
+        if (any < 0) {
+            continue;
+        }
+        if (acc > ULONG_MAX / base || (acc == ULONG_MAX / base && (unsigned long)c > ULONG_MAX % base)) {
+            any = -1;
+        } else {
+            any = 1;
+            acc = acc * base + c;
+        }
+    }
+    if (any < 0) {
+        acc = ULONG_MAX;
+        errno = ERANGE;
+    } else if (neg) {
+        acc = -acc;
+    }
+    if (endptr != 0) {
+        *endptr = (char *)(any ? s - 1 : nptr);
+    }
+    return acc;
 }

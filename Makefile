@@ -187,12 +187,18 @@ SDL_SRCS := \
     $(SDL_DIR)/SDL_hints.c \
     $(SDL_DIR)/SDL_log.c \
     $(SDL_DIR)/SDL_utils.c \
+    $(SDL_DIR)/SDL_list.c \
     $(SDL_DIR)/file/SDL_rwops.c \
     $(wildcard $(SDL_DIR)/stdlib/*.c) \
     $(wildcard $(SDL_DIR)/cpuinfo/*.c) \
     $(wildcard $(SDL_DIR)/events/*.c) \
     $(wildcard $(SDL_DIR)/video/*.c) \
     $(wildcard $(SDL_DIR)/video/equinox/*.c) \
+    $(wildcard $(SDL_DIR)/video/yuv2rgb/*.c) \
+    $(wildcard $(SDL_DIR)/atomic/*.c) \
+    $(SDL_DIR)/thread/SDL_thread.c \
+    $(wildcard $(SDL_DIR)/thread/generic/*.c) \
+    $(wildcard $(SDL_DIR)/libm/*.c) \
     $(SDL_DIR)/render/SDL_render.c \
     $(SDL_DIR)/render/SDL_yuv_sw.c \
     $(wildcard $(SDL_DIR)/render/software/*.c) \
