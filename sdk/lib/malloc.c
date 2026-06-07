@@ -92,9 +92,10 @@ void *realloc(void *ptr, size_t size) {
 }
 
 void *calloc(size_t nmemb, size_t size) {
-  size_t total = nmemb * size;
-  void *p = malloc(total);
-  if (p)
-    memset(p, 0, total);
-  return p;
+    size_t total = nmemb * size;
+    void *p = malloc(total);
+    if (p) {
+        memset(p, 0, total);
+    }
+    return p;
 }

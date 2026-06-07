@@ -59,6 +59,7 @@
 
 /* Включаем наш собственный кастомный видеодрайвер Equinox */
 #define SDL_VIDEO_DRIVER_EQUINOX 1
+#define SDL_TIMER_DUMMY 1
 
 /* Оставляем программный рендерер пикселей */
 #define SDL_VIDEO_RENDER_SW 1

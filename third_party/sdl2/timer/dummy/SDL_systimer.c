@@ -1,69 +1,48 @@
-/*
-  Simple DirectMedia Layer
-  Copyright (C) 1997-2025 Sam Lantinga <slouken@libsdl.org>
-
-  This software is provided 'as-is', without any express or implied
-  warranty.  In no event will the authors be held liable for any damages
-  arising from the use of this software.
-
-  Permission is granted to anyone to use this software for any purpose,
-  including commercial applications, and to alter it and redistribute it
-  freely, subject to the following restrictions:
-
-  1. The origin of this software must not be misrepresented; you must not
-     claim that you wrote the original software. If you use this software
-     in a product, an acknowledgment in the product documentation would be
-     appreciated but is not required.
-  2. Altered source versions must be plainly marked as such, and must not be
-     misrepresented as being the original software.
-  3. This notice may not be removed or altered from any source distribution.
-*/
 #include "../../SDL_internal.h"
+#include "../SDL_timer_c.h"
 
-#if defined(SDL_TIMER_DUMMY) || defined(SDL_TIMERS_DISABLED)
+/* Сисколлы EquinoxOS */
+static inline uint64_t equos_syscall(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
+    uint64_t ret;
+    __asm__ volatile("mov %1, %%rax; "
+                     "mov %2, %%rdi; "
+                     "mov %3, %%rsi; "
+                     "mov %4, %%rdx; "
+                     "mov %5, %%rcx; "
+                     "mov %6, %%r8; "
+                     "int $0x80; "
+                     "mov %%rax, %0; "
+                     : "=r"(ret)
+                     : "r"(num), "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(a5)
+                     : "rax", "rdi", "rsi", "rdx", "rcx", "r8", "memory");
+    return ret;
+}
 
-#include "SDL_timer.h"
-
+static Uint64 start_ticks = 0;
 static SDL_bool ticks_started = SDL_FALSE;
 
-void SDL_TicksInit(void)
-{
+void SDL_TicksInit(void) {
     if (ticks_started) {
         return;
     }
+    start_ticks = equos_syscall(6, 0, 0, 0, 0, 0); /* SYS_GET_TIME (6) */
     ticks_started = SDL_TRUE;
 }
 
-void SDL_TicksQuit(void)
-{
+void SDL_TicksQuit(void) {
     ticks_started = SDL_FALSE;
 }
 
-Uint64 SDL_GetTicks64(void)
-{
+Uint64 SDL_GetTicks64(void) {
     if (!ticks_started) {
         SDL_TicksInit();
     }
-
-    SDL_Unsupported();
-    return 0;
+    Uint64 now = equos_syscall(6, 0, 0, 0, 0, 0); /* SYS_GET_TIME */
+    return (now - start_ticks);
 }
 
-Uint64 SDL_GetPerformanceCounter(void)
-{
-    return SDL_GetTicks();
+void SDL_Delay(Uint32 ms) {
+    if (ms > 0) {
+        equos_syscall(13, ms, 0, 0, 0, 0); /* SYS_SLEEP (13) */
+    }
 }
-
-Uint64 SDL_GetPerformanceFrequency(void)
-{
-    return 1000;
-}
-
-void SDL_Delay(Uint32 ms)
-{
-    SDL_Unsupported();
-}
-
-#endif /* SDL_TIMER_DUMMY || SDL_TIMERS_DISABLED */
-
-/* vi: set ts=4 sw=4 expandtab: */

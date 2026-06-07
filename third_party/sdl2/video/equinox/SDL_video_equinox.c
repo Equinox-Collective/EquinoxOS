@@ -263,10 +263,12 @@ static void Equinox_DeleteDevice(SDL_VideoDevice *device) {
 static SDL_VideoDevice *Equinox_CreateDevice(void) {
     SDL_VideoDevice *device;
     
-    device = (SDL_VideoDevice *)SDL_calloc(1, sizeof(SDL_VideoDevice));
+    /* Используем malloc + memset вместо calloc */
+    device = (SDL_VideoDevice *)SDL_malloc(sizeof(SDL_VideoDevice));
     if (!device) {
         return NULL;
     }
+    SDL_memset(device, 0, sizeof(SDL_VideoDevice));
     
     device->VideoInit = Equinox_VideoInit;
     device->VideoQuit = Equinox_VideoQuit;
@@ -277,9 +279,7 @@ static SDL_VideoDevice *Equinox_CreateDevice(void) {
     device->UpdateWindowFramebuffer = Equinox_UpdateWindowFramebuffer;
     device->DestroyWindowFramebuffer = Equinox_DestroyWindowFramebuffer;
     
-    /* Добавляем обработчик прерываний/событий */
     device->PumpEvents = Equinox_PumpEvents;
-    
     device->free = Equinox_DeleteDevice;
     
     return device;
