@@ -304,11 +304,3 @@ int vsscanf(const char *str, const char *format, va_list ap) {
 
     return num_matched;
 }
-
-int sscanf(const char *str, const char *format, ...) {
-    va_list args;
-    va_start(args, format);
-    int count = vsscanf(str, format, args);
-    va_end(args);
-    return count;
-}

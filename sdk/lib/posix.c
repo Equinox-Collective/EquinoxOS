@@ -229,8 +229,7 @@ char* strdup(const char* s) {
 int sscanf(const char *str, const char *format, ...) {
     va_list args;
     va_start(args, format);
-    int count = 0;
-    // Очень базовая реализация sscanf
+    int count = vsscanf(str, format, args);
     va_end(args);
     return count;
 }
