@@ -138,50 +138,97 @@ static int Equinox_VideoInit(SDL_VideoDevice *_this) {
 static void Equinox_VideoQuit(SDL_VideoDevice *_this) {
 }
 
+/* Структура данных окна: позиция + framebuffer */
+typedef struct {
+    int win_x;
+    int win_y;
+    void *framebuffer;
+} EquinoxWindowData;
+
 static int Equinox_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window) {
+    /* Получаем стартовую позицию из ядра (может быть 100,100 — дефолт) */
+    EquinoxWindowData *data = (EquinoxWindowData *)SDL_malloc(sizeof(EquinoxWindowData));
+    if (!data) {
+        return SDL_OutOfMemory();
+    }
+
+    int x = 100, y = 100;
+    equos_get_window_pos(&x, &y);
+    data->win_x = x;
+    data->win_y = y;
+    data->framebuffer = NULL;
+    window->driverdata = data;
+
     return 0;
 }
 
 static void Equinox_DestroyWindow(SDL_VideoDevice *_this, SDL_Window *window) {
+    if (window->driverdata) {
+        EquinoxWindowData *data = (EquinoxWindowData *)window->driverdata;
+        if (data->framebuffer) {
+            SDL_free(data->framebuffer);
+            data->framebuffer = NULL;
+        }
+        SDL_free(data);
+        window->driverdata = NULL;
+    }
 }
 
 static int Equinox_CreateWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window *window, Uint32 *format, void **pixels, int *pitch) {
     int w = window->w;
     int h = window->h;
-    
+
+    EquinoxWindowData *data = (EquinoxWindowData *)window->driverdata;
+    if (!data) {
+        return -1;
+    }
+
     void *buffer = SDL_malloc(w * h * 4);
     if (!buffer) {
         return SDL_OutOfMemory();
     }
-    
+
     SDL_memset(buffer, 0, w * h * 4);
-    window->driverdata = buffer;
-    
+    data->framebuffer = buffer;
+
     *format = SDL_PIXELFORMAT_ARGB8888;
     *pixels = buffer;
     *pitch = w * 4;
-    
+
     return 0;
 }
 
 static int Equinox_UpdateWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window *window, const SDL_Rect *rects, int numrects) {
-    void *buffer = window->driverdata;
-    if (!buffer) {
+    EquinoxWindowData *data = (EquinoxWindowData *)window->driverdata;
+    if (!data || !data->framebuffer) {
         return -1;
     }
-    
-    int x = 100;
-    int y = 100;
-    equos_get_window_pos(&x, &y);
-    
-    equos_syscall(5, (uint64_t)x, (uint64_t)y, (uint64_t)window->w, (uint64_t)window->h, (uint64_t)buffer);
+
+    /* Обновляем позицию окна из ядра только если ядро вернуло ненулевые
+     * координаты (значит enGUI активно управляет окном через app_container).
+     * Если ядро вернуло (0,0) — enGUI сбросил позицию (SDL-приложение
+     * запущено не через контейнер), используем последнюю известную позицию. */
+    int kernel_x = 0, kernel_y = 0;
+    equos_get_window_pos(&kernel_x, &kernel_y);
+    if (kernel_x > 0 || kernel_y > 0) {
+        data->win_x = kernel_x;
+        data->win_y = kernel_y;
+    }
+
+    int x = data->win_x;
+    int y = data->win_y;
+
+    /* Сообщаем ядру актуальную позицию и размер перед блитом */
+    equos_syscall(36, (uint64_t)x, (uint64_t)y, (uint64_t)window->w, (uint64_t)window->h, 0);
+    equos_syscall(5, (uint64_t)x, (uint64_t)y, (uint64_t)window->w, (uint64_t)window->h, (uint64_t)data->framebuffer);
     return 0;
 }
 
 static void Equinox_DestroyWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window *window) {
-    if (window->driverdata) {
-        SDL_free(window->driverdata);
-        window->driverdata = NULL;
+    EquinoxWindowData *data = (EquinoxWindowData *)window->driverdata;
+    if (data && data->framebuffer) {
+        SDL_free(data->framebuffer);
+        data->framebuffer = NULL;
     }
 }
 
@@ -291,5 +338,6 @@ static int Equinox_Available(void) {
 
 VideoBootStrap EQUINOX_bootstrap = {
     "equinox", "Equinox OS Software Video Driver",
-    Equinox_Available, Equinox_CreateDevice
+    Equinox_CreateDevice,
+    NULL /* no ShowMessageBox implementation */
 };

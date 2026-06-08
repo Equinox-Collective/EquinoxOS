@@ -21,6 +21,7 @@
 #include "system/mem/vmm.h"
 #include "system/hal/hal.h"
 #include "system/usr/ipc.h"
+#include "system/fs/fd.h"
 
 #include "system/drivers/devices/mouse/mouse.h"
 #include "system/drivers/hardware/net/rtl8139.h"
@@ -438,6 +439,8 @@ void kmain(void) {
   serial_puts(COM1, "Shared memory initialized\n");
   ipc_init();
   serial_puts(COM1, "IPC (pipes + mqueue) initialized\n");
+  fd_table_init();
+  serial_puts(COM1, "FD table initialized\n");
   hal_init();
   serial_puts(COM1, "HAL initialized\n");
 

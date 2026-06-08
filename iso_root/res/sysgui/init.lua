@@ -507,8 +507,25 @@ function on_tick(dt)
 
     local app_focused = (focused_window == app_container)
 
-    -- Если игра закрыта, свернута ИЛИ не в фокусе — сбрасываем координаты в 0
-    if not (app_container.active and not app_container.minimized and app_focused) then
+    -- Проверяем есть ли живой внешний процесс (SDL-приложение, запущенное не через контейнер)
+    local any_external_proc = false
+    do
+        local tasks = getTasks()
+        for _, t in ipairs(tasks) do
+            if t.pid ~= 1 and t.pid ~= 2 then
+                any_external_proc = true
+                break
+            end
+        end
+    end
+
+    -- Сбрасываем координаты окна в 0 только если:
+    --   1. Контейнер Doom/приложение закрыт/свёрнут/не в фокусе, И
+    --   2. Нет других внешних процессов (SDL-приложения, запущенного напрямую)
+    -- Без второго условия enGUI сбрасывал k_app_win_active=false каждый кадр,
+    -- из-за чего SDL не мог нарисовать ни одного кадра (syscall 5 возвращал сразу).
+    if not (app_container.active and not app_container.minimized and app_focused)
+       and not any_external_proc then
         if type(setAppWindowPos) == "function" then
             setAppWindowPos(0, 0, 0, 0)
         end

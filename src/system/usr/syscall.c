@@ -9,6 +9,7 @@
 #include "../drivers/hardware/net/tcp.h"
 #include "../drivers/vesa/vesa.h"
 #include "../fs/vfs.h"
+#include "../fs/fd.h"
 #include "../mem/memory.h"
 #include "../mem/pmm.h"
 #include "../mem/shm.h"
@@ -1083,6 +1084,123 @@ void syscall_handler(syscall_regs_t *regs)
     // мог крутить гифку даже во время блокирующих сисколлов.
     idt_set_syscall_trap_gate(0);
     regs->rax = 0;
+    break;
+  }
+
+  /* ====================================================================
+   * POSIX fd API  (90–95)
+   *
+   * These syscalls give userspace a proper open/read/write/close/seek/stat
+   * interface backed by the kernel fd table (src/system/fs/fd.c).
+   * They are the foundation that Bash, mlibc ports, and any POSIX app need.
+   *
+   * Calling convention (mirrors Linux x86_64 where possible):
+   *   90  SYS_OPEN      (path, flags)            -> int fd / -1
+   *   91  SYS_CLOSE_FD  (fd)                     -> int 0 / -1
+   *   92  SYS_READ_FD   (fd, buf, size)           -> int bytes_read / -1
+   *   93  SYS_WRITE_FD  (fd, buf, size)           -> int bytes_written / -1
+   *   94  SYS_SEEK      (fd, offset, whence)      -> int new_pos / -1
+   *   95  SYS_FSTAT     (fd, uint32_t *out_size)  -> int 0 / -1
+   *   96  SYS_STAT_PATH (path, uint32_t *out_sz)  -> int 0 / -1
+   * ================================================================== */
+  case 90:
+  { /* SYS_OPEN (path, flags) -> fd */
+    const char *path  = (const char *)regs->rdi;
+    int         oflags = (int)regs->rsi;
+    char kpath[256];
+    stac();
+    size_t i = 0;
+    while (i < sizeof(kpath) - 1 && path && path[i] != '\0') {
+      kpath[i] = path[i]; i++;
+    }
+    clac();
+    kpath[i] = '\0';
+    regs->rax = (uint64_t)(int64_t)fd_open(kpath, oflags);
+    break;
+  }
+  case 91:
+  { /* SYS_CLOSE_FD (fd) -> 0 / -1 */
+    regs->rax = (uint64_t)(int64_t)fd_close((int)regs->rdi);
+    break;
+  }
+  case 92:
+  { /* SYS_READ_FD (fd, buf, size) -> bytes_read / -1 */
+    int      fd   = (int)regs->rdi;
+    void    *buf  = (void *)regs->rsi;
+    uint32_t size = (uint32_t)regs->rdx;
+    stac();
+    int rc = fd_read(fd, buf, size);
+    clac();
+    regs->rax = (uint64_t)(int64_t)rc;
+    break;
+  }
+  case 93:
+  { /* SYS_WRITE_FD (fd, buf, size) -> bytes_written / -1 */
+    int      fd   = (int)regs->rdi;
+    const void *buf = (const void *)regs->rsi;
+    uint32_t size  = (uint32_t)regs->rdx;
+
+    /* fds 1/2 map to terminal print (same as SYS_WRITE case 16) */
+    if (fd == 1 || fd == 2) {
+      /* Copy to kernel buf first to safely call term_print */
+      char kb[512];
+      uint32_t to_copy = (size < sizeof(kb) - 1) ? size : sizeof(kb) - 1;
+      stac();
+      memcpy(kb, buf, to_copy);
+      clac();
+      kb[to_copy] = '\0';
+      term_print(kb);
+      regs->rax = (uint64_t)to_copy;
+      break;
+    }
+    stac();
+    int rc = fd_write(fd, buf, size);
+    clac();
+    regs->rax = (uint64_t)(int64_t)rc;
+    break;
+  }
+  case 94:
+  { /* SYS_SEEK (fd, offset, whence) -> new_pos / -1 */
+    int     fd     = (int)regs->rdi;
+    int32_t offset = (int32_t)regs->rsi;
+    int     whence = (int)regs->rdx;
+    regs->rax = (uint64_t)(int64_t)fd_seek(fd, offset, whence);
+    break;
+  }
+  case 95:
+  { /* SYS_FSTAT (fd, uint32_t *out_size) -> 0 / -1 */
+    int       fd  = (int)regs->rdi;
+    uint32_t *out = (uint32_t *)regs->rsi;
+    uint32_t  sz  = 0;
+    int rc = fd_stat(fd, &sz);
+    if (out) {
+      stac();
+      *out = sz;
+      clac();
+    }
+    regs->rax = (uint64_t)(int64_t)rc;
+    break;
+  }
+  case 96:
+  { /* SYS_STAT_PATH (path, uint32_t *out_size) -> 0 / -1 */
+    const char *path  = (const char *)regs->rdi;
+    uint32_t   *out   = (uint32_t *)regs->rsi;
+    char kpath[256];
+    stac();
+    size_t i = 0;
+    while (i < sizeof(kpath) - 1 && path && path[i] != '\0') {
+      kpath[i] = path[i]; i++;
+    }
+    clac();
+    kpath[i] = '\0';
+    uint32_t sz = 0;
+    int rc = fd_stat_path(kpath, &sz);
+    if (out) {
+      stac();
+      *out = sz;
+      clac();
+    }
+    regs->rax = (uint64_t)(int64_t)rc;
     break;
   }
 

@@ -428,3 +428,102 @@ unsigned long strtoul(const char *nptr, char **endptr, int base) {
     }
     return acc;
 }
+
+/* ============================================================
+ * POSIX fd API — backed by EquinoxOS syscalls 90-96
+ * ============================================================ */
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+/* open() — translates POSIX flags to kernel flags (they are identical
+ * since we defined them to match, but we go through the wrapper for
+ * clarity and future compat). Variadic mode arg is accepted but ignored
+ * (no permission bits on our FS yet). */
+int open(const char *path, int flags, ...) {
+    return sys_open(path, flags);
+}
+
+int close(int fd) {
+    return sys_close_fd(fd);
+}
+
+ssize_t read(int fd, void *buf, size_t count) {
+    if (count > 0x7fffffff) count = 0x7fffffff;
+    return (ssize_t)sys_read_fd(fd, buf, (uint32_t)count);
+}
+
+ssize_t write(int fd, const void *buf, size_t count) {
+    if (count > 0x7fffffff) count = 0x7fffffff;
+    return (ssize_t)sys_write_fd(fd, buf, (uint32_t)count);
+}
+
+off_t lseek(int fd, off_t offset, int whence) {
+    return (off_t)sys_seek(fd, (int32_t)offset, whence);
+}
+
+int isatty(int fd) {
+    /* fds 0/1/2 are "terminal", rest are regular files */
+    return (fd >= 0 && fd <= 2) ? 1 : 0;
+}
+
+int unlink(const char *pathname) {
+    /* Stub — no delete support yet in VFS */
+    (void)pathname;
+    errno = 1; /* EPERM */
+    return -1;
+}
+
+int dup(int oldfd) {
+    /* Stub */
+    (void)oldfd;
+    return -1;
+}
+
+int dup2(int oldfd, int newfd) {
+    (void)oldfd; (void)newfd;
+    return -1;
+}
+
+char *getcwd(char *buf, size_t size) {
+    if (!buf || size < 2) return NULL;
+    buf[0] = '/';
+    buf[1] = '\0';
+    return buf;
+}
+
+int chdir(const char *path) {
+    (void)path;
+    return 0; /* single-root VFS, always "/" */
+}
+
+pid_t getpid(void) {
+    /* Return a stable fake PID — good enough for most libs */
+    return 2;
+}
+
+pid_t getppid(void) {
+    return 1;
+}
+
+/* stat() — fills st_size from SYS_STAT_PATH, st_mode as regular file */
+int stat(const char *pathname, struct stat *statbuf) {
+    if (!statbuf) { errno = 14; return -1; } /* EFAULT */
+    uint32_t sz = 0;
+    int rc = sys_stat_path(pathname, &sz);
+    if (rc < 0) { errno = 2; return -1; } /* ENOENT */
+    statbuf->st_size = (off_t)sz;
+    statbuf->st_mode = 0100644; /* S_IFREG | rw-r--r-- */
+    return 0;
+}
+
+int fstat(int fd, struct stat *statbuf) {
+    if (!statbuf) { errno = 14; return -1; }
+    uint32_t sz = 0;
+    int rc = sys_fstat(fd, &sz);
+    if (rc < 0) { errno = 9; return -1; } /* EBADF */
+    statbuf->st_size = (off_t)sz;
+    statbuf->st_mode = (fd <= 2) ? 0020666 : 0100644;
+    return 0;
+}

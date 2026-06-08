@@ -85,6 +85,29 @@
  * read so the value is consistent across the seconds tick boundary.    */
 #define SYS_GET_WALL_TIME 87
 
+/* ====================================================================
+ * POSIX fd API  (90–96)
+ *
+ * Proper open/read/write/close/seek/stat backed by the kernel fd table.
+ * Use these directly or through the posix.c wrappers (open/read/write/
+ * close/lseek/fstat).  fds 0/1/2 are stdin/stdout/stderr as usual.
+ *
+ *   90  SYS_OPEN       (path, flags)            -> int fd / -1
+ *   91  SYS_CLOSE_FD   (fd)                     -> int 0 / -1
+ *   92  SYS_READ_FD    (fd, buf, size)           -> int bytes / -1
+ *   93  SYS_WRITE_FD   (fd, buf, size)           -> int bytes / -1
+ *   94  SYS_SEEK       (fd, offset, whence)      -> int pos / -1
+ *   95  SYS_FSTAT      (fd, uint32_t *out_size)  -> int 0 / -1
+ *   96  SYS_STAT_PATH  (path, uint32_t *out_sz)  -> int 0 / -1
+ * ================================================================== */
+#define SYS_OPEN       90
+#define SYS_CLOSE_FD   91
+#define SYS_READ_FD    92
+#define SYS_WRITE_FD   93
+#define SYS_SEEK       94
+#define SYS_FSTAT      95
+#define SYS_STAT_PATH  96
+
 typedef struct {
   uint64_t pid;
   uint64_t cr3;
@@ -186,4 +209,29 @@ static inline int sys_mq_recv(int id, void *buf) {
 static inline void sys_mq_close(int id) {
   _syscall(SYS_MQ_CLOSE, (uint64_t)id, 0, 0, 0, 0);
 }
+
+/* ---- POSIX fd API wrappers ---- */
+
+static inline int sys_open(const char *path, int flags) {
+  return (int)_syscall(SYS_OPEN, (uint64_t)path, (uint64_t)flags, 0, 0, 0);
+}
+static inline int sys_close_fd(int fd) {
+  return (int)_syscall(SYS_CLOSE_FD, (uint64_t)fd, 0, 0, 0, 0);
+}
+static inline int sys_read_fd(int fd, void *buf, uint32_t size) {
+  return (int)_syscall(SYS_READ_FD, (uint64_t)fd, (uint64_t)buf, (uint64_t)size, 0, 0);
+}
+static inline int sys_write_fd(int fd, const void *buf, uint32_t size) {
+  return (int)_syscall(SYS_WRITE_FD, (uint64_t)fd, (uint64_t)buf, (uint64_t)size, 0, 0);
+}
+static inline int sys_seek(int fd, int32_t offset, int whence) {
+  return (int)_syscall(SYS_SEEK, (uint64_t)fd, (uint64_t)(int64_t)offset, (uint64_t)whence, 0, 0);
+}
+static inline int sys_fstat(int fd, uint32_t *out_size) {
+  return (int)_syscall(SYS_FSTAT, (uint64_t)fd, (uint64_t)out_size, 0, 0, 0);
+}
+static inline int sys_stat_path(const char *path, uint32_t *out_size) {
+  return (int)_syscall(SYS_STAT_PATH, (uint64_t)path, (uint64_t)out_size, 0, 0, 0);
+}
+
 #endif

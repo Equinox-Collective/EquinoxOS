@@ -16,5 +16,6 @@ struct stat {
 #define S_ISREG(m)  (((m) & 0170000) == 0100000)
 
 int stat(const char *pathname, struct stat *statbuf);
+int fstat(int fd, struct stat *statbuf);
 
 #endif

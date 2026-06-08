@@ -4,6 +4,10 @@
 #define WIN_H 300
 
 int main(int argc, char* argv[]) {
+    /* Отключаем попытку SDL использовать texture/GPU framebuffer —
+     * на EquinoxOS нет OpenGL, и неудачная попытка может оставить
+     * window surface в невалидном состоянии. Форсируем software path. */
+    SDL_SetHint(SDL_HINT_FRAMEBUFFER_ACCELERATION, "0");
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
         SDL_Log("SDL Init Failed: %s\n", SDL_GetError());
         return 1;
@@ -26,6 +30,7 @@ int main(int argc, char* argv[]) {
         SDL_Quit();
         return 1;
     }
+    SDL_Log("SDL init OK, window and renderer created.\n");
 
     SDL_bool running = SDL_TRUE;
     SDL_Event event;
