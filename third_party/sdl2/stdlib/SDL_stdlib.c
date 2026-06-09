@@ -30,6 +30,12 @@
 #include "SDL_stdinc.h"
 #include "../libm/math_libm.h"
 
+/* HAVE_MATH_H не задан в этой конфигурации, поэтому <math.h> не подключён.
+ * Явно объявляем libc floor/ceil из sdk/lib/math.c, чтобы при -DHAVE_FLOOR/
+ * -DHAVE_CEIL вызов не получил неявное объявление (int) и не испортил double. */
+extern double floor(double);
+extern double ceil(double);
+
 double
 SDL_atan(double x)
 {

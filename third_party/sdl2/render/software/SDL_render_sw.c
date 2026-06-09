@@ -32,6 +32,30 @@
 #include "SDL_blendpoint.h"
 #include "SDL_drawline.h"
 #include "SDL_drawpoint.h"
+
+/* --- DEBUG: одноразовый лог исполнения команд рисования через SYS_PRINT --- */
+static inline void swq_print(const char *s) {
+    register unsigned long n __asm__("rax") = 1;
+    register unsigned long a __asm__("rdi") = (unsigned long)s;
+    __asm__ volatile("int $0x80" : "+r"(n) : "r"(a)
+                     : "rsi","rdx","rcx","r8","r9","r10","r11","memory");
+}
+static void swq_dbg_rect(const char *tag, int count, SDL_Surface *s) {
+    char b[96]; int i = 0; const char *hex = "0123456789ABCDEF";
+    while (*tag) b[i++] = *tag++;
+    b[i++] = ' '; b[i++] = 'n'; b[i++] = '=';
+    { unsigned long n = (unsigned long)count; char t[12]; int p = 0;
+      if (!n) t[p++]='0'; while(n){t[p++]=(char)('0'+n%10); n/=10;}
+      while(p) b[i++]=t[--p]; }
+    const char *c = " clip=("; while (*c) b[i++] = *c++;
+    int vals[4] = { s->clip_rect.x, s->clip_rect.y, s->clip_rect.w, s->clip_rect.h };
+    for (int v = 0; v < 4; v++) {
+        long n = vals[v]; if (n < 0) { b[i++]='-'; n = -n; }
+        char t[12]; int p = 0; if (!n) t[p++]='0'; while(n){t[p++]=(char)('0'+n%10); n/=10;}
+        while(p) b[i++]=t[--p]; if (v<3) b[i++]=',';
+    }
+    b[i++]=')'; b[i++]='\n'; b[i]=0; swq_print(b);
+}
 #include "SDL_rotate.h"
 #include "SDL_triangle.h"
 
@@ -747,6 +771,7 @@ static int SW_RunCommandQueue(SDL_Renderer *renderer, SDL_RenderCommand *cmd, vo
                     }
                 }
 
+                { static int once = 1; if (once) { once = 0; swq_dbg_rect("[SWQ] DRAW_LINES", count, surface); } }
                 if (blend == SDL_BLENDMODE_NONE) {
                     SDL_DrawLines(surface, verts, count, SDL_MapRGBA(surface->format, r, g, b, a));
                 } else {
@@ -774,6 +799,7 @@ static int SW_RunCommandQueue(SDL_Renderer *renderer, SDL_RenderCommand *cmd, vo
                     }
                 }
 
+                { static int once = 1; if (once) { once = 0; swq_dbg_rect("[SWQ] FILL_RECTS", count, surface); } }
                 if (blend == SDL_BLENDMODE_NONE) {
                     SDL_FillRects(surface, verts, count, SDL_MapRGBA(surface->format, r, g, b, a));
                 } else {

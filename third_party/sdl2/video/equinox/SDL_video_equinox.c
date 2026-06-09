@@ -7,20 +7,22 @@
 #include "../../events/SDL_mouse_c.h"
 #include "SDL_video_equinox.h"
 
-/* Кастомные обертки системных вызовов EquinoxOS */
+/* Кастомные обертки системных вызовов EquinoxOS.
+ *
+ * Используем явные регистровые constraints вместо ручного `mov %N, %%reg`.
+ * Старый вариант (a) полагался на то, что компилятор сам разложит входы по
+ * регистрам, а потом перекладывал их инструкциями mov — это легко даёт
+ * конфликт, если GCC поместит вход в регистр, который asm перетирает; и
+ * (b) не помечал r9/r10/r11 как clobbered. r10/r11 — caller-saved в SysV ABI,
+ * поэтому ядро вправе их затирать; держать в них живые значения через
+ * inline `int 0x80` нельзя. Теперь GCC сам спилит то, что нужно. */
 static inline uint64_t equos_syscall(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
+    register uint64_t r8v __asm__("r8") = a5;
     uint64_t ret;
-    __asm__ volatile("mov %1, %%rax; "
-                     "mov %2, %%rdi; "
-                     "mov %3, %%rsi; "
-                     "mov %4, %%rdx; "
-                     "mov %5, %%rcx; "
-                     "mov %6, %%r8; "
-                     "int $0x80; "
-                     "mov %%rax, %0; "
-                     : "=r"(ret)
-                     : "r"(num), "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(a5)
-                     : "rax", "rdi", "rsi", "rdx", "rcx", "r8", "memory");
+    __asm__ volatile("int $0x80"
+                     : "=a"(ret)
+                     : "a"(num), "D"(a1), "S"(a2), "d"(a3), "c"(a4), "r"(r8v)
+                     : "r9", "r10", "r11", "memory");
     return ret;
 }
 
@@ -34,7 +36,7 @@ static inline void equos_get_window_pos(int *x, int *y) {
         "mov %%rbx, %1\n\t"
         : "=r"(rx), "=r"(rb)
         :
-        : "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r8", "memory"
+        : "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "memory"
     );
     if (x) *x = (int)rx;
     if (y) *y = (int)rb;
@@ -112,7 +114,7 @@ static int Equinox_VideoInit(SDL_VideoDevice *_this) {
         "mov %%rdx, %3\n\t"
         : "=r"(r_ax), "=r"(r_bx), "=r"(r_cx), "=r"(r_dx)
         :
-        : "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r8", "memory"
+        : "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "memory"
     );
     
     if (r_bx > 0) width = r_bx;
@@ -218,9 +220,38 @@ static int Equinox_UpdateWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window *w
     int x = data->win_x;
     int y = data->win_y;
 
+    static int uwf_first = 1;
+    if (uwf_first) {
+        /* Сэмплируем реальные пиксели буфера, который блитим: если они нулевые
+         * (чёрные) — значит SDL-рендерер не дорисовал в этот буфер. */
+        uint32_t *px = (uint32_t *)data->framebuffer;
+        int mid = (window->w * window->h) / 2;
+        char hb[80];
+        const char *hex = "0123456789ABCDEF";
+        uint32_t p0 = px ? px[0] : 0xDEAD;
+        uint32_t pm = px ? px[mid] : 0xDEAD;
+        int i = 0; const char *pfx = "[UWF] px0=0x";
+        while (pfx[i]) { hb[i] = pfx[i]; i++; }
+        for (int s = 28; s >= 0; s -= 4) hb[i++] = hex[(p0 >> s) & 0xF];
+        const char *pfx2 = " pmid=0x";
+        for (int j = 0; pfx2[j]; j++) hb[i++] = pfx2[j];
+        for (int s = 28; s >= 0; s -= 4) hb[i++] = hex[(pm >> s) & 0xF];
+        hb[i++] = '\n'; hb[i] = 0;
+        equos_syscall(1, (uint64_t)hb, 0, 0, 0, 0);
+        /* печатаем указатель блитимого буфера в hex */
+        char fb[40]; int k = 0; const char *fp = "[UWF] fb_ptr=0x";
+        while (fp[k]) { fb[k] = fp[k]; k++; }
+        uint64_t fv = (uint64_t)data->framebuffer;
+        for (int s = 60; s >= 0; s -= 4) fb[k++] = hex[(fv >> s) & 0xF];
+        fb[k++] = '\n'; fb[k] = 0;
+        equos_syscall(1, (uint64_t)fb, 0, 0, 0, 0);
+    }
+    if (uwf_first) equos_syscall(1, (uint64_t)"[UWF] A: enter, before sc36\n", 0, 0, 0, 0);
     /* Сообщаем ядру актуальную позицию и размер перед блитом */
     equos_syscall(36, (uint64_t)x, (uint64_t)y, (uint64_t)window->w, (uint64_t)window->h, 0);
+    if (uwf_first) equos_syscall(1, (uint64_t)"[UWF] B: after sc36, before sc5(blit)\n", 0, 0, 0, 0);
     equos_syscall(5, (uint64_t)x, (uint64_t)y, (uint64_t)window->w, (uint64_t)window->h, (uint64_t)data->framebuffer);
+    if (uwf_first) { equos_syscall(1, (uint64_t)"[UWF] C: after sc5(blit) done\n", 0, 0, 0, 0); uwf_first = 0; }
     return 0;
 }
 
@@ -269,7 +300,7 @@ static void Equinox_PumpEvents(SDL_VideoDevice *_this) {
         "mov %%rcx, %2\n\t"
         : "=r"(mx), "=r"(my), "=r"(m_btn)
         :
-        : "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r8", "memory"
+        : "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "memory"
     );
     
     int win_x = 100;
