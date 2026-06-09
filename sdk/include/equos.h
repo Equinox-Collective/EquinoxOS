@@ -30,6 +30,16 @@
 #define SYS_GET_TOTAL_MEM 35
 #define SYS_EXEC 50
 
+/* --- Этап 1: процессная модель (fork / waitpid / getpid) ----------------- *
+ *   51 SYS_FORK     ()                  -> pid ребёнка (родителю) / 0 (ребёнку) / -1
+ *   52 SYS_WAITPID  (pid, int *status)  -> pid завершившегося / -1 (ECHILD)
+ *   53 SYS_GETPID   ()                  -> pid текущего процесса
+ * pid == 0 в waitpid означает "любой ребёнок". status получает код,
+ * переданный в exit(). */
+#define SYS_FORK    51
+#define SYS_WAITPID 52
+#define SYS_GETPID  53
+
 /* --- IPC (added in HAL/sync/ipc patch set) --- */
 #define SYS_PIPE_CREATE 60
 #define SYS_PIPE_READ   61
@@ -136,6 +146,17 @@ static inline uint64_t _syscall(uint64_t num, uint64_t a1, uint64_t a2,
 
 static inline void *get_system_font() {
   return (void *)_syscall(SYS_GET_FONT, 0, 0, 0, 0, 0);
+}
+
+/* --- Этап 1: тонкие обёртки процессной модели ---------------------------- */
+static inline int64_t sys_fork(void) {
+  return (int64_t)_syscall(SYS_FORK, 0, 0, 0, 0, 0);
+}
+static inline int64_t sys_waitpid(int64_t pid, int *status) {
+  return (int64_t)_syscall(SYS_WAITPID, (uint64_t)pid, (uint64_t)status, 0, 0, 0);
+}
+static inline int64_t sys_getpid(void) {
+  return (int64_t)_syscall(SYS_GETPID, 0, 0, 0, 0, 0);
 }
 
 static inline void write_file(const char *name, void *buf, uint32_t size) {

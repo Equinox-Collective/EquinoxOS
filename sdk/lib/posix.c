@@ -525,8 +525,32 @@ int chdir(const char *path) {
 }
 
 pid_t getpid(void) {
-    /* Return a stable fake PID — good enough for most libs */
-    return 2;
+    /* Этап 1: настоящий pid из ядра (раньше возвращался фейк = 2). */
+    return (pid_t)sys_getpid();
+}
+
+/* --- Этап 1: процессная модель (POSIX-обёртки) --------------------------- *
+ * fork():  0 в ребёнке, pid ребёнка в родителе, -1 при ошибке.
+ * waitpid(): ждёт ребёнка, кодирует код выхода в *status как (code << 8),
+ *            чтобы работали стандартные WIFEXITED/WEXITSTATUS. */
+pid_t fork(void) {
+    return (pid_t)sys_fork();
+}
+
+pid_t waitpid(pid_t pid, int *status, int options) {
+    (void)options; /* WNOHANG пока не поддержан — всегда блокирующий */
+    int code = 0;
+    int64_t r = sys_waitpid((int64_t)pid, &code);
+    if (r >= 0 && status) {
+        /* Упаковываем как нормальный wait-status: младший байт = 0 (нет
+         * сигнала), следующий байт = код выхода. */
+        *status = (code & 0xFF) << 8;
+    }
+    return (pid_t)r;
+}
+
+pid_t wait(int *status) {
+    return waitpid(0, status, 0);
 }
 
 pid_t getppid(void) {

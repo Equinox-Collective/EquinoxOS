@@ -24,6 +24,15 @@ typedef struct task {
     bool running;
     uint64_t sleep_until;
     uint64_t brk;
+    /* --- Этап 1: процессная модель (fork / exit-status / waitpid) --------- *
+     * Минимальная POSIX-семантика родитель/ребёнок поверх кольцевого
+     * планировщика. fd-таблица пока глобальная (см. fs/fd.c) — её разнос
+     * по процессам будет в следующем этапе. */
+    uint64_t parent_id;   /* pid родителя (0 = нет родителя / init) */
+    bool     zombie;      /* процесс вызвал exit(), но ещё не reaped через waitpid */
+    int      exit_code;   /* код возврата из SYS_EXIT — отдаётся в waitpid */
+    bool     waiting;     /* родитель спит внутри waitpid()                */
+    uint64_t wait_for;    /* pid ожидаемого ребёнка (0 = любой ребёнок)    */
 } task_t;
 
 extern task_t* current_task; 
@@ -32,6 +41,25 @@ uint64_t schedule(uint64_t current_rsp); // Вызывается из ассем
 void yield(void);
 void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2, uint64_t cr3);
 bool task_exec(char* full_command);
+
+/* --- Этап 1: процессная модель ------------------------------------------- *
+ * task_fork(): клонирует текущий процесс. parent_frame — сохранённый кадр
+ * прерывания (stack_frame_t*) из обработчика int 0x80, т.е. регистры
+ * родителя на момент syscall. Возвращает pid ребёнка родителю; ребёнок
+ * "вернётся" из того же int 0x80 со значением 0 в rax. */
+uint64_t task_fork(stack_frame_t* parent_frame);
+
+/* Помечает текущий процесс зомби с кодом code, освобождает его адресное
+ * пространство и будит родителя, если тот ждёт в waitpid. Не возвращается
+ * (уходит в планировщик). Вызывается из обработчика SYS_EXIT. */
+void task_exit_current(int code);
+
+/* Ждёт завершения ребёнка. pid > 0 — конкретный ребёнок, 0 — любой.
+ * Пишет код выхода в *status_out (kernel-указатель). Возвращает pid
+ * завершившегося ребёнка, либо -1 если у процесса нет таких детей (ECHILD).
+ * Блокирует (через yield) пока подходящий ребёнок не станет зомби. */
+int64_t task_waitpid(uint64_t pid, int* status_out);
+
 void task_kill_self();
 bool task_terminate_by_pid(uint64_t pid);
 void task_list_all();

@@ -325,14 +325,9 @@ void syscall_handler(syscall_regs_t *regs)
       }
     }
 
-    // 1. Освобождаем физическую память процесса!
-    // Эту функцию мы написали в прошлом шаге (в vmm.c)
-    extern void vmm_destroy_address_space(uint64_t cr3_phys);
-    vmm_destroy_address_space(current_task->cr3);
-
-    // 2. Убиваем задачу
-    current_task->running = false;
-
+    // Освобождение памяти процесса, запись кода выхода, пометка zombie и
+    // пробуждение родителя в waitpid теперь выполняет task_exit_current()
+    // (см. конец case). Здесь оставляем только сброс GUI-состояния.
     extern bool is_app_running;
     is_app_running = false;
 
@@ -347,10 +342,61 @@ void syscall_handler(syscall_regs_t *regs)
 
     k_app_win_active = false; // Просто сбрасываем флаг активности
 
-    extern bool is_app_running;
-    is_app_running = false;
+    {
+      extern bool is_app_running;
+      is_app_running = false;
+    }
 
-    yield();
+    // Записываем код выхода (rdi), освобождаем память процесса, помечаем
+    // zombie и будим родителя, если он спит в waitpid. Не возвращается.
+    task_exit_current((int)regs->rdi);
+    break;
+  case 51: // SYS_FORK — клонирование текущего процесса
+  {
+    /* Транслируем syscall_regs_t -> stack_frame_t (кадр, который умеет
+     * восстанавливать планировщик в irq0_handler_asm). Ребёнок "вернётся"
+     * из int 0x80 с rax = 0; родителю возвращаем pid ребёнка. */
+    stack_frame_t pf;
+    pf.rax = 0;
+    pf.rbx = regs->rbx;
+    pf.rcx = regs->rcx;
+    pf.rdx = regs->rdx;
+    pf.rsi = regs->rsi;
+    pf.rdi = regs->rdi;
+    pf.rbp = regs->rbp;
+    pf.r8 = regs->r8;
+    pf.r9 = regs->r9;
+    pf.r10 = regs->r10;
+    pf.r11 = regs->r11;
+    pf.r12 = regs->r12;
+    pf.r13 = regs->r13;
+    pf.r14 = regs->r14;
+    pf.r15 = regs->r15;
+    pf.interrupt_number = 32;
+    pf.error_code = 0;
+    pf.rip = regs->rip;
+    pf.cs = regs->cs;
+    pf.rflags = regs->rflags;
+    pf.rsp = regs->rsp;
+    pf.ss = regs->ss;
+    regs->rax = task_fork(&pf);
+    break;
+  }
+  case 52: // SYS_WAITPID (pid, int* status) -> pid / -1
+  {
+    int st = 0;
+    int64_t r = task_waitpid(regs->rdi, &st);
+    if (regs->rsi)
+    {
+      stac();
+      *(int *)regs->rsi = st;
+      clac();
+    }
+    regs->rax = (uint64_t)r;
+    break;
+  }
+  case 53: // SYS_GETPID -> реальный pid текущего процесса
+    regs->rax = current_task->id;
     break;
   case 11:   // SYS_YIELD (Уступить процессор)
     yield(); // Фактический switch context через int $32

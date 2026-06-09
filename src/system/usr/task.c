@@ -313,6 +313,185 @@ bool task_exec(char* full_command) {
     return true;
 }
 
+/* ======================================================================== *
+ *  Этап 1 — Процессная модель: fork / exit-status / waitpid
+ *
+ *  Семантика поверх существующего кольцевого планировщика:
+ *   - task_fork()        дублирует процесс (eager-copy адресного пространства),
+ *                        ребёнок "возвращается" из int 0x80 с rax = 0.
+ *   - task_exit_current() помечает процесс зомби + код выхода, освобождает
+ *                        его память и будит родителя, ждущего в waitpid.
+ *   - task_waitpid()     reaping зомби-детей, отдаёт код выхода.
+ *
+ *  ОГРАНИЧЕНИЯ (TODO след. этапов):
+ *   - fd-таблица пока глобальная (fs/fd.c) — не дублируется при fork.
+ *   - eager-copy, без COW (просто и надёжно; COW — оптимизация позже).
+ *   - осиротевшие зомби (родитель умер раньше) не reaping'аются, остаются
+ *     в кольце как !running — как и текущие "мёртвые" задачи. Подметёт
+ *     будущий cleanup-проход планировщика / reparent к init.
+ * ======================================================================== */
+
+uint64_t task_fork(stack_frame_t* parent_frame) {
+    task_t* parent = current_task;
+
+    /* 1. Клонируем пользовательскую половину адресного пространства. */
+    page_table_t* child_pml4 = vmm_clone_address_space(parent->cr3);
+    if (!child_pml4) {
+        term_print("FORK: vmm_clone_address_space failed (OOM)\n");
+        return (uint64_t)-1;
+    }
+
+    /* 2. Структура задачи ребёнка. */
+    task_t* child = (task_t*)kmalloc(sizeof(task_t));
+    memset(child, 0, sizeof(task_t));
+    child->cr3       = PHYS(child_pml4);
+    child->id        = next_pid++;
+    child->parent_id = parent->id;
+    child->running   = true;
+    child->brk       = parent->brk;
+    child->fs_base   = parent->fs_base; /* тот же TLS-vaddr (страница скопирована) */
+    child->zombie    = false;
+
+    /* 3. Ядерный стек ребёнка (как в task_create: 4 страницы = 16 КБ). */
+    void* kstack_phys = pmm_alloc_continuous(4);
+    if (!kstack_phys) {
+        vmm_destroy_address_space(child->cr3);
+        kfree(child);
+        term_print("FORK: kstack alloc failed (OOM)\n");
+        return (uint64_t)-1;
+    }
+    child->kstack_at_bottom = (uint64_t)kstack_phys + hhdm_offset + 16384;
+
+    /* 4. Кадр прерывания ребёнка = копия родительского, но rax = 0,
+     *    чтобы fork() в ребёнке вернул 0. Все остальные регистры, rip,
+     *    user-rsp, cs/ss/rflags идентичны → ребёнок продолжит ровно
+     *    после своего int 0x80. */
+    stack_frame_t* cf =
+        (stack_frame_t*)(child->kstack_at_bottom - sizeof(stack_frame_t));
+    *cf = *parent_frame;
+    cf->rax = 0;
+    child->rsp = (uint64_t)cf;
+
+    /* 5. Вставляем в кольцо планировщика. */
+    if (!task_list) {
+        child->next = child;
+        task_list = child;
+    } else {
+        child->next = task_list->next ? task_list->next : task_list;
+        task_list->next = child;
+    }
+
+    return child->id; /* родитель получает pid ребёнка */
+}
+
+void task_exit_current(int code) {
+    task_t* me = current_task;
+
+    /* init (pid 1) убивать нельзя. */
+    if (me->id == 1) {
+        yield();
+        return;
+    }
+
+    me->exit_code = code;
+
+    /* Освобождаем пользовательскую память процесса. */
+    if (me->cr3 != 0 && me->cr3 != kernel_cr3) {
+        vmm_destroy_address_space(me->cr3);
+    }
+
+    me->running = false;
+    me->zombie  = true;
+
+    /* Будим родителя, если он спит в waitpid и ждёт именно нас (или любого). */
+    if (me->parent_id != 0 && task_list) {
+        task_t* p = task_list;
+        do {
+            if (p->id == me->parent_id) {
+                if (p->waiting &&
+                    (p->wait_for == 0 || p->wait_for == me->id)) {
+                    p->running = true;
+                    p->waiting = false;
+                }
+                break;
+            }
+            p = p->next;
+        } while (p && p != task_list);
+    }
+
+    /* Уходим в планировщик навсегда. Структуру task_t и kstack освободит
+     * родитель в waitpid (task_reap) — нельзя освобождать свой kstack,
+     * пока мы на нём. */
+    yield();
+    while (1)
+        ;
+}
+
+/* Отвязывает зомби-задачу из кольца и освобождает её ресурсы.
+ * Вызывается ТОЛЬКО из waitpid (т.е. с чужого, родительского стека). */
+static void task_reap(task_t* z) {
+    if (task_list) {
+        task_t* prev = task_list;
+        int guard = 0;
+        while (prev->next != z && guard++ < 100000)
+            prev = prev->next;
+        if (prev->next == z) {
+            prev->next = z->next;
+            if (task_list == z)
+                task_list = (z->next == z) ? NULL : z->next;
+        }
+    }
+
+    /* Освобождаем ядерный стек (выделен pmm_alloc_continuous(4)). */
+    if (z->kstack_at_bottom) {
+        uint64_t base_phys = z->kstack_at_bottom - 16384 - hhdm_offset;
+        for (int p = 0; p < 4; p++)
+            pmm_free((void*)(base_phys + (uint64_t)p * 4096));
+    }
+
+    kfree(z);
+}
+
+int64_t task_waitpid(uint64_t pid, int* status_out) {
+    while (1) {
+        bool have_child = false;
+        task_t* found = NULL;
+
+        if (task_list) {
+            task_t* t = task_list;
+            do {
+                if (t->parent_id == current_task->id &&
+                    (pid == 0 || t->id == pid)) {
+                    have_child = true;
+                    if (t->zombie) {
+                        found = t;
+                        break;
+                    }
+                }
+                t = t->next;
+            } while (t && t != task_list);
+        }
+
+        if (found) {
+            uint64_t cid = found->id;
+            if (status_out)
+                *status_out = found->exit_code;
+            task_reap(found);
+            return (int64_t)cid;
+        }
+
+        if (!have_child)
+            return -1; /* ECHILD: у процесса нет таких детей */
+
+        /* Блокируемся до тех пор, пока ребёнок не станет зомби. */
+        current_task->waiting  = true;
+        current_task->wait_for = pid;
+        current_task->running  = false;
+        yield();
+        current_task->waiting  = false;
+    }
+}
+
 // В task.c
 
 void task_kill_self() {
