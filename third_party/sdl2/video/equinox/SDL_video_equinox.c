@@ -238,6 +238,13 @@ static int Equinox_UpdateWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window *w
         for (int s = 28; s >= 0; s -= 4) hb[i++] = hex[(pm >> s) & 0xF];
         hb[i++] = '\n'; hb[i] = 0;
         equos_syscall(1, (uint64_t)hb, 0, 0, 0, 0);
+        /* печатаем указатель блитимого буфера в hex */
+        char fb[40]; int k = 0; const char *fp = "[UWF] fb_ptr=0x";
+        while (fp[k]) { fb[k] = fp[k]; k++; }
+        uint64_t fv = (uint64_t)data->framebuffer;
+        for (int s = 60; s >= 0; s -= 4) fb[k++] = hex[(fv >> s) & 0xF];
+        fb[k++] = '\n'; fb[k] = 0;
+        equos_syscall(1, (uint64_t)fb, 0, 0, 0, 0);
     }
     if (uwf_first) equos_syscall(1, (uint64_t)"[UWF] A: enter, before sc36\n", 0, 0, 0, 0);
     /* Сообщаем ядру актуальную позицию и размер перед блитом */

@@ -127,6 +127,18 @@ int main(int argc, char* argv[]) {
         }
         SDL_RenderFillRect(renderer, &rect);
 
+        if (frame == 0) {
+            /* PROBE: сравниваем буфер surface окна с тем, что блитится,
+             * и пишем напрямую в surface->pixels красный/зелёный пиксель. */
+            SDL_Surface *ws = SDL_GetWindowSurface(window);
+            DBGN("[SDLT] PROBE ws_ptr=", (unsigned long)ws);
+            if (ws) {
+                DBGN("[SDLT] PROBE ws_pixels=", (unsigned long)ws->pixels);
+                DBGN("[SDLT] PROBE ws_w=", (unsigned long)ws->w);
+                DBGN("[SDLT] PROBE ws_h=", (unsigned long)ws->h);
+                DBGN("[SDLT] PROBE ws_pitch=", (unsigned long)ws->pitch);
+            }
+        }
         if (frame == 0) DBG("[SDLT] 8: before RenderPresent\n");
         /* Выводим буфер на экран (дергает UpdateWindowFramebuffer) */
         SDL_RenderPresent(renderer);
