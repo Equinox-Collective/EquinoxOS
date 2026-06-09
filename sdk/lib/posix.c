@@ -129,15 +129,17 @@ size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
    * глобала перезаписан. */
   if (stream == stdout || stream == stderr || !stream ||
       (uintptr_t)stream < 0x1000) {
-    char tmp[1025];
+    /* Этап 2: пишем через fd (1=stdout, 2=stderr), а НЕ через SYS_PRINT, —
+     * чтобы вывод уважал перенаправление (dup2 в пайп/файл). Консольный
+     * конец fd 1/2 ядро по-прежнему печатает на экран. */
+    int fd = (stream == stderr) ? 2 : 1;
     size_t off = 0;
     while (off < total) {
       size_t chunk = total - off;
-      if (chunk > sizeof(tmp) - 1) chunk = sizeof(tmp) - 1;
-      memcpy(tmp, (const char *)ptr + off, chunk);
-      tmp[chunk] = '\0';
-      _syscall(1, (uint64_t)tmp, 0, 0, 0, 0);
-      off += chunk;
+      if (chunk > 0x40000) chunk = 0x40000; /* батчим крупные записи */
+      int wr = sys_write_fd(fd, (const char *)ptr + off, (uint32_t)chunk);
+      if (wr <= 0) break;
+      off += (size_t)wr;
     }
     return nmemb;
   }
@@ -502,14 +504,15 @@ int unlink(const char *pathname) {
 }
 
 int dup(int oldfd) {
-    /* Stub */
-    (void)oldfd;
-    return -1;
+    return sys_dup(oldfd);
 }
 
 int dup2(int oldfd, int newfd) {
-    (void)oldfd; (void)newfd;
-    return -1;
+    return sys_dup2(oldfd, newfd);
+}
+
+int pipe(int fds[2]) {
+    return sys_pipe(fds);
 }
 
 char *getcwd(char *buf, size_t size) {

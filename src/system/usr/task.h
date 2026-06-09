@@ -33,6 +33,11 @@ typedef struct task {
     int      exit_code;   /* код возврата из SYS_EXIT — отдаётся в waitpid */
     bool     waiting;     /* родитель спит внутри waitpid()                */
     uint64_t wait_for;    /* pid ожидаемого ребёнка (0 = любой ребёнок)    */
+    /* --- Этап 2: процессная таблица дескрипторов (см. fs/fd.c) ---------- *
+     * Указатель непрозрачный (struct fd_table определён в fd.h), чтобы не
+     * тянуть fd.h в task.h. fork клонирует таблицу, execve сохраняет,
+     * exit освобождает. */
+    struct fd_table *fdt;
 } task_t;
 
 extern task_t* current_task; 
@@ -68,6 +73,9 @@ void task_exit_current(int code);
  * завершившегося ребёнка, либо -1 если у процесса нет таких детей (ECHILD).
  * Блокирует (через yield) пока подходящий ребёнок не станет зомби. */
 int64_t task_waitpid(uint64_t pid, int* status_out);
+
+/* Этап 2: вернуть таблицу дескрипторов текущего процесса (для fs/fd.c). */
+struct fd_table *task_current_fdt(void);
 
 void task_kill_self();
 bool task_terminate_by_pid(uint64_t pid);

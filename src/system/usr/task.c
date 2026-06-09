@@ -7,6 +7,7 @@
 #include "../../syslibc/stdio.h"
 #include "../../syslibc/string.h"
 #include "../fs/vfs.h"
+#include "../fs/fd.h"
 #include <stdint.h>
 
 extern void term_print(const char *str);
@@ -36,14 +37,22 @@ static uint64_t kernel_cr3 = 0;
 void task_init() {
     __asm__ volatile("mov %%cr3, %0" : "=r"(kernel_cr3));
     current_task = (task_t*)kmalloc(sizeof(task_t));
+    memset(current_task, 0, sizeof(task_t));
     current_task->cr3 = kernel_cr3;
     current_task->id = next_pid++;
     current_task->running = true;
 
     current_task->kstack_at_bottom = (uint64_t)kmalloc(16384) + 16384; 
-    
+    /* Этап 2: таблица дескрипторов init-процесса (0/1/2 = консоль). */
+    current_task->fdt = fd_table_create();
+
     current_task->next = current_task;
     task_list = current_task;
+}
+
+/* Этап 2: таблица дескрипторов текущего процесса (используется fs/fd.c). */
+struct fd_table *task_current_fdt(void) {
+    return current_task ? current_task->fdt : NULL;
 }
 
 void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2, uint64_t cr3) {
@@ -53,6 +62,8 @@ void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2, uint64_t cr3) {
   new_task->id = next_pid++;
   new_task->running = true;
   new_task->cr3 = cr3;
+  /* Этап 2: своя таблица дескрипторов (0/1/2 = консоль). */
+  new_task->fdt = fd_table_create();
 
   // 1. Ядерный стек (для прерываний)
   void *kstack_phys = pmm_alloc_continuous(4);
@@ -504,6 +515,9 @@ uint64_t task_fork(stack_frame_t* parent_frame) {
     child->brk       = parent->brk;
     child->fs_base   = parent->fs_base; /* тот же TLS-vaddr (страница скопирована) */
     child->zombie    = false;
+    /* Этап 2: ребёнок наследует таблицу дескрипторов — ofd'шки разделяются
+     * (refcount++), так что пайпы/файлы остаются открытыми у обоих. */
+    child->fdt       = fd_table_clone(parent->fdt);
 
     /* 3. Ядерный стек ребёнка (как в task_create: 4 страницы = 16 КБ). */
     void* kstack_phys = pmm_alloc_continuous(4);
@@ -547,6 +561,14 @@ void task_exit_current(int code) {
     }
 
     me->exit_code = code;
+
+    /* Этап 2: закрываем все дескрипторы (flush файлов, закрытие концов пайпов —
+     * читатель/писатель на другом конце получит EOF). Делается на нашем стеке,
+     * до ухода в планировщик; освобождает только kheap-объекты, не kstack. */
+    if (me->fdt) {
+        fd_table_destroy(me->fdt);
+        me->fdt = NULL;
+    }
 
     /* Освобождаем пользовательскую память процесса. */
     if (me->cr3 != 0 && me->cr3 != kernel_cr3) {
@@ -650,6 +672,12 @@ int64_t task_waitpid(uint64_t pid, int* status_out) {
 void task_kill_self() {
   if (current_task->id == 1)
     return; // Нельзя убить idle/kernel процесс
+
+  // Этап 2: закрываем дескрипторы (как в task_exit_current).
+  if (current_task->fdt) {
+    fd_table_destroy(current_task->fdt);
+    current_task->fdt = NULL;
+  }
 
   // 1. Освобождаем всю пользовательскую память (Ring 3)
   // Это сразу вернет мегабайты в монитор!

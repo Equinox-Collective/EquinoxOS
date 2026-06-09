@@ -19,6 +19,8 @@ typedef struct {
     uint32_t    tail;          /* next byte to write */
     uint32_t    count;
     bool        closed;
+    int         readers_open;  /* Этап 2: число открытых read-концов  */
+    int         writers_open;  /* Этап 2: число открытых write-концов */
     kmutex_t    lock;
     waitqueue_t readers;
     waitqueue_t writers;
@@ -125,6 +127,41 @@ void pipe_close(int id) {
     /* If the buffer is empty and we're closed, fully free the slot. We
      * keep a closed-but-not-empty pipe around so the last reader can drain. */
     if (p->count == 0) {
+        p->used = false;
+    }
+}
+
+/* ---- Этап 2: учёт концов пайпа ----------------------------------------- */
+void pipe_set_ends(int id, int readers, int writers) {
+    if (!pipe_valid(id)) return;
+    pipe_t *p = &pipes[id];
+    p->readers_open = readers;
+    p->writers_open = writers;
+}
+
+void pipe_unref(int id, bool write_end) {
+    if (!pipe_valid(id)) return;
+    pipe_t *p = &pipes[id];
+
+    mutex_lock(&p->lock);
+    if (write_end) {
+        if (p->writers_open > 0) p->writers_open--;
+        /* Нет больше писателей → читатель должен увидеть EOF. */
+        if (p->writers_open == 0) p->closed = true;
+    } else {
+        if (p->readers_open > 0) p->readers_open--;
+        /* Нет больше читателей → писатель не должен блокироваться вечно. */
+        if (p->readers_open == 0) p->closed = true;
+    }
+    bool both_gone = (p->readers_open == 0 && p->writers_open == 0);
+    mutex_unlock(&p->lock);
+
+    /* Будим всех ожидающих, чтобы они перепроверили closed. */
+    wq_wake_all(&p->readers);
+    wq_wake_all(&p->writers);
+
+    /* Оба конца закрыты и буфер пуст — освобождаем слот. */
+    if (both_gone && p->count == 0) {
         p->used = false;
     }
 }

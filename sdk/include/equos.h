@@ -120,6 +120,10 @@
 #define SYS_SEEK       94
 #define SYS_FSTAT      95
 #define SYS_STAT_PATH  96
+/* Этап 2: процессная fd-таблица — пайпы и дублирование дескрипторов. */
+#define SYS_PIPE       97   /* (int fds[2])      -> 0 / -1                 */
+#define SYS_DUP        98   /* (oldfd)           -> newfd / -1            */
+#define SYS_DUP2       99   /* (oldfd, newfd)    -> newfd / -1            */
 
 typedef struct {
   uint64_t pid;
@@ -261,6 +265,16 @@ static inline int sys_fstat(int fd, uint32_t *out_size) {
 }
 static inline int sys_stat_path(const char *path, uint32_t *out_size) {
   return (int)_syscall(SYS_STAT_PATH, (uint64_t)path, (uint64_t)out_size, 0, 0, 0);
+}
+/* Этап 2: pipe / dup / dup2. */
+static inline int sys_pipe(int fds[2]) {
+  return (int)_syscall(SYS_PIPE, (uint64_t)fds, 0, 0, 0, 0);
+}
+static inline int sys_dup(int oldfd) {
+  return (int)_syscall(SYS_DUP, (uint64_t)oldfd, 0, 0, 0, 0);
+}
+static inline int sys_dup2(int oldfd, int newfd) {
+  return (int)_syscall(SYS_DUP2, (uint64_t)oldfd, (uint64_t)newfd, 0, 0, 0);
 }
 
 #endif

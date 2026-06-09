@@ -1256,24 +1256,13 @@ void syscall_handler(syscall_regs_t *regs)
     break;
   }
   case 93:
-  { /* SYS_WRITE_FD (fd, buf, size) -> bytes_written / -1 */
+  { /* SYS_WRITE_FD (fd, buf, size) -> bytes_written / -1
+     * Этап 2: fd 1/2 больше НЕ спец-кейсятся здесь — консоль обрабатывает
+     * сам fd_write (kind == OFD_CONSOLE). Иначе перенаправление stdout в
+     * пайп/файл (dup2) не работало бы. */
     int      fd   = (int)regs->rdi;
     const void *buf = (const void *)regs->rsi;
     uint32_t size  = (uint32_t)regs->rdx;
-
-    /* fds 1/2 map to terminal print (same as SYS_WRITE case 16) */
-    if (fd == 1 || fd == 2) {
-      /* Copy to kernel buf first to safely call term_print */
-      char kb[512];
-      uint32_t to_copy = (size < sizeof(kb) - 1) ? size : sizeof(kb) - 1;
-      stac();
-      memcpy(kb, buf, to_copy);
-      clac();
-      kb[to_copy] = '\0';
-      term_print(kb);
-      regs->rax = (uint64_t)to_copy;
-      break;
-    }
     stac();
     int rc = fd_write(fd, buf, size);
     clac();
@@ -1322,6 +1311,32 @@ void syscall_handler(syscall_regs_t *regs)
       clac();
     }
     regs->rax = (uint64_t)(int64_t)rc;
+    break;
+  }
+
+  /* ---- Этап 2: pipe / dup / dup2 ------------------------------------- */
+  case 97:
+  { /* SYS_PIPE (int fds[2]) -> 0 / -1 */
+    int *user_fds = (int *)regs->rdi;
+    int kfds[2] = { -1, -1 };
+    int rc = fd_make_pipe(kfds);
+    if (rc == 0 && user_fds) {
+      stac();
+      user_fds[0] = kfds[0];
+      user_fds[1] = kfds[1];
+      clac();
+    }
+    regs->rax = (uint64_t)(int64_t)rc;
+    break;
+  }
+  case 98:
+  { /* SYS_DUP (oldfd) -> newfd / -1 */
+    regs->rax = (uint64_t)(int64_t)fd_dup((int)regs->rdi);
+    break;
+  }
+  case 99:
+  { /* SYS_DUP2 (oldfd, newfd) -> newfd / -1 */
+    regs->rax = (uint64_t)(int64_t)fd_dup2((int)regs->rdi, (int)regs->rsi);
     break;
   }
 

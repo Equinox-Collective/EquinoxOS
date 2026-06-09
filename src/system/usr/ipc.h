@@ -45,6 +45,14 @@ int32_t pipe_read (int id, void *buf, uint32_t size);
 int32_t pipe_write(int id, const void *buf, uint32_t size);
 void    pipe_close(int id);
 
+/* Этап 2: учёт открытых концов пайпа для корректного EOF.
+ *  - pipe_set_ends(): задать начальное число read/write концов (fd_make_pipe).
+ *  - pipe_unref(id, write_end): закрыть один конец. Когда закрыт последний
+ *    write-конец — пайп помечается closed (читатель получает EOF); когда оба
+ *    счётчика дошли до нуля — слот пайпа освобождается. */
+void    pipe_set_ends(int id, int readers, int writers);
+void    pipe_unref(int id, bool write_end);
+
 int     mq_create(uint32_t msg_size);
 int32_t mq_send(int id, const void *buf, uint32_t prio);
 int32_t mq_recv(int id, void *buf); /* returns bytes received, or -1 */

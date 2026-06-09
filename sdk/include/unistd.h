@@ -32,6 +32,7 @@ int     access(const char *pathname, int mode);
 int     unlink(const char *pathname);
 int     dup(int oldfd);
 int     dup2(int oldfd, int newfd);
+int     pipe(int fds[2]);
 int     isatty(int fd);
 char   *getcwd(char *buf, size_t size);
 int     chdir(const char *path);

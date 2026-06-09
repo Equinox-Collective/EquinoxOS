@@ -439,8 +439,9 @@ void kmain(void) {
   serial_puts(COM1, "Shared memory initialized\n");
   ipc_init();
   serial_puts(COM1, "IPC (pipes + mqueue) initialized\n");
-  fd_table_init();
-  serial_puts(COM1, "FD table initialized\n");
+  /* Этап 2: глобальной fd-таблицы больше нет — у каждого процесса своя
+   * (task->fdt, создаётся в task_init/task_create/fork). */
+  serial_puts(COM1, "FD tables are now per-process\n");
   hal_init();
   serial_puts(COM1, "HAL initialized\n");
 
