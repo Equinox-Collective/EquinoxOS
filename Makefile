@@ -323,7 +323,7 @@ doom.elf: setup $(SDK_OBJS) $(DOOM_OBJS)
 # --- APPS BUILD RULES --------------------------------------------------------
 APP_SRCS = $(wildcard app/*.c)
 APP_OBJS = $(patsubst app/%.c,app/%.o,$(APP_SRCS))
-APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_ROOT)/bin/htmlview.elf $(ISO_ROOT)/bin/niplay.elf $(ISO_ROOT)/bin/widget_demo.elf $(ISO_ROOT)/bin/ipc_test.elf $(ISO_ROOT)/bin/randtest.elf $(ISO_ROOT)/bin/socktest.elf $(ISO_ROOT)/bin/sdltest.elf $(ISO_ROOT)/bin/forktest.elf $(ISO_ROOT)/bin/exectest.elf $(ISO_ROOT)/bin/pipetest.elf $(ISO_ROOT)/bin/envtest.elf $(ISO_ROOT)/bin/sigtest.elf $(ISO_ROOT)/bin/ttytest.elf $(ISO_ROOT)/bin/lxtest.elf $(ISO_ROOT)/bin/stktest.elf
+APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_ROOT)/bin/htmlview.elf $(ISO_ROOT)/bin/niplay.elf $(ISO_ROOT)/bin/widget_demo.elf $(ISO_ROOT)/bin/ipc_test.elf $(ISO_ROOT)/bin/randtest.elf $(ISO_ROOT)/bin/socktest.elf $(ISO_ROOT)/bin/sdltest.elf $(ISO_ROOT)/bin/forktest.elf $(ISO_ROOT)/bin/exectest.elf $(ISO_ROOT)/bin/pipetest.elf $(ISO_ROOT)/bin/envtest.elf $(ISO_ROOT)/bin/sigtest.elf $(ISO_ROOT)/bin/ttytest.elf $(ISO_ROOT)/bin/lxtest.elf $(ISO_ROOT)/bin/stktest.elf $(ISO_ROOT)/bin/fstest.elf
 
 # Apps that link against libbearssl.a (phase 3b+). These get their own
 # explicit rules below because they need (a) BearSSL public headers in the
@@ -360,6 +360,11 @@ $(ISO_ROOT)/bin/%.elf: app/%.o $(SDK_OBJS)
 # SDK_OBJS — иначе конфликт символа _start с crt0.
 $(ISO_ROOT)/bin/stktest.elf: app/stktest.o
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start app/stktest.o -o $@
+
+# fstest.elf — Этап 6b: тест выживания FS_BASE (TLS) через переключения
+# контекста. Тоже свой _start, без SDK_OBJS.
+$(ISO_ROOT)/bin/fstest.elf: app/fstest.o
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start app/fstest.o -o $@
 
 app/%.o: app/%.c
 	$(CC) $(USER_CFLAGS) -c $< -o $@

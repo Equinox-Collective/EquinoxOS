@@ -1615,6 +1615,11 @@ void linux_syscall_handler(syscall_regs_t *regs)
     if (code == 0x1002) {                     /* ARCH_SET_FS */
       uint32_t lo = (uint32_t)addr, hi = (uint32_t)(addr >> 32);
       __asm__ volatile("wrmsr" :: "c"(0xC0000100), "a"(lo), "d"(hi));
+      /* Этап 6b: ОБЯЗАТЕЛЬНО сохраняем FS_BASE в задаче, иначе schedule()
+       * на следующем же тике перезапишет MSR старым current_task->fs_base
+       * (значением с момента создания задачи) и затрёт TLS-указатель musl —
+       * errno/TLS развалятся после первого переключения контекста. */
+      current_task->fs_base = addr;
       regs->rax = 0;
     } else if (code == 0x1003) {              /* ARCH_GET_FS */
       uint32_t lo, hi;
