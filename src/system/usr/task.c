@@ -100,9 +100,11 @@ void task_resolve_fs_path(const char *in, char *out, int outsz) {
     out[j] = '\0';
 }
 
-void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2, uint64_t cr3) {
+task_t* task_create_full(void (*entry)(), uint64_t arg1, uint64_t arg2,
+                         uint64_t cr3, const sysv_args_t *sv) {
   task_t *new_task = (task_t *)kmalloc(sizeof(task_t));
   memset(new_task, 0, sizeof(task_t));
+  void *top_stack_phys = 0; /* Этап 6b: phys верхней страницы user-стека */
   new_task->brk = 0x40000000;
   new_task->id = next_pid++;
   new_task->running = true;
@@ -144,6 +146,9 @@ void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2, uint64_t cr3) {
 
       // Обнуляем страницу (через HHDM), чтобы не было мусора
       memset((void *)VIRT(phys), 0, 4096);
+
+      // Этап 6b: запоминаем верхнюю страницу — на ней строим SysV-кадр.
+      if (vaddr == stack_top - 4096) top_stack_phys = phys;
     }
 
     // TLS...
@@ -174,6 +179,61 @@ void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2, uint64_t cr3) {
     frame->ss = 0x1B;
   }
 
+  /* --- Этап 6b: System V AMD64 initial stack (для musl / Linux-ABI). --------
+   * Строим ДО вставки задачи в кольцо планировщика, чтобы не было гонки с
+   * переключением контекста. Кадр кладётся на ВЕРШИНУ user-стека:
+   *   rsp -> argc, argv[0..n-1], NULL, envp[0..m-1], NULL, auxv..., AT_NULL.
+   * Строки argv/envp НЕ копируем — argv_user/envp_user уже указывают на них
+   * (argv-страница 0xB0000000). Родной crt0 читает argc/argv из регистров и
+   * этот кадр игнорирует, поэтому существующие приложения не ломаются. */
+  if (sv && cr3 != 0 && top_stack_phys) {
+    uint64_t stack_top = 0x70000000000ULL;
+    uint64_t base_user = stack_top - 4096;
+    uint8_t *topk = (uint8_t *)VIRT(top_stack_phys);
+    #define U2K(u) ((void *)(topk + ((uint64_t)(u) - base_user)))
+    uint64_t sp = stack_top;
+    int argc = sv->argc, envc = sv->envc;
+
+    /* 16 случайных байт для AT_RANDOM (stack canary / TLS у musl). */
+    sp -= 16;
+    rdrand_bytes(U2K(sp), 16);
+    uint64_t at_random = sp;
+    sp &= ~0xFULL;
+
+    uint64_t aux[32]; int an = 0;
+    if (sv->at_phdr) {
+      aux[an++] = 3;  aux[an++] = sv->at_phdr;     /* AT_PHDR  */
+      aux[an++] = 4;  aux[an++] = sv->at_phent;    /* AT_PHENT */
+      aux[an++] = 5;  aux[an++] = sv->at_phnum;    /* AT_PHNUM */
+    }
+    aux[an++] = 6;  aux[an++] = 4096;              /* AT_PAGESZ */
+    aux[an++] = 9;  aux[an++] = sv->at_entry;      /* AT_ENTRY  */
+    aux[an++] = 11; aux[an++] = 0;                 /* AT_UID    */
+    aux[an++] = 12; aux[an++] = 0;                 /* AT_EUID   */
+    aux[an++] = 13; aux[an++] = 0;                 /* AT_GID    */
+    aux[an++] = 14; aux[an++] = 0;                 /* AT_EGID   */
+    aux[an++] = 23; aux[an++] = 0;                 /* AT_SECURE */
+    aux[an++] = 17; aux[an++] = 100;               /* AT_CLKTCK */
+    aux[an++] = 25; aux[an++] = at_random;         /* AT_RANDOM */
+    aux[an++] = 0;  aux[an++] = 0;                 /* AT_NULL   */
+
+    int slots = 1 + (argc + 1) + (envc + 1) + an;
+    if (slots & 1) sp -= 8;          /* финальный rsp кратен 16 */
+    sp -= (uint64_t)slots * 8;
+    if (sp >= base_user) {           /* кадр поместился в верхнюю страницу */
+      uint64_t *w = (uint64_t *)U2K(sp);
+      int idx = 0;
+      w[idx++] = (uint64_t)argc;
+      for (int i = 0; i < argc; i++) w[idx++] = sv->argv_user[i];
+      w[idx++] = 0;
+      for (int i = 0; i < envc; i++) w[idx++] = sv->envp_user[i];
+      w[idx++] = 0;
+      for (int i = 0; i < an; i++)   w[idx++] = aux[i];
+      frame->rsp = sp;               /* ring-3 стартует уже с SysV-кадром */
+    }
+    #undef U2K
+  }
+
   new_task->rsp = (uint64_t)frame;
   // Защита от поломанного ring-а: если task_list ещё не проинициализирован
   // (теоретически не должно случаться, т.к. task_init выполняется первым),
@@ -185,6 +245,12 @@ void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2, uint64_t cr3) {
     new_task->next = task_list->next ? task_list->next : task_list;
     task_list->next = new_task;
   }
+  return new_task;
+}
+
+/* Тонкая обёртка для существующих вызовов (без SysV-кадра). */
+void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2, uint64_t cr3) {
+  task_create_full(entry, arg1, arg2, cr3, 0);
 }
 
 // task.c
@@ -279,12 +345,20 @@ bool task_exec(char* full_command) {
     page_table_t* proc_pml4 = vmm_create_address_space();
     uint64_t phys_pml4 = PHYS(proc_pml4);
     Elf64_Phdr* phdr = (Elf64_Phdr*)(elf_raw + header->e_phoff);
+    /* Этап 6b: адрес таблицы Program Headers в памяти процесса (AT_PHDR для
+     * musl — он ищет PT_TLS). Берём PT_LOAD, который перекрывает e_phoff. */
+    uint64_t phdr_user = 0;
+    uint64_t phsz = (uint64_t)header->e_phnum * header->e_phentsize;
     for (int i = 0; i < header->e_phnum; i++) {
         if (phdr[i].p_type == 1) { // PT_LOAD
             uint64_t vaddr = phdr[i].p_vaddr;
             uint64_t memsz = phdr[i].p_memsz;
             uint64_t filesz = phdr[i].p_filesz;
             uint64_t offset = phdr[i].p_offset;
+            if (phdr_user == 0 &&
+                offset <= header->e_phoff &&
+                header->e_phoff + phsz <= offset + phdr[i].p_filesz)
+                phdr_user = vaddr + (header->e_phoff - offset);
 
             // DEBUG: Segment details
             char log[128];
@@ -364,8 +438,22 @@ bool task_exec(char* full_command) {
 
     term_print("EXEC: Starting Ring 3 process with arguments...\n");
 
-    task_create((void(*)())header->e_entry, (uint64_t)argc, user_argv_page, phys_pml4);
-    
+    /* Этап 6b: строим SysV initial stack (argc/argv/envp/auxv) для musl.
+     * argv-указатели уже пользовательские (user_argv_array[i] в 0xB0000000),
+     * строки на стек не копируем. envp пока пустой. Родной crt0 кадр игнорит. */
+    sysv_args_t sv = {
+        .argc      = argc,
+        .argv_user = user_argv_array,
+        .envc      = 0,
+        .envp_user = 0,
+        .at_phdr   = phdr_user,
+        .at_phent  = header->e_phentsize,
+        .at_phnum  = header->e_phnum,
+        .at_entry  = header->e_entry,
+    };
+    task_create_full((void(*)())header->e_entry, (uint64_t)argc,
+                     user_argv_page, phys_pml4, &sv);
+
     // FS base will be set by the scheduler when it switches to this task
     
     kfree(elf_raw);

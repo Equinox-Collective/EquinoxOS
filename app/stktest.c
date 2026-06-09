@@ -43,24 +43,33 @@ static void kprint_x(unsigned long v) {
   kprint("0x"); kprint(&b[i + 1]);
 }
 
-/* разбор SysV-кадра: sp указывает на argc */
+/* разбор SysV-кадра: sp указывает на argc.
+ * ВАЖНО: все обходы массивов ОГРАНИЧЕНЫ верхней страницей стека. stack_top
+ * выровнен по 4 KiB и НЕ отображён, поэтому первый адрес за ним = (sp|0xFFF)+1.
+ * Любое чтение по этому адресу и выше вызвало бы #PF — мы такого не делаем,
+ * так что даже при кривом кадре тест печатает FAIL, а не роняет ядро. */
 static void stk_main(unsigned long *sp) {
+  unsigned long top = ((unsigned long)sp | 0xFFFUL) + 1; /* = stack_top */
+  #define INRANGE(p) ((unsigned long)(p) + 8 <= top)
+
   long argc = (long)sp[0];
+  if (argc < 0 || argc > 4096) argc = 0;  /* защита от мусорного argc */
   char **argv = (char **)&sp[1];
   char **envp = argv + argc + 1;          /* после NULL-терминатора argv */
 
   kprint("stktest: SysV stack OK\n");
   kprint("  argc = "); kprint_u((unsigned long)argc); kprint("\n");
-  for (long i = 0; i < argc; i++) {
+  for (long i = 0; i < argc && INRANGE(&argv[i]); i++) {
     kprint("  argv["); kprint_u((unsigned long)i); kprint("] = ");
     kprint(argv[i] ? argv[i] : "(null)");
     kprint(" (len "); kprint_u((unsigned long)slen(argv[i])); kprint(")\n");
   }
-  if (argv[argc] != 0) kprint("  !! argv not NULL-terminated\n");
+  if (INRANGE(&argv[argc]) && argv[argc] != 0)
+    kprint("  !! argv not NULL-terminated\n");
 
-  /* envp */
+  /* envp (обход ограничен страницей) */
   int envc = 0;
-  while (envp[envc]) envc++;
+  while (INRANGE(&envp[envc]) && envp[envc]) envc++;
   kprint("  envc = "); kprint_u((unsigned long)envc); kprint("\n");
   for (int i = 0; i < envc && i < 8; i++) {
     kprint("  envp["); kprint_u((unsigned long)i); kprint("] = ");
@@ -71,7 +80,7 @@ static void stk_main(unsigned long *sp) {
   unsigned long *aux = (unsigned long *)(envp + envc + 1);
   int auxn = 0;
   unsigned long at_random = 0, at_pagesz = 0, at_entry = 0, at_phdr = 0, at_phnum = 0;
-  for (; aux[0] != 0; aux += 2) {
+  for (; INRANGE(&aux[1]) && aux[0] != 0; aux += 2) {
     auxn++;
     switch (aux[0]) {
       case 3:  at_phdr   = aux[1]; break;
@@ -88,7 +97,7 @@ static void stk_main(unsigned long *sp) {
   kprint("  AT_PHNUM  = "); kprint_u(at_phnum); kprint("\n");
   kprint("  AT_ENTRY  = "); kprint_x(at_entry); kprint("\n");
   kprint("  AT_RANDOM = "); kprint_x(at_random);
-  if (at_random) {
+  if (at_random && INRANGE((unsigned long *)at_random)) {
     unsigned char *r = (unsigned char *)at_random;
     kprint("  bytes="); for (int i = 0; i < 4; i++) { kprint_x(r[i]); kprint(" "); }
   }
@@ -96,9 +105,10 @@ static void stk_main(unsigned long *sp) {
 
   /* базовые проверки */
   int pass = (argc >= 1) && (at_pagesz == 4096) && (at_random != 0) &&
-             (argv[argc] == 0);
+             INRANGE(&argv[argc]) && (argv[argc] == 0);
   kprint(pass ? "stktest: PASS\n" : "stktest: FAIL\n");
   kexit(pass ? 0 : 1);
+  #undef INRANGE
 }
 
 /* Свой _start: захватываем rsp (= указатель на argc) и идём в stk_main. */

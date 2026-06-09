@@ -58,6 +58,28 @@ void task_init();
 uint64_t schedule(uint64_t current_rsp); // Вызывается из ассемблера
 void yield(void);
 void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2, uint64_t cr3);
+
+/* --- Этап 6b: System V AMD64 initial stack для musl / Linux-ABI бинарей ----
+ * Описывает данные для построения SysV-кадра на вершине пользовательского
+ * стека (argc / argv[] / NULL / envp[] / NULL / auxv / AT_NULL). Указатели
+ * argv_user/envp_user — это УЖЕ пользовательские адреса строк (напр. в argv-
+ * странице 0xB0000000), строки на стек НЕ копируются. Родной crt0 этот кадр
+ * игнорирует (читает argc/argv из регистров), поэтому детект ABI не нужен. */
+typedef struct {
+    int argc;
+    const uint64_t *argv_user;   /* argc пользовательских указателей на строки */
+    int envc;
+    const uint64_t *envp_user;   /* envc указателей (может быть NULL при envc=0) */
+    uint64_t at_phdr;            /* адрес Program Headers в памяти процесса      */
+    uint64_t at_phent;           /* размер одной записи PH                        */
+    uint64_t at_phnum;           /* число записей PH                              */
+    uint64_t at_entry;           /* точка входа ELF (e_entry)                     */
+} sysv_args_t;
+
+/* Полный конструктор задачи. sv != NULL и cr3 != 0 -> дополнительно строит
+ * SysV-кадр и ставит на него user-rsp. Возвращает созданную задачу. */
+task_t* task_create_full(void (*entry)(), uint64_t arg1, uint64_t arg2,
+                         uint64_t cr3, const sysv_args_t *sv);
 bool task_exec(char* full_command);
 
 /* Этап 1b — execve. task_load_image() загружает ELF в НОВОЕ адресное
