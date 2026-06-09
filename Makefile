@@ -323,7 +323,7 @@ doom.elf: setup $(SDK_OBJS) $(DOOM_OBJS)
 # --- APPS BUILD RULES --------------------------------------------------------
 APP_SRCS = $(wildcard app/*.c)
 APP_OBJS = $(patsubst app/%.c,app/%.o,$(APP_SRCS))
-APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_ROOT)/bin/htmlview.elf $(ISO_ROOT)/bin/niplay.elf $(ISO_ROOT)/bin/widget_demo.elf $(ISO_ROOT)/bin/ipc_test.elf $(ISO_ROOT)/bin/randtest.elf $(ISO_ROOT)/bin/socktest.elf $(ISO_ROOT)/bin/sdltest.elf $(ISO_ROOT)/bin/forktest.elf $(ISO_ROOT)/bin/exectest.elf $(ISO_ROOT)/bin/pipetest.elf $(ISO_ROOT)/bin/envtest.elf $(ISO_ROOT)/bin/sigtest.elf
+APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_ROOT)/bin/htmlview.elf $(ISO_ROOT)/bin/niplay.elf $(ISO_ROOT)/bin/widget_demo.elf $(ISO_ROOT)/bin/ipc_test.elf $(ISO_ROOT)/bin/randtest.elf $(ISO_ROOT)/bin/socktest.elf $(ISO_ROOT)/bin/sdltest.elf $(ISO_ROOT)/bin/forktest.elf $(ISO_ROOT)/bin/exectest.elf $(ISO_ROOT)/bin/pipetest.elf $(ISO_ROOT)/bin/envtest.elf $(ISO_ROOT)/bin/sigtest.elf $(ISO_ROOT)/bin/ttytest.elf
 
 # Apps that link against libbearssl.a (phase 3b+). These get their own
 # explicit rules below because they need (a) BearSSL public headers in the

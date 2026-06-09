@@ -16,6 +16,7 @@
 #include "system/mem/pmm.h"
 #include "system/mem/shm.h"
 #include "system/usr/task.h"
+#include "system/usr/tty.h"
 #include "system/misc/timer.h"
 #include "system/misc/random.h"
 #include "system/mem/vmm.h"
@@ -341,6 +342,7 @@ static void hw_init_task_entry(void) {
 
 void kmain(void) {
   serial_init(COM1);
+  tty_init();                 /* Этап 5: дефолтные настройки termios консоли */
   serial_puts(COM1, "\n=== EquinoxOS Kernel Starting ===\n");
 
   if (hhdm_request.response == NULL) {

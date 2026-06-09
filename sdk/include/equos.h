@@ -135,6 +135,9 @@
 #define SYS_SIGRETURN  104  /* ()  — возврат из обработчика (не возвращ.)  */
 #define SYS_SIGPROCMASK 105 /* (how, set, &old)            -> 0            */
 
+/* --- Этап 5: tty / termios -------------------------------------------- */
+#define SYS_IOCTL      106  /* (fd, request, argp)         -> 0 / -1       */
+
 typedef struct {
   uint64_t pid;
   uint64_t cr3;
@@ -307,6 +310,11 @@ static inline int sys_sigaction(int sig, uint64_t handler, uint64_t restorer,
 static inline int sys_sigprocmask(int how, uint64_t set, uint64_t *old_out) {
   return (int)_syscall(SYS_SIGPROCMASK, (uint64_t)how, set, (uint64_t)old_out,
                        0, 0);
+}
+
+/* Этап 5: ioctl (termios/winsize). */
+static inline int sys_ioctl(int fd, uint64_t request, void *argp) {
+  return (int)_syscall(SYS_IOCTL, (uint64_t)fd, request, (uint64_t)argp, 0, 0);
 }
 
 #endif

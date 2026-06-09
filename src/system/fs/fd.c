@@ -14,6 +14,7 @@
 #include "../usr/task.h"
 #include "../../syslibc/string.h"
 #include "../../syslibc/stdio.h"
+#include "../usr/tty.h"
 
 extern void term_print(const char *str);
 
@@ -201,8 +202,9 @@ int fd_read(int fd, void *buf, uint32_t size) {
     case OFD_PIPE_W:
         return -1; /* нельзя читать write-конец */
     case OFD_CONSOLE:
-        /* stdin с клавиатуры пока не реализован → EOF. */
-        return 0;
+        /* Этап 5: stdin читается из консоли (COM1) через дисциплину линии. */
+        if (o->console_no == 0) return tty_read(buf, size);
+        return -1;  /* чтение из stdout/stderr недопустимо */
     }
     return -1;
 }

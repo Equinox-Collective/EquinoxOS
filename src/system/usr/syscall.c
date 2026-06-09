@@ -37,6 +37,7 @@ static volatile bool k_app_win_active = false;
  * порядком push в syscall_interrupt_asm (interrupt.asm). */
 #include "uregs.h"
 #include "signal.h"
+#include "tty.h"
 
 extern int mouse_x, mouse_y;
 extern bool mouse_left_button;
@@ -1410,6 +1411,49 @@ void syscall_handler(syscall_regs_t *regs)
     signal_procmask((int)regs->rdi, regs->rsi, &old);
     if (regs->rdx) { stac(); *(uint64_t *)regs->rdx = old; clac(); }
     regs->rax = 0;
+    break;
+  }
+
+  case 106:
+  { /* SYS_IOCTL (fd, request, argp) -> 0 / -1 (Этап 5: termios/winsize)
+     *
+     * Поддерживаются только консольные fd (0/1/2). Для остальных -> -1
+     * (ENOTTY) — этим же isatty() в libc понимает «это не терминал». */
+    int       fd  = (int)regs->rdi;
+    uint64_t  req = regs->rsi;
+    void     *arg = (void *)regs->rdx;
+
+    if (fd < 0 || fd > 2) { regs->rax = (uint64_t)(int64_t)-1; break; }
+
+    switch (req) {
+    case K_TCGETS: {
+      ktermios_t kt;
+      if (tty_get_termios(&kt) != 0 || !arg) { regs->rax = (uint64_t)(int64_t)-1; break; }
+      stac(); *(ktermios_t *)arg = kt; clac();
+      regs->rax = 0;
+      break;
+    }
+    case K_TCSETS:
+    case K_TCSETSW:
+    case K_TCSETSF: {
+      if (!arg) { regs->rax = (uint64_t)(int64_t)-1; break; }
+      ktermios_t kt;
+      stac(); kt = *(ktermios_t *)arg; clac();
+      regs->rax = (uint64_t)(int64_t)tty_set_termios(&kt);
+      break;
+    }
+    case K_TIOCGWINSZ: {
+      if (!arg) { regs->rax = (uint64_t)(int64_t)-1; break; }
+      struct kwinsize ws;
+      tty_get_winsize(&ws);
+      stac(); *(struct kwinsize *)arg = ws; clac();
+      regs->rax = 0;
+      break;
+    }
+    default:
+      regs->rax = (uint64_t)(int64_t)-1;  /* неизвестный ioctl */
+      break;
+    }
     break;
   }
 
