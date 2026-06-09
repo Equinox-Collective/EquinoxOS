@@ -3,16 +3,31 @@
 #define WIN_W 400
 #define WIN_H 300
 
+/* --- DEBUG: прямой вывод в ядерный лог (COM1) через SYS_PRINT (1) ---
+ * SDL_Log на EquinoxOS может не доходить до серийника, поэтому печатаем
+ * этапы напрямую сисколлом, чтобы поймать точку зависания. */
+static void DBG(const char *s) {
+    register unsigned long num __asm__("rax") = 1;          /* SYS_PRINT */
+    register unsigned long a1  __asm__("rdi") = (unsigned long)s;
+    __asm__ volatile("int $0x80"
+                     : "+r"(num)
+                     : "r"(a1)
+                     : "rsi", "rdx", "rcx", "r8", "r9", "r10", "r11", "memory");
+}
+
 int main(int argc, char* argv[]) {
+    DBG("[SDLT] 1: main entered\n");
     /* Отключаем попытку SDL использовать texture/GPU framebuffer —
      * на EquinoxOS нет OpenGL, и неудачная попытка может оставить
      * window surface в невалидном состоянии. Форсируем software path. */
     SDL_SetHint(SDL_HINT_FRAMEBUFFER_ACCELERATION, "0");
+    DBG("[SDLT] 2: before SDL_Init\n");
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
         SDL_Log("SDL Init Failed: %s\n", SDL_GetError());
         return 1;
     }
 
+    DBG("[SDLT] 3: SDL_Init OK, before CreateWindow\n");
     SDL_Window* window = SDL_CreateWindow("Equinox SDL Test", 
                                           SDL_WINDOWPOS_UNDEFINED, 
                                           SDL_WINDOWPOS_UNDEFINED, 
@@ -23,6 +38,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    DBG("[SDLT] 4: window OK, before CreateRenderer\n");
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
     if (!renderer) {
         SDL_Log("Renderer creation failed: %s\n", SDL_GetError());
@@ -40,7 +56,10 @@ int main(int argc, char* argv[]) {
     SDL_bool mouse_pressed = SDL_FALSE;
     Uint8 r_offset = 0;
 
+    DBG("[SDLT] 5: renderer OK, entering main loop\n");
+    int frame = 0;
     while (running) {
+        if (frame == 0) DBG("[SDLT] 6: loop iter 0, before PollEvent\n");
         /* Обработка очереди событий (опрашивает наш PumpEvents) */
         while (SDL_PollEvent(&event)) {
             switch (event.type) {
@@ -70,6 +89,7 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        if (frame == 0) DBG("[SDLT] 7: PollEvent drained, before gradient\n");
         /* 1. Рисуем анимированный градиент на фоне */
         for (int y = 0; y < WIN_H; y++) {
             Uint8 r = (Uint8)(((y * 255) / WIN_H) + r_offset);
@@ -94,9 +114,13 @@ int main(int argc, char* argv[]) {
         }
         SDL_RenderFillRect(renderer, &rect);
 
+        if (frame == 0) DBG("[SDLT] 8: before RenderPresent\n");
         /* Выводим буфер на экран (дергает UpdateWindowFramebuffer) */
         SDL_RenderPresent(renderer);
+        if (frame == 0) DBG("[SDLT] 9: after RenderPresent, before Delay\n");
         SDL_Delay(16); /* ~60 FPS */
+        if (frame == 0) DBG("[SDLT] 10: after first Delay (frame 0 complete)\n");
+        frame++;
     }
 
     SDL_DestroyRenderer(renderer);

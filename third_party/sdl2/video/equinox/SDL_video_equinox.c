@@ -220,9 +220,13 @@ static int Equinox_UpdateWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window *w
     int x = data->win_x;
     int y = data->win_y;
 
+    static int uwf_first = 1;
+    if (uwf_first) equos_syscall(1, (uint64_t)"[UWF] A: enter, before sc36\n", 0, 0, 0, 0);
     /* Сообщаем ядру актуальную позицию и размер перед блитом */
     equos_syscall(36, (uint64_t)x, (uint64_t)y, (uint64_t)window->w, (uint64_t)window->h, 0);
+    if (uwf_first) equos_syscall(1, (uint64_t)"[UWF] B: after sc36, before sc5(blit)\n", 0, 0, 0, 0);
     equos_syscall(5, (uint64_t)x, (uint64_t)y, (uint64_t)window->w, (uint64_t)window->h, (uint64_t)data->framebuffer);
+    if (uwf_first) { equos_syscall(1, (uint64_t)"[UWF] C: after sc5(blit) done\n", 0, 0, 0, 0); uwf_first = 0; }
     return 0;
 }
 
