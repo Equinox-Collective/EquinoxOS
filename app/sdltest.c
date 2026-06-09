@@ -15,6 +15,18 @@ static void DBG(const char *s) {
                      : "rsi", "rdx", "rcx", "r8", "r9", "r10", "r11", "memory");
 }
 
+/* DBG + десятичное число */
+static void DBGN(const char *s, unsigned long n) {
+    DBG(s);
+    char num[24]; int p = 0;
+    char tmp[24]; int t = 0;
+    if (n == 0) { tmp[t++] = '0'; }
+    while (n) { tmp[t++] = (char)('0' + (n % 10)); n /= 10; }
+    while (t) num[p++] = tmp[--t];
+    num[p++] = '\n'; num[p] = 0;
+    DBG(num);
+}
+
 int main(int argc, char* argv[]) {
     DBG("[SDLT] 1: main entered\n");
     /* Отключаем попытку SDL использовать texture/GPU framebuffer —
@@ -59,6 +71,7 @@ int main(int argc, char* argv[]) {
     DBG("[SDLT] 5: renderer OK, entering main loop\n");
     int frame = 0;
     while (running) {
+        if (frame % 30 == 0) DBGN("[SDLT] HEARTBEAT frame=", (unsigned long)frame);
         if (frame == 0) DBG("[SDLT] 6: loop iter 0, before PollEvent\n");
         /* Обработка очереди событий (опрашивает наш PumpEvents) */
         while (SDL_PollEvent(&event)) {
@@ -121,7 +134,12 @@ int main(int argc, char* argv[]) {
         SDL_Delay(16); /* ~60 FPS */
         if (frame == 0) DBG("[SDLT] 10: after first Delay (frame 0 complete)\n");
         frame++;
+        if (frame >= 150) {
+            DBG("[SDLT] reached 150 frames -> auto-exit (NOT hung)\n");
+            running = SDL_FALSE;
+        }
     }
+    DBG("[SDLT] 11: left main loop, cleaning up\n");
 
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);

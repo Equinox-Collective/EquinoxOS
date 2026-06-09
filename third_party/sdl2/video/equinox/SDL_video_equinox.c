@@ -221,6 +221,24 @@ static int Equinox_UpdateWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window *w
     int y = data->win_y;
 
     static int uwf_first = 1;
+    if (uwf_first) {
+        /* Сэмплируем реальные пиксели буфера, который блитим: если они нулевые
+         * (чёрные) — значит SDL-рендерер не дорисовал в этот буфер. */
+        uint32_t *px = (uint32_t *)data->framebuffer;
+        int mid = (window->w * window->h) / 2;
+        char hb[80];
+        const char *hex = "0123456789ABCDEF";
+        uint32_t p0 = px ? px[0] : 0xDEAD;
+        uint32_t pm = px ? px[mid] : 0xDEAD;
+        int i = 0; const char *pfx = "[UWF] px0=0x";
+        while (pfx[i]) { hb[i] = pfx[i]; i++; }
+        for (int s = 28; s >= 0; s -= 4) hb[i++] = hex[(p0 >> s) & 0xF];
+        const char *pfx2 = " pmid=0x";
+        for (int j = 0; pfx2[j]; j++) hb[i++] = pfx2[j];
+        for (int s = 28; s >= 0; s -= 4) hb[i++] = hex[(pm >> s) & 0xF];
+        hb[i++] = '\n'; hb[i] = 0;
+        equos_syscall(1, (uint64_t)hb, 0, 0, 0, 0);
+    }
     if (uwf_first) equos_syscall(1, (uint64_t)"[UWF] A: enter, before sc36\n", 0, 0, 0, 0);
     /* Сообщаем ядру актуальную позицию и размер перед блитом */
     equos_syscall(36, (uint64_t)x, (uint64_t)y, (uint64_t)window->w, (uint64_t)window->h, 0);
