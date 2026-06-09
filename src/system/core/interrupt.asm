@@ -171,6 +171,23 @@ irq0_handler_asm:
 [extern syscall_handler]
 [global syscall_interrupt_asm]
 syscall_interrupt_asm:
+    ; ВАЖНО: сохраняем ВЕСЬ набор GP-регистров пользователя.
+    ; r10/r11 — caller-saved в SysV C-ABI, поэтому syscall_handler (и всё, что
+    ; он вызывает: memcpy, планировщик, отрисовка) может их затереть. Раньше
+    ; стаб их НЕ сохранял, и любой код с inline `int 0x80`, который держит
+    ; живые значения в r10/r11 через сисколл (например порт SDL2 —
+    ; third_party/sdl2 equos_syscall), получал мусор в регистре и падал в
+    ; page fault. r12–r15 формально сохраняются вызываемой C-функцией, но
+    ; пушим их тоже — так syscall ABI становится «прозрачным» для userspace
+    ; и не зависит от того, что именно делает обработчик.
+    ; Порядок: r15..r10 пушим ПЕРВЫМИ, чтобы смещения уже существующих
+    ; полей в syscall_regs_t (rax..rbp) не изменились.
+    push r15
+    push r14
+    push r13
+    push r12
+    push r11
+    push r10
     push rbp
     push rdi
     push rsi
@@ -193,6 +210,12 @@ syscall_interrupt_asm:
     pop rsi
     pop rdi
     pop rbp
+    pop r10
+    pop r11
+    pop r12
+    pop r13
+    pop r14
+    pop r15
     iretq
 
 ; --- СЕКЦИЯ ДАННЫХ ---

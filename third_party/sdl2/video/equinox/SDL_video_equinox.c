@@ -7,20 +7,22 @@
 #include "../../events/SDL_mouse_c.h"
 #include "SDL_video_equinox.h"
 
-/* Кастомные обертки системных вызовов EquinoxOS */
+/* Кастомные обертки системных вызовов EquinoxOS.
+ *
+ * Используем явные регистровые constraints вместо ручного `mov %N, %%reg`.
+ * Старый вариант (a) полагался на то, что компилятор сам разложит входы по
+ * регистрам, а потом перекладывал их инструкциями mov — это легко даёт
+ * конфликт, если GCC поместит вход в регистр, который asm перетирает; и
+ * (b) не помечал r9/r10/r11 как clobbered. r10/r11 — caller-saved в SysV ABI,
+ * поэтому ядро вправе их затирать; держать в них живые значения через
+ * inline `int 0x80` нельзя. Теперь GCC сам спилит то, что нужно. */
 static inline uint64_t equos_syscall(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
+    register uint64_t r8v __asm__("r8") = a5;
     uint64_t ret;
-    __asm__ volatile("mov %1, %%rax; "
-                     "mov %2, %%rdi; "
-                     "mov %3, %%rsi; "
-                     "mov %4, %%rdx; "
-                     "mov %5, %%rcx; "
-                     "mov %6, %%r8; "
-                     "int $0x80; "
-                     "mov %%rax, %0; "
-                     : "=r"(ret)
-                     : "r"(num), "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(a5)
-                     : "rax", "rdi", "rsi", "rdx", "rcx", "r8", "memory");
+    __asm__ volatile("int $0x80"
+                     : "=a"(ret)
+                     : "a"(num), "D"(a1), "S"(a2), "d"(a3), "c"(a4), "r"(r8v)
+                     : "r9", "r10", "r11", "memory");
     return ret;
 }
 
@@ -34,7 +36,7 @@ static inline void equos_get_window_pos(int *x, int *y) {
         "mov %%rbx, %1\n\t"
         : "=r"(rx), "=r"(rb)
         :
-        : "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r8", "memory"
+        : "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "memory"
     );
     if (x) *x = (int)rx;
     if (y) *y = (int)rb;
@@ -112,7 +114,7 @@ static int Equinox_VideoInit(SDL_VideoDevice *_this) {
         "mov %%rdx, %3\n\t"
         : "=r"(r_ax), "=r"(r_bx), "=r"(r_cx), "=r"(r_dx)
         :
-        : "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r8", "memory"
+        : "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "memory"
     );
     
     if (r_bx > 0) width = r_bx;
@@ -269,7 +271,7 @@ static void Equinox_PumpEvents(SDL_VideoDevice *_this) {
         "mov %%rcx, %2\n\t"
         : "=r"(mx), "=r"(my), "=r"(m_btn)
         :
-        : "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r8", "memory"
+        : "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "memory"
     );
     
     int win_x = 100;

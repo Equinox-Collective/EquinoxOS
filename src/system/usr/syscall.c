@@ -43,6 +43,12 @@ typedef struct
   uint64_t rsi;
   uint64_t rdi;
   uint64_t rbp;
+  /* r10–r15 теперь тоже сохраняются стабом syscall_interrupt_asm
+   * (interrupt.asm). Поля идут СТРОГО после rbp и перед iretq-фреймом,
+   * чтобы смещения rax..rbp не поехали. Обработчик их не использует —
+   * они нужны лишь для корректного сохранения/восстановления состояния
+   * пользователя вокруг `int 0x80`. */
+  uint64_t r10, r11, r12, r13, r14, r15;
   uint64_t rip, cs, rflags, rsp, ss;
 } syscall_regs_t;
 

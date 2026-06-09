@@ -3,18 +3,14 @@
 
 /* Сисколлы EquinoxOS */
 static inline uint64_t equos_syscall(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5) {
+    /* Явные регистровые constraints — см. подробный комментарий в
+     * video/equinox/SDL_video_equinox.c. r9/r10/r11 помечаем clobbered. */
+    register uint64_t r8v __asm__("r8") = a5;
     uint64_t ret;
-    __asm__ volatile("mov %1, %%rax; "
-                     "mov %2, %%rdi; "
-                     "mov %3, %%rsi; "
-                     "mov %4, %%rdx; "
-                     "mov %5, %%rcx; "
-                     "mov %6, %%r8; "
-                     "int $0x80; "
-                     "mov %%rax, %0; "
-                     : "=r"(ret)
-                     : "r"(num), "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(a5)
-                     : "rax", "rdi", "rsi", "rdx", "rcx", "r8", "memory");
+    __asm__ volatile("int $0x80"
+                     : "=a"(ret)
+                     : "a"(num), "D"(a1), "S"(a2), "d"(a3), "c"(a4), "r"(r8v)
+                     : "r9", "r10", "r11", "memory");
     return ret;
 }
 
