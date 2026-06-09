@@ -77,6 +77,16 @@ int main(int argc, char* argv[]) {
         SDL_GetRendererOutputSize(renderer, &ow, &oh);
         DBGN("[SDLT] outputsize w=", (unsigned long)ow);
         DBGN("[SDLT] outputsize h=", (unsigned long)oh);
+        /* FP-ТЕСТ: проверяем, работает ли double-арифметика в ring3.
+         * viewport хранится как double (SDL_DRect) и гоняется через SDL_floor. */
+        {
+            volatile double a = (double)ow;          /* int->double */
+            volatile double b = a / 1.0;             /* деление double */
+            volatile double f = SDL_floor(399.7);    /* floor из libm OS */
+            DBGN("[SDLT] FPTEST castOW=", (unsigned long)(long long)a);
+            DBGN("[SDLT] FPTEST div1=",   (unsigned long)(long long)b);
+            DBGN("[SDLT] FPTEST floor=",  (unsigned long)(long long)f);
+        }
         SDL_RenderSetViewport(renderer, NULL);
         SDL_Rect vp;
         SDL_RenderGetViewport(renderer, &vp);
