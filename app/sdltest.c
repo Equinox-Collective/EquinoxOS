@@ -69,6 +69,20 @@ int main(int argc, char* argv[]) {
     Uint8 r_offset = 0;
 
     DBG("[SDLT] 5: renderer OK, entering main loop\n");
+    /* ФИКС/ДИАГНОСТИКА: на момент создания рендерера viewport вышел пустым
+     * (0x0) => всё отсекалось клипом => чёрный экран. Переустанавливаем
+     * viewport на полный размер вывода уже после полной инициализации окна. */
+    {
+        int ow = -1, oh = -1;
+        SDL_GetRendererOutputSize(renderer, &ow, &oh);
+        DBGN("[SDLT] outputsize w=", (unsigned long)ow);
+        DBGN("[SDLT] outputsize h=", (unsigned long)oh);
+        SDL_RenderSetViewport(renderer, NULL);
+        SDL_Rect vp;
+        SDL_RenderGetViewport(renderer, &vp);
+        DBGN("[SDLT] viewport w=", (unsigned long)vp.w);
+        DBGN("[SDLT] viewport h=", (unsigned long)vp.h);
+    }
     int frame = 0;
     while (running) {
         if (frame % 30 == 0) DBGN("[SDLT] HEARTBEAT frame=", (unsigned long)frame);
