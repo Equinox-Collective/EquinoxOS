@@ -39,6 +39,9 @@
 #define SYS_FORK    51
 #define SYS_WAITPID 52
 #define SYS_GETPID  53
+/* 54 SYS_EXECVE (path, argv, envp) — заменяет образ текущего процесса.
+ * При успехе НЕ возвращается; при ошибке возвращает -1. */
+#define SYS_EXECVE  54
 
 /* --- IPC (added in HAL/sync/ipc patch set) --- */
 #define SYS_PIPE_CREATE 60
@@ -157,6 +160,11 @@ static inline int64_t sys_waitpid(int64_t pid, int *status) {
 }
 static inline int64_t sys_getpid(void) {
   return (int64_t)_syscall(SYS_GETPID, 0, 0, 0, 0, 0);
+}
+static inline int64_t sys_execve(const char *path, char *const argv[],
+                                 char *const envp[]) {
+  return (int64_t)_syscall(SYS_EXECVE, (uint64_t)path, (uint64_t)argv,
+                           (uint64_t)envp, 0, 0);
 }
 
 static inline void write_file(const char *name, void *buf, uint32_t size) {

@@ -314,6 +314,144 @@ bool task_exec(char* full_command) {
 }
 
 /* ======================================================================== *
+ *  Этап 1b — execve: замена образа текущего процесса
+ *
+ *  task_load_image() загружает ELF `path` в НОВОЕ адресное пространство,
+ *  готовит пользовательский стек (8 МБ), TLS и страницу argv — но НИЧЕГО не
+ *  переключает и не освобождает. Переключение cr3, обновление полей задачи и
+ *  освобождение старого адресного пространства делает вызывающий
+ *  (syscall.c, case 54) ПОСЛЕ успешного возврата — так замена образа атомарна:
+ *  при ошибке загрузки старый процесс продолжает жить без изменений.
+ *
+ *  argv[] здесь уже скопирован в память ядра вызывающим (под stac/clac),
+ *  поэтому к пользовательской памяти эта функция не обращается.
+ * ======================================================================== */
+bool task_load_image(const char *path, char *const argv[], int argc,
+                     uint64_t *out_entry, uint64_t *out_user_rsp,
+                     uint64_t *out_argv_ptr, uint64_t *out_cr3,
+                     uint64_t *out_fs_base) {
+    if (!path || argc < 1) return false;
+
+    uint32_t elf_size = 0;
+    uint8_t *elf_raw = vfs_read_file((char *)path, &elf_size);
+    if (!elf_raw) {
+        term_print("EXECVE: file not found: ");
+        term_print((char *)path);
+        term_print("\n");
+        return false;
+    }
+
+    Elf64_Ehdr *header = (Elf64_Ehdr *)elf_raw;
+    if (memcmp(header->e_ident, "\x7f\x45\x4c\x46", 4) != 0) {
+        term_print("EXECVE: not a valid ELF\n");
+        kfree(elf_raw);
+        return false;
+    }
+
+    page_table_t *proc_pml4 = vmm_create_address_space();
+    if (!proc_pml4) { kfree(elf_raw); return false; }
+    uint64_t phys_pml4 = PHYS(proc_pml4);
+
+    /* --- PT_LOAD сегменты --- */
+    Elf64_Phdr *phdr = (Elf64_Phdr *)(elf_raw + header->e_phoff);
+    for (int i = 0; i < header->e_phnum; i++) {
+        if (phdr[i].p_type != 1) continue; /* PT_LOAD */
+        uint64_t vaddr  = phdr[i].p_vaddr;
+        uint64_t memsz  = phdr[i].p_memsz;
+        uint64_t filesz = phdr[i].p_filesz;
+        uint64_t offset = phdr[i].p_offset;
+        if (offset + filesz > elf_size)
+            filesz = (offset < elf_size) ? (elf_size - offset) : 0;
+
+        uint64_t page_offset = vaddr & 0xFFF;
+        uint64_t base_vaddr  = vaddr & ~0xFFFULL;
+        uint64_t num_pages   = ((memsz + page_offset) + 4095) / 4096;
+
+        void *phys_mem = pmm_alloc_continuous(num_pages);
+        if (!phys_mem) {
+            term_print("EXECVE: OOM loading segment\n");
+            vmm_destroy_address_space(phys_pml4);
+            kfree(elf_raw);
+            return false;
+        }
+        for (uint64_t p = 0; p < num_pages; p++)
+            vmm_map(proc_pml4, base_vaddr + p * 4096,
+                    (uint64_t)phys_mem + p * 4096,
+                    PTE_PRESENT | PTE_USER | PTE_WRITABLE);
+        memset((void *)VIRT(phys_mem), 0, num_pages * 4096);
+        memcpy((void *)(VIRT(phys_mem) + page_offset), elf_raw + offset, filesz);
+    }
+
+    /* --- пользовательский стек (8 МБ) + TLS (как в task_create) --- */
+    uint64_t stack_top   = 0x70000000000ULL;
+    uint64_t stack_pages = 2048;
+    for (uint64_t i = 0; i < stack_pages; i++) {
+        uint64_t v = stack_top - (stack_pages * 4096) + (i * 4096);
+        void *phys = pmm_alloc();
+        if (!phys) {
+            term_print("EXECVE: OOM stack\n");
+            vmm_destroy_address_space(phys_pml4);
+            kfree(elf_raw);
+            return false;
+        }
+        vmm_map(proc_pml4, v, (uint64_t)phys,
+                PTE_PRESENT | PTE_USER | PTE_WRITABLE);
+        memset((void *)VIRT(phys), 0, 4096);
+    }
+    uint64_t tls_virt = 0x60000000000ULL;
+    void *tls_phys = pmm_alloc();
+    if (!tls_phys) { vmm_destroy_address_space(phys_pml4); kfree(elf_raw); return false; }
+    vmm_map(proc_pml4, tls_virt, (uint64_t)tls_phys,
+            PTE_USER | PTE_WRITABLE | PTE_PRESENT);
+    memset((void *)VIRT(tls_phys), 0, 4096);
+    ((uint64_t *)VIRT(tls_phys))[0] = tls_virt + 64;
+
+    /* --- страница argv: [256 байт под массив указателей][строки] --- */
+    uint64_t user_argv_page = 0xB0000000ULL;
+    void *phys_argv = pmm_alloc();
+    if (!phys_argv) { vmm_destroy_address_space(phys_pml4); kfree(elf_raw); return false; }
+    vmm_map(proc_pml4, user_argv_page, (uint64_t)phys_argv,
+            PTE_PRESENT | PTE_USER | PTE_WRITABLE);
+    memset((void *)VIRT(phys_argv), 0, 4096);
+
+    if (argc > 16) argc = 16;
+    uint64_t *argv_arr = (uint64_t *)VIRT(phys_argv);
+    char *strarea = (char *)VIRT(phys_argv) + 256; /* 32 ptr * 8 = 256 */
+    uint64_t soff = 256;
+    for (int i = 0; i < argc; i++) {
+        const char *s = argv[i] ? argv[i] : "";
+        int len = (int)strlen(s) + 1;
+        if (soff + (uint64_t)len > 4096) { /* страница argv переполнена */
+            argv_arr[i] = 0;
+            argc = i;
+            break;
+        }
+        argv_arr[i] = user_argv_page + soff;
+        memcpy(strarea, s, len);
+        strarea[len - 1] = 0;
+        strarea += len;
+        soff += len;
+    }
+    argv_arr[argc] = 0;
+
+    *out_entry    = header->e_entry;
+    *out_user_rsp = stack_top - 16;
+    *out_argv_ptr = user_argv_page;
+    *out_cr3      = phys_pml4;
+    *out_fs_base  = tls_virt;
+
+    kfree(elf_raw);
+    return true;
+}
+
+/* Выставить FS.base (TLS) для текущего процесса. Нужно execve: возврат в
+ * новый образ идёт через iretq БЕЗ переключения планировщиком, поэтому MSR
+ * надо обновить вручную. */
+void task_set_fs_base(uint64_t v) {
+    if (v) wrmsr(IA32_FS_BASE_MSR, v);
+}
+
+/* ======================================================================== *
  *  Этап 1 — Процессная модель: fork / exit-status / waitpid
  *
  *  Семантика поверх существующего кольцевого планировщика:

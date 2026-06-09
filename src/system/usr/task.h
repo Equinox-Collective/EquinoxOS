@@ -42,6 +42,15 @@ void yield(void);
 void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2, uint64_t cr3);
 bool task_exec(char* full_command);
 
+/* Этап 1b — execve. task_load_image() загружает ELF в НОВОЕ адресное
+ * пространство и готовит стек/TLS/argv (argv[] уже скопирован в память ядра).
+ * Переключение cr3 и освобождение старого пространства делает вызывающий. */
+bool task_load_image(const char *path, char *const argv[], int argc,
+                     uint64_t *out_entry, uint64_t *out_user_rsp,
+                     uint64_t *out_argv_ptr, uint64_t *out_cr3,
+                     uint64_t *out_fs_base);
+void task_set_fs_base(uint64_t v);
+
 /* --- Этап 1: процессная модель ------------------------------------------- *
  * task_fork(): клонирует текущий процесс. parent_frame — сохранённый кадр
  * прерывания (stack_frame_t*) из обработчика int 0x80, т.е. регистры

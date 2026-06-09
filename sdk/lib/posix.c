@@ -557,6 +557,35 @@ pid_t getppid(void) {
     return 1;
 }
 
+/* --- Этап 1b: execve и обёртки -------------------------------------------- *
+ * execve() заменяет образ текущего процесса. При успехе НЕ возвращается;
+ * при ошибке возвращает -1 (errno не выставляем — отдельной таблицы пока нет).
+ * execv()  — то же с текущим окружением (environ).
+ * execvp() — пробует имя как есть, затем с префиксом "bin/". */
+int execve(const char *path, char *const argv[], char *const envp[]) {
+    return (int)sys_execve(path, argv, envp);
+}
+
+int execv(const char *path, char *const argv[]) {
+    char *const envp[] = { 0 };
+    return (int)sys_execve(path, argv, envp);
+}
+
+int execvp(const char *file, char *const argv[]) {
+    char *const envp[] = { 0 };
+    /* 1) как передано */
+    sys_execve(file, argv, envp);
+    /* 2) не нашлось -> пробуем bin/<file> */
+    char buf[256];
+    int i = 0;
+    const char *pfx = "bin/";
+    for (; pfx[i]; i++) buf[i] = pfx[i];
+    int j = 0;
+    for (; file[j] && (i + j) < 255; j++) buf[i + j] = file[j];
+    buf[i + j] = 0;
+    return (int)sys_execve(buf, argv, envp);
+}
+
 /* stat() — fills st_size from SYS_STAT_PATH, st_mode as regular file */
 int stat(const char *pathname, struct stat *statbuf) {
     if (!statbuf) { errno = 14; return -1; } /* EFAULT */

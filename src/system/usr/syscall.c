@@ -398,6 +398,75 @@ void syscall_handler(syscall_regs_t *regs)
   case 53: // SYS_GETPID -> реальный pid текущего процесса
     regs->rax = current_task->id;
     break;
+  case 54: // SYS_EXECVE (const char* path, char* const argv[], char* const envp[])
+  {
+    /* Заменяет образ ТЕКУЩЕГО процесса (pid сохраняется). envp пока
+     * игнорируется — getenv появится на Этапе 3. */
+    const char *upath = (const char *)regs->rdi;
+    char *const *uargv = (char *const *)regs->rsi;
+    if (!upath) { regs->rax = (uint64_t)-1; break; }
+
+    /* Копируем path и argv из пользовательской памяти в ядро ДО любых
+     * переключений адресного пространства (под stac/clac — SMAP). */
+    char kpath[256];
+    char argstore[16][128];
+    char *kargv[17];
+    int kargc = 0;
+
+    stac();
+    int pi = 0;
+    for (; pi < 255 && upath[pi]; pi++) kpath[pi] = upath[pi];
+    kpath[pi] = 0;
+    if (uargv) {
+      for (kargc = 0; kargc < 16 && uargv[kargc]; kargc++) {
+        const char *s = uargv[kargc];
+        int j = 0;
+        for (; j < 127 && s[j]; j++) argstore[kargc][j] = s[j];
+        argstore[kargc][j] = 0;
+        kargv[kargc] = argstore[kargc];
+      }
+    }
+    clac();
+
+    if (kargc == 0) { /* argv пуст -> argv[0] = путь */
+      int j = 0;
+      for (; j < 127 && kpath[j]; j++) argstore[0][j] = kpath[j];
+      argstore[0][j] = 0;
+      kargv[0] = argstore[0];
+      kargc = 1;
+    }
+    kargv[kargc] = 0;
+
+    uint64_t entry = 0, ursp = 0, uargvp = 0, ncr3 = 0, nfs = 0;
+    if (!task_load_image(kpath, kargv, kargc, &entry, &ursp, &uargvp, &ncr3, &nfs)) {
+      regs->rax = (uint64_t)-1; /* образ не тронут — старый процесс жив */
+      break;
+    }
+
+    /* Атомарная замена: переключаем cr3 на новое пространство (ядро отображено
+     * в обеих половинах, kstack в HHDM — безопасно), обновляем поля задачи,
+     * затем освобождаем старое адресное пространство. */
+    uint64_t oldcr3 = current_task->cr3;
+    __asm__ volatile("mov %0, %%cr3" : : "r"(ncr3) : "memory");
+    current_task->cr3     = ncr3;
+    current_task->fs_base = nfs;
+    current_task->brk     = 0x40000000;
+    task_set_fs_base(nfs);
+    if (oldcr3 && oldcr3 != ncr3)
+      vmm_destroy_address_space(oldcr3);
+
+    /* Перенаправляем возврат из int 0x80 в новый образ (syscall_regs_t
+     * содержит iretq-кадр: rip/cs/rflags/rsp/ss). crt0 ждёт rdi=argc, rsi=argv. */
+    regs->rip    = entry;
+    regs->rsp    = ursp;
+    regs->rdi    = (uint64_t)kargc;
+    regs->rsi    = uargvp;
+    regs->cs     = 0x23;
+    regs->ss     = 0x1B;
+    regs->rflags = 0x202;
+    regs->rax    = 0;
+    break;
+  }
   case 11:   // SYS_YIELD (Уступить процессор)
     yield(); // Фактический switch context через int $32
     break;
