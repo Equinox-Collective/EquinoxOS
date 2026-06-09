@@ -1467,6 +1467,186 @@ void syscall_handler(syscall_regs_t *regs)
   signal_deliver(regs);
 }
 
+/* =========================================================================
+ * Этап 6a: Linux-ABI шлюз (int 0x81)
+ *
+ * musl собран под Linux: инструкция `syscall`, линуксовые номера сисколлов
+ * (read=0/write=1/...), 4-й аргумент в r10. Чтобы не трогать MSR/swapgs и не
+ * конфликтовать с нашими номерами 1..106, musl патчится в ОДНОМ файле
+ * (arch/x86_64/syscall_arch.h): инструкция `syscall` -> `int $0x81`. `int` не
+ * клобберит rcx/r11, а 4-й аргумент остаётся в r10 (стаб его уже сохраняет).
+ *
+ * linux_syscall_handler принимает тот же кадр syscall_regs_t. Стратегия:
+ *   - для сисколлов с совпадающей семантикой — переписываем regs->rax на наш
+ *     родной номер (и при нужде перекладываем аргументы) и ДЕЛЕГИРУЕМ в
+ *     syscall_handler (он же доставит сигналы);
+ *   - для остальных — обрабатываем здесь и сами зовём signal_deliver.
+ *
+ * Возврат — по соглашению Linux: при ошибке отрицательный -errno. Наши родные
+ * сисколлы возвращают -1; musl трактует любой возврат в [-4095,-1] как ошибку
+ * (errno = -ret), поэтому -1 «работает» (errno будет 1/EPERM — уточним в 6d).
+ *
+ * TODO(6d): корректные линукс-структуры (stat/dirent/sigaction/utsname),
+ * настоящий rt_sigaction (сейчас no-op), access/uname/clock_gettime, errno.
+ * ========================================================================= */
+
+/* Линуксовые аргументы (x86-64): a1=rdi a2=rsi a3=rdx a4=r10 a5=r8 a6=r9. */
+struct l_iovec { const void *iov_base; uint64_t iov_len; };
+struct l_timespec { int64_t tv_sec; int64_t tv_nsec; };
+
+#define LERR(e) ((uint64_t)(int64_t)(-(e)))
+#define L_ENOSYS 38
+#define L_EINVAL 22
+#define L_ENOMEM 12
+
+void linux_syscall_handler(syscall_regs_t *regs)
+{
+  uint64_t n = regs->rax;
+
+  switch (n)
+  {
+  /* ---- совпадающая семантика: переписать номер и делегировать ---------- */
+  case 0:  regs->rax = 92; break;            /* read(fd,buf,cnt) -> SYS_READ_FD */
+  case 1:  regs->rax = 93; break;            /* write -> SYS_WRITE_FD */
+  case 2:  regs->rax = 90; break;            /* open(path,flags,mode) -> SYS_OPEN(path,flags) */
+  case 3:  regs->rax = 91; break;            /* close -> SYS_CLOSE_FD */
+  case 8:  regs->rax = 94; break;            /* lseek(fd,off,whence) -> SYS_SEEK */
+  case 12: regs->rax = 15; break;            /* brk(addr) -> SYS_BRK */
+  case 16: regs->rax = 106; break;           /* ioctl(fd,req,argp) -> SYS_IOCTL */
+  case 32: regs->rax = 98; break;            /* dup(oldfd) -> SYS_DUP */
+  case 33: regs->rax = 99; break;            /* dup2(old,new) -> SYS_DUP2 */
+  case 292: regs->rax = 99; break;           /* dup3(old,new,flags) -> SYS_DUP2 (flags игнор) */
+  case 22: regs->rax = 97; break;            /* pipe(fds) -> SYS_PIPE */
+  case 293: regs->rax = 97; break;           /* pipe2(fds,flags) -> SYS_PIPE (flags игнор) */
+  case 39: regs->rax = 53; break;            /* getpid -> SYS_GETPID */
+  case 57: regs->rax = 51; break;            /* fork -> SYS_FORK */
+  case 58: regs->rax = 51; break;            /* vfork -> SYS_FORK (без COW-семантики) */
+  case 59: regs->rax = 54; break;            /* execve(path,argv,envp) -> SYS_EXECVE */
+  case 60: regs->rax = 10; break;            /* exit -> SYS_EXIT */
+  case 231: regs->rax = 10; break;           /* exit_group -> SYS_EXIT */
+  case 61: regs->rax = 52; break;            /* wait4(pid,status,opt,ru) -> SYS_WAITPID (opt/ru игнор) */
+  case 62: regs->rax = 102; break;           /* kill(pid,sig) -> SYS_KILL */
+  case 79: regs->rax = 100; break;           /* getcwd(buf,size) -> SYS_GETCWD */
+  case 80: regs->rax = 101; break;           /* chdir(path) -> SYS_CHDIR */
+  case 14: regs->rax = 105; break;           /* rt_sigprocmask(how,set,old,sz) -> SYS_SIGPROCMASK */
+  case 15: regs->rax = 104; break;           /* rt_sigreturn -> SYS_SIGRETURN */
+  case 318: regs->rax = 86; break;           /* getrandom(buf,len,flags) -> SYS_GETRANDOM */
+
+  /* ---- требуют перетасовки аргументов, затем делегирование ------------- */
+  case 257:                                  /* openat(dirfd,path,flags,mode) */
+    regs->rdi = regs->rsi;                    /* path */
+    regs->rsi = regs->rdx;                    /* flags */
+    regs->rax = 90;                           /* -> SYS_OPEN(path,flags) (dirfd=AT_FDCWD игнор) */
+    break;
+
+  /* ---- mmap: длина в rsi совпадает; родной возвращает 0 при ошибке ------ */
+  case 9:                                     /* mmap(addr,len,prot,flags,fd,off) */
+    regs->rax = 14;                           /* -> SYS_MMAP (использует только len) */
+    syscall_handler(regs);
+    if (regs->rax == 0) regs->rax = LERR(L_ENOMEM); /* Linux: MAP_FAILED как -errno */
+    return;                                   /* сигналы уже доставлены */
+  case 11:                                    /* munmap — родного освобождения нет */
+    regs->rax = 0;
+    signal_deliver(regs);
+    return;
+
+  /* ---- writev / readv: цикл по iovec ----------------------------------- */
+  case 20:                                    /* writev(fd, iov, iovcnt) */
+  {
+    int fd = (int)regs->rdi;
+    const struct l_iovec *iov = (const struct l_iovec *)regs->rsi;
+    int cnt = (int)regs->rdx;
+    int64_t total = 0; int had_err = 0;
+    stac();
+    for (int i = 0; i < cnt; i++) {
+      const void *b = iov[i].iov_base;
+      uint64_t l = iov[i].iov_len;
+      if (l == 0) continue;
+      int rc = fd_write(fd, b, (uint32_t)l);
+      if (rc < 0) { had_err = 1; break; }
+      total += rc;
+      if ((uint64_t)rc < l) break;            /* частичная запись */
+    }
+    clac();
+    regs->rax = (had_err && total == 0) ? LERR(L_EINVAL) : (uint64_t)total;
+    signal_deliver(regs);
+    return;
+  }
+  case 19:                                    /* readv(fd, iov, iovcnt) */
+  {
+    int fd = (int)regs->rdi;
+    const struct l_iovec *iov = (const struct l_iovec *)regs->rsi;
+    int cnt = (int)regs->rdx;
+    int64_t total = 0; int had_err = 0;
+    stac();
+    for (int i = 0; i < cnt; i++) {
+      void *b = (void *)iov[i].iov_base;
+      uint64_t l = iov[i].iov_len;
+      if (l == 0) continue;
+      int rc = fd_read(fd, b, (uint32_t)l);
+      if (rc < 0) { had_err = 1; break; }
+      total += rc;
+      if ((uint64_t)rc < l) break;            /* короткое чтение/EOF */
+    }
+    clac();
+    regs->rax = (had_err && total == 0) ? LERR(L_EINVAL) : (uint64_t)total;
+    signal_deliver(regs);
+    return;
+  }
+
+  /* ---- nanosleep(req, rem): timespec -> миллисекунды -> SYS_SLEEP ------- */
+  case 35:
+  {
+    const struct l_timespec *req = (const struct l_timespec *)regs->rdi;
+    uint64_t ms = 0;
+    if (req) { stac(); ms = (uint64_t)req->tv_sec * 1000 + (uint64_t)req->tv_nsec / 1000000ULL; clac(); }
+    regs->rdi = ms;
+    regs->rax = 13;                           /* SYS_SLEEP */
+    syscall_handler(regs);                    /* доставит сигналы */
+    regs->rax = 0;
+    return;
+  }
+
+  /* ---- arch_prctl(code, addr): TLS через FS_BASE ----------------------- */
+  case 158:
+  {
+    int code = (int)regs->rdi;
+    uint64_t addr = regs->rsi;
+    if (code == 0x1002) {                     /* ARCH_SET_FS */
+      uint32_t lo = (uint32_t)addr, hi = (uint32_t)(addr >> 32);
+      __asm__ volatile("wrmsr" :: "c"(0xC0000100), "a"(lo), "d"(hi));
+      regs->rax = 0;
+    } else if (code == 0x1003) {              /* ARCH_GET_FS */
+      uint32_t lo, hi;
+      __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0xC0000100));
+      uint64_t v = ((uint64_t)hi << 32) | lo;
+      if (addr) { stac(); *(uint64_t *)addr = v; clac(); }
+      regs->rax = 0;
+    } else {
+      regs->rax = LERR(L_EINVAL);
+    }
+    signal_deliver(regs);
+    return;
+  }
+
+  /* ---- мелкие совместимостные заглушки --------------------------------- */
+  case 218: regs->rax = (uint64_t)current_task->id; signal_deliver(regs); return; /* set_tid_address */
+  case 102: case 104: case 107: case 108:     /* getuid/getgid/geteuid/getegid */
+    regs->rax = 0; signal_deliver(regs); return;                                  /* «root» */
+  case 110: regs->rax = 1; signal_deliver(regs); return;                          /* getppid */
+  case 72:  regs->rax = 0; signal_deliver(regs); return;                          /* fcntl (no-op) */
+  case 13:  regs->rax = 0; signal_deliver(regs); return;                          /* rt_sigaction TODO(6d) */
+
+  default:
+    regs->rax = LERR(L_ENOSYS);
+    signal_deliver(regs);
+    return;
+  }
+
+  /* делегируем в родной диспетчер (он доставит сигналы и вернётся в ring3) */
+  syscall_handler(regs);
+}
+
 /* ----- capture-sink для SYS_SHELL_EXEC ------------------------------------
  * Один-единственный буфер, используемый и case 73 выше, и самим sink'ом.
  * Не thread-safe — но syscall_handler у нас и так не reentrant. */

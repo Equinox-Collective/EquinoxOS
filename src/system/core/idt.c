@@ -9,6 +9,7 @@ extern void timer_handler();
 extern void mouse_handler();
 extern void irq0_handler_asm();
 extern void syscall_interrupt_asm();
+extern void linux_syscall_interrupt_asm();
 
 void set_idt_gate(int n, uint64_t handler, uint16_t sel) {
   idt[n].low_offset = (uint16_t)(handler & 0xFFFF);
@@ -44,6 +45,11 @@ void init_idt() {
   // модель параллелизма ядра после загрузки.
   set_idt_gate(0x80, (uint64_t)syscall_interrupt_asm, sel);
   idt[0x80].flags = 0xEF;
+
+  /* Этап 6a: Linux-ABI шлюз (int 0x81) для musl. Тот же ring3-доступный
+   * trap gate (0xEF), что и 0x80. */
+  set_idt_gate(0x81, (uint64_t)linux_syscall_interrupt_asm, sel);
+  idt[0x81].flags = 0xEF;
 
   __asm__ __volatile__("lidt %0" : : "m"(idt_reg));
 }
