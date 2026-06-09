@@ -4,18 +4,44 @@
 
 double fabs(double x) { return x < 0 ? -x : x; }
 
+/* floor/ceil реализованы через битовые операции по стандарту IEEE-754,
+ * БЕЗ преобразования double->int. Прежняя версия на (long long)x
+ * мискомпилировалась в ring3 и возвращала 0 для дробных чисел
+ * (floor(399.7)==0), из-за чего у SDL обнулялся viewport/clip -> чёрный
+ * экран. Битовый вариант использует только целочисленные/памятевые
+ * операции, которые в ring3 работают корректно. */
 double floor(double x) {
-  long long i = (long long)x;
-  if (x < 0 && x != (double)i)
-    return (double)(i - 1);
-  return (double)i;
+  union { double f; unsigned long long i; } u;
+  u.f = x;
+  int e = (int)((u.i >> 52) & 0x7ff) - 0x3ff; /* несмещённая экспонента */
+  if (e >= 52) return x;                       /* |x|>=2^52 либо inf/nan */
+  if (e < 0) {                                 /* |x| < 1 */
+    if (u.i >> 63)                             /* отрицательное */
+      return (u.i << 1) ? -1.0 : x;            /* (-1,0) -> -1 ; -0.0 как есть */
+    return 0.0;                                /* [0,1) -> +0 */
+  }
+  unsigned long long m = 0x000fffffffffffffULL >> e; /* маска дробной части */
+  if ((u.i & m) == 0) return x;                /* уже целое */
+  if (u.i >> 63) u.i += m;                     /* отрицательное: к -inf */
+  u.i &= ~m;
+  return u.f;
 }
 
 double ceil(double x) {
-  long long i = (long long)x;
-  if (x > 0 && x != (double)i)
-    return (double)(i + 1);
-  return (double)i;
+  union { double f; unsigned long long i; } u;
+  u.f = x;
+  int e = (int)((u.i >> 52) & 0x7ff) - 0x3ff;
+  if (e >= 52) return x;
+  if (e < 0) {
+    if (u.i >> 63)                             /* (-1,0) -> -0.0 */
+      return (u.i << 1) ? -0.0 : x;
+    return (u.i << 1) ? 1.0 : x;               /* (0,1) -> 1 ; +0 как есть */
+  }
+  unsigned long long m = 0x000fffffffffffffULL >> e;
+  if ((u.i & m) == 0) return x;
+  if (!(u.i >> 63)) u.i += m;                  /* положительное: к +inf */
+  u.i &= ~m;
+  return u.f;
 }
 
 double fmod(double x, double y) {
