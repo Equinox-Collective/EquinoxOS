@@ -125,6 +125,10 @@
 #define SYS_DUP        98   /* (oldfd)           -> newfd / -1            */
 #define SYS_DUP2       99   /* (oldfd, newfd)    -> newfd / -1            */
 
+/* Этап 3: cwd. */
+#define SYS_GETCWD     100  /* (char *buf, size) -> len / -1              */
+#define SYS_CHDIR      101  /* (const char *path)-> 0 / -1                */
+
 typedef struct {
   uint64_t pid;
   uint64_t cr3;
@@ -275,6 +279,14 @@ static inline int sys_dup(int oldfd) {
 }
 static inline int sys_dup2(int oldfd, int newfd) {
   return (int)_syscall(SYS_DUP2, (uint64_t)oldfd, (uint64_t)newfd, 0, 0, 0);
+}
+
+/* Этап 3: cwd. */
+static inline int sys_getcwd(char *buf, uint32_t size) {
+  return (int)_syscall(SYS_GETCWD, (uint64_t)buf, (uint64_t)size, 0, 0, 0);
+}
+static inline int sys_chdir(const char *path) {
+  return (int)_syscall(SYS_CHDIR, (uint64_t)path, 0, 0, 0, 0);
 }
 
 #endif

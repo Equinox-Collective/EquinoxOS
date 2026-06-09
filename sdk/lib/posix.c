@@ -15,6 +15,9 @@
 
 int errno = 0;
 
+/* Этап 3: глобальное окружение (определено в env.c). */
+extern char **environ;
+
 int access(const char *pathname, int mode) {
     return 0; 
 }
@@ -269,7 +272,7 @@ time_t time(time_t *t) {
 }
 
 char *strerror(int errnum) { return "Unknown error"; }
-char *getenv(const char *name) { return NULL; }
+/* getenv/setenv/putenv/unsetenv/clearenv и `environ` живут в env.c (Этап 3). */
 
 double strtod(const char *nptr, char **endptr) {
   double res = atof(nptr);
@@ -516,15 +519,19 @@ int pipe(int fds[2]) {
 }
 
 char *getcwd(char *buf, size_t size) {
-    if (!buf || size < 2) return NULL;
-    buf[0] = '/';
-    buf[1] = '\0';
+    /* Этап 3: настоящая cwd из ядра (per-process). */
+    if (!buf || size < 2) { errno = 22 /* EINVAL */; return NULL; }
+    int rc = sys_getcwd(buf, (uint32_t)size);
+    if (rc < 0) { errno = 34 /* ERANGE */; return NULL; }
     return buf;
 }
 
 int chdir(const char *path) {
-    (void)path;
-    return 0; /* single-root VFS, always "/" */
+    /* Этап 3: настоящая смена cwd; ядро проверяет существование каталога. */
+    if (!path) { errno = 14 /* EFAULT */; return -1; }
+    int rc = sys_chdir(path);
+    if (rc < 0) { errno = 2 /* ENOENT */; return -1; }
+    return 0;
 }
 
 pid_t getpid(void) {
@@ -570,12 +577,12 @@ int execve(const char *path, char *const argv[], char *const envp[]) {
 }
 
 int execv(const char *path, char *const argv[]) {
-    char *const envp[] = { 0 };
-    return (int)sys_execve(path, argv, envp);
+    /* Этап 3: наследуем текущее окружение процесса. */
+    return (int)sys_execve(path, argv, (char *const *)environ);
 }
 
 int execvp(const char *file, char *const argv[]) {
-    char *const envp[] = { 0 };
+    char *const *envp = (char *const *)environ;
     /* 1) как передано */
     sys_execve(file, argv, envp);
     /* 2) не нашлось -> пробуем bin/<file> */

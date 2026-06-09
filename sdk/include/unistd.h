@@ -36,6 +36,8 @@ int     pipe(int fds[2]);
 int     isatty(int fd);
 char   *getcwd(char *buf, size_t size);
 int     chdir(const char *path);
+/* Этап 3: глобальное окружение процесса (реализовано в env.c). */
+extern char **environ;
 pid_t   getpid(void);
 pid_t   getppid(void);
 /* Этап 1: процессная модель. fork() также объявлена в <sys/wait.h>. */

@@ -400,23 +400,26 @@ void syscall_handler(syscall_regs_t *regs)
     break;
   case 54: // SYS_EXECVE (const char* path, char* const argv[], char* const envp[])
   {
-    /* Заменяет образ ТЕКУЩЕГО процесса (pid сохраняется). envp пока
-     * игнорируется — getenv появится на Этапе 3. */
+    /* Заменяет образ ТЕКУЩЕГО процесса (pid сохраняется). Этап 3: envp
+     * копируется и передаётся новому образу (getenv/environ). */
     const char *upath = (const char *)regs->rdi;
     char *const *uargv = (char *const *)regs->rsi;
+    char *const *uenvp = (char *const *)regs->rdx;
     if (!upath) { regs->rax = (uint64_t)-1; break; }
 
-    /* Копируем path и argv из пользовательской памяти в ядро ДО любых
+    /* Копируем path/argv/envp из пользовательской памяти в ядро ДО любых
      * переключений адресного пространства (под stac/clac — SMAP). */
-    char kpath[256];
+    char rawpath[256];
     char argstore[16][128];
+    char envstore[20][160];
     char *kargv[17];
-    int kargc = 0;
+    char *kenvp[21];
+    int kargc = 0, kenvc = 0;
 
     stac();
     int pi = 0;
-    for (; pi < 255 && upath[pi]; pi++) kpath[pi] = upath[pi];
-    kpath[pi] = 0;
+    for (; pi < 255 && upath[pi]; pi++) rawpath[pi] = upath[pi];
+    rawpath[pi] = 0;
     if (uargv) {
       for (kargc = 0; kargc < 16 && uargv[kargc]; kargc++) {
         const char *s = uargv[kargc];
@@ -426,19 +429,37 @@ void syscall_handler(syscall_regs_t *regs)
         kargv[kargc] = argstore[kargc];
       }
     }
+    if (uenvp) {
+      for (kenvc = 0; kenvc < 20 && uenvp[kenvc]; kenvc++) {
+        const char *s = uenvp[kenvc];
+        int j = 0;
+        for (; j < 159 && s[j]; j++) envstore[kenvc][j] = s[j];
+        envstore[kenvc][j] = 0;
+        kenvp[kenvc] = envstore[kenvc];
+      }
+    }
     clac();
+    kenvp[kenvc] = 0;
 
-    if (kargc == 0) { /* argv пуст -> argv[0] = путь */
+    /* Этап 3: разрешаем путь относительно cwd процесса (плоский ext2). */
+    char kpath[256];
+    task_resolve_fs_path(rawpath, kpath, sizeof(kpath));
+    if (kpath[0] == '\0') { /* "/" — без имени файла */
+      int j = 0; for (; j < 255 && rawpath[j]; j++) kpath[j] = rawpath[j]; kpath[j] = 0;
+    }
+
+    if (kargc == 0) { /* argv пуст -> argv[0] = путь (как передан) */
       int j = 0;
-      for (; j < 127 && kpath[j]; j++) argstore[0][j] = kpath[j];
+      for (; j < 127 && rawpath[j]; j++) argstore[0][j] = rawpath[j];
       argstore[0][j] = 0;
       kargv[0] = argstore[0];
       kargc = 1;
     }
     kargv[kargc] = 0;
 
-    uint64_t entry = 0, ursp = 0, uargvp = 0, ncr3 = 0, nfs = 0;
-    if (!task_load_image(kpath, kargv, kargc, &entry, &ursp, &uargvp, &ncr3, &nfs)) {
+    uint64_t entry = 0, ursp = 0, uargvp = 0, uenvpp = 0, ncr3 = 0, nfs = 0;
+    if (!task_load_image(kpath, kargv, kargc, kenvp, kenvc,
+                         &entry, &ursp, &uargvp, &uenvpp, &ncr3, &nfs)) {
       regs->rax = (uint64_t)-1; /* образ не тронут — старый процесс жив */
       break;
     }
@@ -461,6 +482,7 @@ void syscall_handler(syscall_regs_t *regs)
     regs->rsp    = ursp;
     regs->rdi    = (uint64_t)kargc;
     regs->rsi    = uargvp;
+    regs->rdx    = uenvpp;   /* Этап 3: crt0 ждёт envp в rdx */
     regs->cs     = 0x23;
     regs->ss     = 0x1B;
     regs->rflags = 0x202;
@@ -1236,7 +1258,10 @@ void syscall_handler(syscall_regs_t *regs)
     }
     clac();
     kpath[i] = '\0';
-    regs->rax = (uint64_t)(int64_t)fd_open(kpath, oflags);
+    /* Этап 3: относительные пути -> относительно cwd процесса. */
+    char rpath[256];
+    task_resolve_fs_path(kpath, rpath, sizeof(rpath));
+    regs->rax = (uint64_t)(int64_t)fd_open(rpath[0] ? rpath : kpath, oflags);
     break;
   }
   case 91:
@@ -1303,8 +1328,11 @@ void syscall_handler(syscall_regs_t *regs)
     }
     clac();
     kpath[i] = '\0';
+    /* Этап 3: относительные пути -> относительно cwd процесса. */
+    char rpath[256];
+    task_resolve_fs_path(kpath, rpath, sizeof(rpath));
     uint32_t sz = 0;
-    int rc = fd_stat_path(kpath, &sz);
+    int rc = fd_stat_path(rpath[0] ? rpath : kpath, &sz);
     if (out) {
       stac();
       *out = sz;
@@ -1337,6 +1365,37 @@ void syscall_handler(syscall_regs_t *regs)
   case 99:
   { /* SYS_DUP2 (oldfd, newfd) -> newfd / -1 */
     regs->rax = (uint64_t)(int64_t)fd_dup2((int)regs->rdi, (int)regs->rsi);
+    break;
+  }
+
+  /* ---- Этап 3: cwd ---------------------------------------------------- */
+  case 100:
+  { /* SYS_GETCWD (char *buf, uint32_t size) -> len / -1 */
+    char     *ubuf = (char *)regs->rdi;
+    uint32_t  usize = (uint32_t)regs->rsi;
+    const char *cwd = task_current_cwd();
+    int len = 0; while (cwd[len]) len++;
+    if (!ubuf || usize == 0 || (uint32_t)(len + 1) > usize) {
+      regs->rax = (uint64_t)-1; break;
+    }
+    stac();
+    int k = 0; for (; k < len; k++) ubuf[k] = cwd[k];
+    ubuf[k] = '\0';
+    clac();
+    regs->rax = (uint64_t)(int64_t)len;
+    break;
+  }
+  case 101:
+  { /* SYS_CHDIR (const char *path) -> 0 / -1 */
+    const char *upath = (const char *)regs->rdi;
+    if (!upath) { regs->rax = (uint64_t)-1; break; }
+    char kpath[256];
+    stac();
+    int i = 0;
+    while (i < (int)sizeof(kpath) - 1 && upath[i]) { kpath[i] = upath[i]; i++; }
+    clac();
+    kpath[i] = '\0';
+    regs->rax = (uint64_t)(int64_t)task_chdir(kpath);
     break;
   }
 

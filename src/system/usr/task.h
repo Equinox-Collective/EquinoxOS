@@ -38,6 +38,9 @@ typedef struct task {
      * тянуть fd.h в task.h. fork клонирует таблицу, execve сохраняет,
      * exit освобождает. */
     struct fd_table *fdt;
+    /* --- Этап 3: рабочая директория процесса (логический абсолютный путь,
+     * напр. "/" или "/bin"). Наследуется при fork, сохраняется при execve. */
+    char cwd[256];
 } task_t;
 
 extern task_t* current_task; 
@@ -51,10 +54,20 @@ bool task_exec(char* full_command);
  * пространство и готовит стек/TLS/argv (argv[] уже скопирован в память ядра).
  * Переключение cr3 и освобождение старого пространства делает вызывающий. */
 bool task_load_image(const char *path, char *const argv[], int argc,
+                     char *const envp[], int envc,
                      uint64_t *out_entry, uint64_t *out_user_rsp,
-                     uint64_t *out_argv_ptr, uint64_t *out_cr3,
-                     uint64_t *out_fs_base);
+                     uint64_t *out_argv_ptr, uint64_t *out_envp_ptr,
+                     uint64_t *out_cr3, uint64_t *out_fs_base);
 void task_set_fs_base(uint64_t v);
+
+/* Этап 3: cwd текущего процесса (логический абсолютный путь). */
+const char *task_current_cwd(void);
+/* Сменить cwd текущего процесса на нормализованный target (логический
+ * абсолютный путь). Возвращает 0 при успехе, -1 при ошибке. */
+int task_chdir(const char *path);
+/* Разрешить пользовательский путь в имя для VFS (ext2): нормализует относ.
+ * cwd текущего процесса и убирает ведущий '/'. "/" -> "". */
+void task_resolve_fs_path(const char *in, char *out, int outsz);
 
 /* --- Этап 1: процессная модель ------------------------------------------- *
  * task_fork(): клонирует текущий процесс. parent_frame — сохранённый кадр

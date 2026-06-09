@@ -45,6 +45,8 @@ void task_init() {
     current_task->kstack_at_bottom = (uint64_t)kmalloc(16384) + 16384; 
     /* Этап 2: таблица дескрипторов init-процесса (0/1/2 = консоль). */
     current_task->fdt = fd_table_create();
+    /* Этап 3: рабочая директория по умолчанию — корень. */
+    current_task->cwd[0] = '/'; current_task->cwd[1] = '\0';
 
     current_task->next = current_task;
     task_list = current_task;
@@ -53,6 +55,45 @@ void task_init() {
 /* Этап 2: таблица дескрипторов текущего процесса (используется fs/fd.c). */
 struct fd_table *task_current_fdt(void) {
     return current_task ? current_task->fdt : NULL;
+}
+
+/* ===== Этап 3: рабочая директория (cwd) ================================= */
+
+const char *task_current_cwd(void) {
+    if (current_task && current_task->cwd[0]) return current_task->cwd;
+    return "/";
+}
+
+int task_chdir(const char *path) {
+    if (!current_task || !path) return -1;
+    char norm[256];
+    if (vfs_normalize(current_task->cwd, path, norm, sizeof(norm)) < 0) return -1;
+    if (!vfs_dir_exists(norm)) return -1;     /* нет такого каталога */
+    int i = 0;
+    for (; i < (int)sizeof(current_task->cwd) - 1 && norm[i]; i++)
+        current_task->cwd[i] = norm[i];
+    current_task->cwd[i] = '\0';
+    return 0;
+}
+
+void task_resolve_fs_path(const char *in, char *out, int outsz) {
+    if (!out || outsz < 1) return;
+    const char *cwd = task_current_cwd();
+    char norm[256];
+    if (vfs_normalize(cwd, in, norm, sizeof(norm)) < 0) {
+        /* фолбэк: копируем как есть (без ведущего '/') */
+        int j = 0; const char *p = in ? in : "";
+        while (*p == '/') p++;
+        for (; p[j] && j < outsz - 1; j++) out[j] = p[j];
+        out[j] = '\0';
+        return;
+    }
+    /* norm — абсолютный ("/bin/foo"); для плоского ext2 убираем ведущий '/'. */
+    const char *p = norm;
+    while (*p == '/') p++;
+    int j = 0;
+    for (; p[j] && j < outsz - 1; j++) out[j] = p[j];
+    out[j] = '\0';
 }
 
 void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2, uint64_t cr3) {
@@ -64,6 +105,8 @@ void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2, uint64_t cr3) {
   new_task->cr3 = cr3;
   /* Этап 2: своя таблица дескрипторов (0/1/2 = консоль). */
   new_task->fdt = fd_table_create();
+  /* Этап 3: cwd по умолчанию — корень. */
+  new_task->cwd[0] = '/'; new_task->cwd[1] = '\0';
 
   // 1. Ядерный стек (для прерываний)
   void *kstack_phys = pmm_alloc_continuous(4);
@@ -338,9 +381,10 @@ bool task_exec(char* full_command) {
  *  поэтому к пользовательской памяти эта функция не обращается.
  * ======================================================================== */
 bool task_load_image(const char *path, char *const argv[], int argc,
+                     char *const envp[], int envc,
                      uint64_t *out_entry, uint64_t *out_user_rsp,
-                     uint64_t *out_argv_ptr, uint64_t *out_cr3,
-                     uint64_t *out_fs_base) {
+                     uint64_t *out_argv_ptr, uint64_t *out_envp_ptr,
+                     uint64_t *out_cr3, uint64_t *out_fs_base) {
     if (!path || argc < 1) return false;
 
     /* VFS хранит файлы в корне под ПОЛНЫМ путём ("bin/foo.elf"), поэтому если
@@ -460,9 +504,37 @@ bool task_load_image(const char *path, char *const argv[], int argc,
     }
     argv_arr[argc] = 0;
 
+    /* --- страница envp: [256 байт под массив указателей][строки] (Этап 3) --- */
+    uint64_t user_env_page = 0xB0001000ULL;
+    void *phys_env = pmm_alloc();
+    if (!phys_env) { vmm_destroy_address_space(phys_pml4); kfree(elf_raw); return false; }
+    vmm_map(proc_pml4, user_env_page, (uint64_t)phys_env,
+            PTE_PRESENT | PTE_USER | PTE_WRITABLE);
+    memset((void *)VIRT(phys_env), 0, 4096);
+
+    if (envc < 0)  envc = 0;
+    if (envc > 31) envc = 31;          /* массив указателей: 32 слота * 8 = 256 */
+    uint64_t *env_arr = (uint64_t *)VIRT(phys_env);
+    char *envstr = (char *)VIRT(phys_env) + 256;
+    uint64_t eoff = 256;
+    int eput = 0;
+    for (int i = 0; i < envc && envp; i++) {
+        const char *s = envp[i] ? envp[i] : "";
+        int len = (int)strlen(s) + 1;
+        if (eoff + (uint64_t)len > 4096) break;   /* страница env переполнена */
+        env_arr[eput] = user_env_page + eoff;
+        memcpy(envstr, s, len);
+        envstr[len - 1] = 0;
+        envstr += len;
+        eoff += len;
+        eput++;
+    }
+    env_arr[eput] = 0;
+
     *out_entry    = header->e_entry;
     *out_user_rsp = stack_top - 16;
     *out_argv_ptr = user_argv_page;
+    *out_envp_ptr = user_env_page;
     *out_cr3      = phys_pml4;
     *out_fs_base  = tls_virt;
 
@@ -518,6 +590,14 @@ uint64_t task_fork(stack_frame_t* parent_frame) {
     /* Этап 2: ребёнок наследует таблицу дескрипторов — ofd'шки разделяются
      * (refcount++), так что пайпы/файлы остаются открытыми у обоих. */
     child->fdt       = fd_table_clone(parent->fdt);
+    /* Этап 3: ребёнок наследует рабочую директорию родителя. */
+    {
+        int i = 0;
+        for (; i < (int)sizeof(child->cwd) - 1 && parent->cwd[i]; i++)
+            child->cwd[i] = parent->cwd[i];
+        child->cwd[i] = '\0';
+        if (child->cwd[0] == '\0') { child->cwd[0] = '/'; child->cwd[1] = '\0'; }
+    }
 
     /* 3. Ядерный стек ребёнка (как в task_create: 4 страницы = 16 КБ). */
     void* kstack_phys = pmm_alloc_continuous(4);

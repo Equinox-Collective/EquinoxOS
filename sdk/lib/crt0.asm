@@ -1,21 +1,30 @@
 [bits 64]
 [extern main]
 [extern exit]
+[extern __libc_init_env]
 [global _start]
 
 _start:
+    ; Ядро передаёт: rdi=argc, rsi=argv, rdx=envp (Этап 3).
     ; 1. Выравниваем стек по 16 байтам (требование ABI)
     and rsp, -16
-    
-    ; 2. Вызываем конструкторы (если они есть)
-    ; Если в Doom нет глобальных объектов C++, эти секции будут пустыми, 
-    ; но для совместимости с SDK лучше оставить заглушки или вызвать libc_init
-    
-    ; 3. Аргументы уже в rdi (argc) и rsi (argv) от ядра
-    
-    ; 4. Вызываем main
+
+    ; 2. Сохраняем argc/argv/envp в callee-saved регистры на время вызова
+    ;    инициализации libc (она их не трогает).
+    mov r13, rdi          ; argc
+    mov r14, rsi          ; argv
+    mov r15, rdx          ; envp
+
+    ; 3. Инициализируем окружение: environ = envp
+    mov rdi, r15
+    call __libc_init_env
+
+    ; 4. Вызываем main(argc, argv, envp)
+    mov rdi, r13
+    mov rsi, r14
+    mov rdx, r15
     call main
-    
+
     ; 5. Выход
     mov rdi, rax
     call exit
