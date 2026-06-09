@@ -87,6 +87,25 @@ int main(int argc, char* argv[]) {
             DBGN("[SDLT] FPTEST div1=",   (unsigned long)(long long)b);
             DBGN("[SDLT] FPTEST floor=",  (unsigned long)(long long)f);
         }
+        /* === BUILD MARKER + диагностика floor === */
+        DBG("[SDLT] BUILD=floorprobe-3\n");
+        {
+            /* битовое представление литерала 399.7 (должно быть 0x4078FB33 33333333) */
+            volatile double xin = 399.7;
+            union { double d; unsigned long long u; } bb; bb.d = xin;
+            DBGN("[SDLT] bits399_hi=", (unsigned long)(bb.u >> 32));
+            DBGN("[SDLT] bits399_lo=", (unsigned long)(bb.u & 0xffffffffUL));
+            extern double floor(double);
+            int e = (int)((bb.u >> 52) & 0x7ff) - 0x3ff;
+            DBGN("[SDLT] exp_e=", (unsigned long)(long long)e);
+            /* инлайн bit-manip floor прямо в приложении (минуя линковку libc) */
+            union { double d; unsigned long long u; } w2; w2.d = xin;
+            unsigned long long m = 0x000fffffffffffffULL >> e;
+            w2.u &= ~m;
+            DBGN("[SDLT] inapp_floor=", (unsigned long)(long long)w2.d);
+            /* прямой вызов libc floor (тот, что слинкован) */
+            DBGN("[SDLT] libc_floor=", (unsigned long)(long long)floor(399.7));
+        }
         SDL_RenderSetViewport(renderer, NULL);
         SDL_Rect vp;
         SDL_RenderGetViewport(renderer, &vp);
