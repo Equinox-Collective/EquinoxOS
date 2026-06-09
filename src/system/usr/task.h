@@ -41,6 +41,16 @@ typedef struct task {
     /* --- Этап 3: рабочая директория процесса (логический абсолютный путь,
      * напр. "/" или "/bin"). Наследуется при fork, сохраняется при execve. */
     char cwd[256];
+    /* --- Этап 4: сигналы (POSIX-подмножество, см. usr/signal.c) ---------- *
+     * sig_pending — битовая маска ожидающих сигналов (бит N = сигнал N).
+     * sig_blocked — маска заблокированных (sigprocmask + auto-block в обработчике).
+     * sig_handlers[N] — пользовательский обработчик: 0=SIG_DFL, 1=SIG_IGN,
+     * иначе адрес функции в ring3. sig_restorer — адрес трамплина sigreturn
+     * (libc __sigreturn_trampoline), общий для всех обработчиков. */
+    uint64_t sig_pending;
+    uint64_t sig_blocked;
+    uint64_t sig_handlers[32];
+    uint64_t sig_restorer;
 } task_t;
 
 extern task_t* current_task; 

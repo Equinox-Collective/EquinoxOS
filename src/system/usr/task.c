@@ -8,6 +8,7 @@
 #include "../../syslibc/string.h"
 #include "../fs/vfs.h"
 #include "../fs/fd.h"
+#include "signal.h"
 #include <stdint.h>
 
 extern void term_print(const char *str);
@@ -47,6 +48,8 @@ void task_init() {
     current_task->fdt = fd_table_create();
     /* Этап 3: рабочая директория по умолчанию — корень. */
     current_task->cwd[0] = '/'; current_task->cwd[1] = '\0';
+    /* Этап 4: сигнальное состояние (всё SIG_DFL, маски пусты). */
+    task_signal_init(current_task);
 
     current_task->next = current_task;
     task_list = current_task;
@@ -107,6 +110,8 @@ void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2, uint64_t cr3) {
   new_task->fdt = fd_table_create();
   /* Этап 3: cwd по умолчанию — корень. */
   new_task->cwd[0] = '/'; new_task->cwd[1] = '\0';
+  /* Этап 4: сигнальное состояние (всё SIG_DFL). */
+  task_signal_init(new_task);
 
   // 1. Ядерный стек (для прерываний)
   void *kstack_phys = pmm_alloc_continuous(4);
@@ -598,6 +603,8 @@ uint64_t task_fork(stack_frame_t* parent_frame) {
         child->cwd[i] = '\0';
         if (child->cwd[0] == '\0') { child->cwd[0] = '/'; child->cwd[1] = '\0'; }
     }
+    /* Этап 4: наследуем обработчики и маску блокировки; pending обнуляется. */
+    task_signal_fork(child, parent);
 
     /* 3. Ядерный стек ребёнка (как в task_create: 4 страницы = 16 КБ). */
     void* kstack_phys = pmm_alloc_continuous(4);
@@ -663,6 +670,9 @@ void task_exit_current(int code) {
         task_t* p = task_list;
         do {
             if (p->id == me->parent_id) {
+                /* Этап 4: родителю — SIGCHLD (по умолчанию игнорируется,
+                 * но обработчик/ожидание могут на него среагировать). */
+                p->sig_pending |= (1ULL << 17 /* SIGCHLD */);
                 if (p->waiting &&
                     (p->wait_for == 0 || p->wait_for == me->id)) {
                     p->running = true;
@@ -737,6 +747,14 @@ int64_t task_waitpid(uint64_t pid, int* status_out) {
 
         if (!have_child)
             return -1; /* ECHILD: у процесса нет таких детей */
+
+        /* Этап 4: если есть доставляемый сигнал (кроме SIGCHLD — это наш
+         * штатный «будильник»), прерываем ожидание с -1 (EINTR). Обработчик
+         * запустится при возврате из сисколла (signal_deliver). Проверка
+         * только перед блокировкой: готовый зомби обрабатывается выше. */
+        if (current_task->sig_pending & ~current_task->sig_blocked &
+            ~(1ULL << 17 /* SIGCHLD */))
+            return -1;
 
         /* Блокируемся до тех пор, пока ребёнок не станет зомби. */
         current_task->waiting  = true;

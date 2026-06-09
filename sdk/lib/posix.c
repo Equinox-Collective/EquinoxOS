@@ -284,8 +284,7 @@ double strtod(const char *nptr, char **endptr) {
 }
 
 void abort(void) { exit(1); }
-void (*signal(int sig, void (*func)(int)))(int) { return SIG_ERR; }
-int raise(int sig) { return -1; }
+/* signal/raise/kill/sigaction/sigprocmask реализованы в sdk/lib/signal.c (Этап 4). */
 clock_t clock(void) { return (clock_t)time(NULL); }
 struct tm *localtime(const time_t *t) { static struct tm tmp; return &tmp; }
 struct tm *gmtime(const time_t *t) { static struct tm tmp; return &tmp; }

@@ -129,6 +129,12 @@
 #define SYS_GETCWD     100  /* (char *buf, size) -> len / -1              */
 #define SYS_CHDIR      101  /* (const char *path)-> 0 / -1                */
 
+/* --- Этап 4: сигналы --------------------------------------------------- */
+#define SYS_KILL       102  /* (pid, sig)                  -> 0 / -1       */
+#define SYS_SIGACTION  103  /* (sig, handler, restorer, &old) -> 0 / -1    */
+#define SYS_SIGRETURN  104  /* ()  — возврат из обработчика (не возвращ.)  */
+#define SYS_SIGPROCMASK 105 /* (how, set, &old)            -> 0            */
+
 typedef struct {
   uint64_t pid;
   uint64_t cr3;
@@ -287,6 +293,20 @@ static inline int sys_getcwd(char *buf, uint32_t size) {
 }
 static inline int sys_chdir(const char *path) {
   return (int)_syscall(SYS_CHDIR, (uint64_t)path, 0, 0, 0, 0);
+}
+
+/* Этап 4: сигналы. */
+static inline int sys_kill(uint64_t pid, int sig) {
+  return (int)_syscall(SYS_KILL, pid, (uint64_t)sig, 0, 0, 0);
+}
+static inline int sys_sigaction(int sig, uint64_t handler, uint64_t restorer,
+                                uint64_t *old_out) {
+  return (int)_syscall(SYS_SIGACTION, (uint64_t)sig, handler, restorer,
+                       (uint64_t)old_out, 0);
+}
+static inline int sys_sigprocmask(int how, uint64_t set, uint64_t *old_out) {
+  return (int)_syscall(SYS_SIGPROCMASK, (uint64_t)how, set, (uint64_t)old_out,
+                       0, 0);
 }
 
 #endif

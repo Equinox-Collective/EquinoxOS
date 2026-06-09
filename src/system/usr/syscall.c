@@ -32,25 +32,11 @@ static volatile int k_app_win_w = 640;
 static volatile int k_app_win_h = 400;
 static volatile bool k_app_win_active = false;
 
-typedef struct
-{
-  uint64_t rax; // syscall_number
-  uint64_t r9;
-  uint64_t r8;
-  uint64_t rbx;
-  uint64_t rcx;
-  uint64_t rdx;
-  uint64_t rsi;
-  uint64_t rdi;
-  uint64_t rbp;
-  /* r10–r15 теперь тоже сохраняются стабом syscall_interrupt_asm
-   * (interrupt.asm). Поля идут СТРОГО после rbp и перед iretq-фреймом,
-   * чтобы смещения rax..rbp не поехали. Обработчик их не использует —
-   * они нужны лишь для корректного сохранения/восстановления состояния
-   * пользователя вокруг `int 0x80`. */
-  uint64_t r10, r11, r12, r13, r14, r15;
-  uint64_t rip, cs, rflags, rsp, ss;
-} syscall_regs_t;
+/* syscall_regs_t вынесен в uregs.h, чтобы доставка сигналов (signal.c) могла
+ * использовать тот же кадр. Поля/смещения по-прежнему обязаны совпадать с
+ * порядком push в syscall_interrupt_asm (interrupt.asm). */
+#include "uregs.h"
+#include "signal.h"
 
 extern int mouse_x, mouse_y;
 extern bool mouse_left_button;
@@ -472,6 +458,8 @@ void syscall_handler(syscall_regs_t *regs)
     current_task->cr3     = ncr3;
     current_task->fs_base = nfs;
     current_task->brk     = 0x40000000;
+    /* Этап 4: при exec перехватываемые обработчики -> SIG_DFL (POSIX). */
+    task_signal_exec(current_task);
     task_set_fs_base(nfs);
     if (oldcr3 && oldcr3 != ncr3)
       vmm_destroy_address_space(oldcr3);
@@ -1399,9 +1387,40 @@ void syscall_handler(syscall_regs_t *regs)
     break;
   }
 
+  case 102:
+  { // SYS_KILL (pid, sig) -> 0 / -1
+    regs->rax = (uint64_t)(int64_t)signal_send(regs->rdi, (int)regs->rsi);
+    break;
+  }
+  case 103:
+  { // SYS_SIGACTION (sig, handler, restorer, &old) -> 0 / -1
+    uint64_t old = 0;
+    int rc = signal_setaction((int)regs->rdi, regs->rsi, regs->rdx, &old);
+    if (regs->rcx) { stac(); *(uint64_t *)regs->rcx = old; clac(); }
+    regs->rax = (uint64_t)(int64_t)rc;
+    break;
+  }
+  case 104:
+    // SYS_SIGRETURN — восстановить контекст после обработчика (не «возвращает»).
+    signal_sigreturn(regs);
+    break;
+  case 105:
+  { // SYS_SIGPROCMASK (how, set, &old)
+    uint64_t old = 0;
+    signal_procmask((int)regs->rdi, regs->rsi, &old);
+    if (regs->rdx) { stac(); *(uint64_t *)regs->rdx = old; clac(); }
+    regs->rax = 0;
+    break;
+  }
+
   default:
     break;
   }
+
+  /* Этап 4: перед возвратом в ring3 — доставка ожидающих сигналов.
+   * Может перенаправить regs в обработчик или завершить процесс
+   * (task_exit_current не возвращается). */
+  signal_deliver(regs);
 }
 
 /* ----- capture-sink для SYS_SHELL_EXEC ------------------------------------
