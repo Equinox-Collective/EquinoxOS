@@ -1,17 +1,19 @@
 /*
- * ttytest — интерактивный тест Этапа 5 (tty/termios) на консоли COM1.
+ * ttytest — interactive test of Stage 5 (tty/termios) on the COM1 console.
  *
- * Запускать в serial-консоли (`make run`, окно где `-serial stdio`).
+ * Run in the serial console (`make run`, the `-serial mon:stdio` window).
+ * Type into the SAME window where kernel output appears.
  *
- * Тесты:
- *   A) isatty + размер окна (TIOCGWINSZ).
- *   B) Канонический режим: ввод строки с эхо/забоем, Enter завершает.
- *      Введи "exit" чтобы пропустить остаток и выйти.
- *   C) SIGINT: нажми Ctrl-C — сработает обработчик (ISIG в каноне).
- *   D) Сырой режим (cfmakeraw): посимвольное чтение без эха; печатаем коды;
- *      'q' завершает; termios восстанавливается.
+ * NOTE: prompts are ASCII so they render correctly regardless of the host
+ * terminal codepage (no UTF-8/CP866 mojibake).
  *
- * Это интерактивный тест — «ожидаемый вывод» зависит от того, что ты вводишь.
+ * Tests:
+ *   A) isatty + window size (TIOCGWINSZ).
+ *   B) Canonical mode: line input with echo/backspace, Enter ends it.
+ *      Type "exit" to skip the rest.
+ *   C) SIGINT: press Ctrl-C -> handler fires (ISIG in canonical mode).
+ *   D) Raw mode (cfmakeraw): single-char reads, no echo, codes printed;
+ *      'q' quits; termios is restored.
  */
 #include <equos.h>
 #include <stdio.h>
@@ -30,7 +32,7 @@ static void on_sigint(int s) {
 
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
-    printf("=== ttytest (Этап 5) ===\n");
+    printf("=== ttytest (Stage 5: tty/termios) ===\n");
 
     /* A) isatty + winsize */
     printf("[A] isatty(0)=%d isatty(1)=%d\n", isatty(0), isatty(1));
@@ -40,43 +42,41 @@ int main(int argc, char **argv) {
     else
         printf("[A] TIOCGWINSZ failed\n");
 
-    /* B) канонический ввод строки */
-    printf("[B] Введи строку и нажми Enter (или 'exit'):\n> ");
+    /* B) canonical line input */
+    printf("[B] Type a line and press Enter (try Backspace; 'exit' to skip):\n> ");
     char line[128];
     int n = (int)read(0, line, sizeof(line) - 1);
     if (n < 0) n = 0;
     line[n] = '\0';
-    /* убрать завершающий перевод строки для аккуратного вывода */
     if (n > 0 && line[n - 1] == '\n') line[n - 1] = '\0';
-    printf("[B] прочитано %d байт: \"%s\"\n", n, line);
+    printf("[B] read %d bytes: \"%s\"\n", n, line);
     if (strcmp(line, "exit") == 0) {
         printf("=== ttytest done (early) ===\n");
         return 0;
     }
 
-    /* C) SIGINT по Ctrl-C (канонический режим, ISIG активен) */
+    /* C) SIGINT via Ctrl-C (canonical mode, ISIG active) */
     signal(SIGINT, on_sigint);
-    printf("[C] Нажми Ctrl-C для проверки SIGINT...\n");
+    printf("[C] Press Ctrl-C to test SIGINT...\n");
     while (!got_sigint) {
         char tmp[32];
         int r = (int)read(0, tmp, sizeof(tmp));
-        if (r < 0) continue;        /* прервано сигналом — проверим флаг */
-        /* если ввели обычную строку — подскажем ещё раз */
-        if (!got_sigint) printf("[C] (всё ещё жду Ctrl-C)\n");
+        if (r < 0) continue;               /* interrupted by signal */
+        if (!got_sigint) printf("[C] (still waiting for Ctrl-C)\n");
     }
-    printf("[C] SIGINT получен, продолжаем.\n");
+    printf("[C] SIGINT received, continuing.\n");
 
-    /* D) сырой режим */
+    /* D) raw mode */
     struct termios saved, raw;
     if (tcgetattr(0, &saved) != 0) {
-        printf("[D] tcgetattr failed, пропуск\n");
+        printf("[D] tcgetattr failed, skipping\n");
         printf("=== ttytest done ===\n");
         return 0;
     }
     raw = saved;
     cfmakeraw(&raw);
     tcsetattr(0, TCSANOW, &raw);
-    printf("[D] Сырой режим: жми клавиши (без эха), коды печатаются; 'q' = выход\r\n");
+    printf("[D] Raw mode: press keys (no echo), codes printed; 'q' = quit\r\n");
     for (;;) {
         char c;
         int r = (int)read(0, &c, 1);
@@ -85,8 +85,8 @@ int main(int argc, char **argv) {
                (c >= 32 && c < 127) ? c : '.');
         if (c == 'q') break;
     }
-    tcsetattr(0, TCSANOW, &saved);   /* восстановить */
-    printf("\n[D] termios восстановлен.\n");
+    tcsetattr(0, TCSANOW, &saved);          /* restore */
+    printf("\n[D] termios restored.\n");
 
     printf("=== ttytest done ===\n");
     return 0;

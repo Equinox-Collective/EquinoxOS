@@ -617,7 +617,7 @@ QEMU_ACCEL := -accel whpx,kernel-irqchip=off -accel kvm -accel hvf -accel tcg
 # курсор в десктопе работает сразу (без `mouse_set` в мониторе). USB-мышь
 # смотри в run-usb.
 run:
-	$(QEMU) $(QEMU_BASE) -serial stdio $(QEMU_ACCEL)
+	$(QEMU) $(QEMU_BASE) -serial mon:stdio $(QEMU_ACCEL)
 
 # Загрузка С USB-мышью на UHCI: запускает загрузочный тест мыши
 # ("MOVE YOUR MOUSE" + dX/dY). ВАЖНО: пока гостевая ОС конфигурирует
@@ -628,12 +628,12 @@ run:
 # Поэтому обычный `make run` идёт БЕЗ USB-мыши (рабочий курсор в десктопе),
 # а тест мыши смотри здесь.
 run-usb:
-	$(QEMU) $(QEMU_BASE) -serial stdio -device usb-mouse,bus=uhci.0 $(QEMU_ACCEL)
+	$(QEMU) $(QEMU_BASE) -serial mon:stdio -device usb-mouse,bus=uhci.0 $(QEMU_ACCEL)
 
 # Run with pure software emulation (no hypervisor). Slower but more
 # deterministic — useful when WHPX/KVM behave oddly with network I/O.
 run-tcg:
-	$(QEMU) $(QEMU_BASE) -serial stdio -accel tcg
+	$(QEMU) $(QEMU_BASE) -serial mon:stdio -accel tcg
 
 # Запуск с записью COM1 в файл boot_serial.log — для профилирования загрузки.
 # После выхода открой boot_serial.log и смотри строки [T=...ms]:
@@ -642,7 +642,7 @@ run-log:
 	$(QEMU) $(QEMU_BASE) -serial file:boot_serial.log $(QEMU_ACCEL)
 
 run-debug:
-	$(QEMU) $(QEMU_BASE) -serial stdio -d int,guest_errors,mmu -D qemu.log
+	$(QEMU) $(QEMU_BASE) -serial mon:stdio -d int,guest_errors,mmu -D qemu.log
 
 cleanrun: clean all run
 
