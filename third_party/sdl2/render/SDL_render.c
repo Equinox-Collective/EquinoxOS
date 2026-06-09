@@ -2465,17 +2465,6 @@ int SDL_RenderSetViewport(SDL_Renderer *renderer, const SDL_Rect *rect)
         renderer->viewport.w = (double)w;
         renderer->viewport.h = (double)h;
         /* NOLINTEND(clang-analyzer-core.uninitialized.Assign) */
-        /* DEBUG: что реально получили и сохранили */
-        {
-            register unsigned long n __asm__("rax") = 1;
-            char m[64]; int i = 0; const char *p = "[RSV] got w="; while (p[i]) { m[i] = p[i]; i++; }
-            { long v = w; char t[12]; int q=0; if(!v)t[q++]='0'; while(v){t[q++]=(char)('0'+v%10);v/=10;} while(q)m[i++]=t[--q]; }
-            const char *p2 = " stored(int)vp.w="; for (int j=0;p2[j];j++) m[i++]=p2[j];
-            { long v=(long)renderer->viewport.w; if(v<0){m[i++]='-';v=-v;} char t[12]; int q=0; if(!v)t[q++]='0'; while(v){t[q++]=(char)('0'+v%10);v/=10;} while(q)m[i++]=t[--q]; }
-            m[i++]='\n'; m[i]=0;
-            register unsigned long a __asm__("rdi") = (unsigned long)m;
-            __asm__ volatile("int $0x80" : "+r"(n) : "r"(a) : "rsi","rdx","rcx","r8","r9","r10","r11","memory");
-        }
     }
     retval = QueueCmdSetViewport(renderer);
     return retval < 0 ? retval : FlushRenderCommandsIfNotBatching(renderer);
