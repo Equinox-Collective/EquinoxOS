@@ -207,7 +207,13 @@ SDL_SRCS := \
 
 SDL_OBJS    := $(SDL_SRCS:.c=.o)
 SDL_LIB     := $(SDL_DIR)/libSDL2.a
-SDL_CFLAGS  := $(USER_CFLAGS) $(SDL_INC) -Os
+# HAVE_FLOOR/HAVE_CEIL: маршрутизируем SDL_floor/SDL_ceil (и производные
+# SDL_floorf/ceilf/trunc/round/lround) на libc floor/ceil из sdk/lib/math.c
+# (рабочие, -O0). Встроенный SDL_uclibc_floor (libm/s_floor.c) под -Os
+# мискомпилировался в ring3 и возвращал 0 -> viewport=0 -> чёрный экран.
+# -fno-strict-aliasing страхует остальной libm SDL (sin/cos/atan2/sqrt),
+# использующий union type-punning в EXTRACT_WORDS/INSERT_WORDS.
+SDL_CFLAGS  := $(USER_CFLAGS) $(SDL_INC) -Os -DHAVE_FLOOR -DHAVE_CEIL -fno-strict-aliasing
 
 $(SDL_DIR)/%.o: $(SDL_DIR)/%.c
 	$(CC) $(SDL_CFLAGS) -c $< -o $@
