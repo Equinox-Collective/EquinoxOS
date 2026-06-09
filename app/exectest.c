@@ -36,11 +36,13 @@ int main(int argc, char **argv) {
     }
 
     if (pid == 0) {
-        printf("[child]  pid = %ld, execve(exectest.elf, {.., \"child\"})\n",
+        printf("[child]  pid = %ld, execve(bin/exectest.elf, {.., \"child\"})\n",
                (long)getpid());
-        char *av[] = { "exectest.elf", "child", 0 };
+        /* VFS хранит файлы как "bin/<name>"; ядро также умеет дописывать "bin/"
+         * к голому имени, но передаём полный путь явно. */
+        char *av[] = { "bin/exectest.elf", "child", 0 };
         char *ev[] = { 0 };
-        execve("exectest.elf", av, ev);
+        execve("bin/exectest.elf", av, ev);
         /* сюда попадаем только если execve провалился */
         printf("[child]  execve FAILED (still old image)\n");
         exit(99);

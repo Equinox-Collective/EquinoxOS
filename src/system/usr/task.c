@@ -332,8 +332,23 @@ bool task_load_image(const char *path, char *const argv[], int argc,
                      uint64_t *out_fs_base) {
     if (!path || argc < 1) return false;
 
+    /* VFS хранит файлы в корне под ПОЛНЫМ путём ("bin/foo.elf"), поэтому если
+     * передано голое имя без '/', пробуем ещё раз с префиксом "bin/" — так
+     * execve("foo.elf") и execve("bin/foo.elf") работают одинаково. */
     uint32_t elf_size = 0;
     uint8_t *elf_raw = vfs_read_file((char *)path, &elf_size);
+    if (!elf_raw) {
+        int has_slash = 0;
+        for (const char *p = path; *p; p++) if (*p == '/') { has_slash = 1; break; }
+        if (!has_slash) {
+            char alt[256];
+            alt[0] = 'b'; alt[1] = 'i'; alt[2] = 'n'; alt[3] = '/';
+            int k = 0;
+            for (; k < 251 && path[k]; k++) alt[4 + k] = path[k];
+            alt[4 + k] = 0;
+            elf_raw = vfs_read_file(alt, &elf_size);
+        }
+    }
     if (!elf_raw) {
         term_print("EXECVE: file not found: ");
         term_print((char *)path);
