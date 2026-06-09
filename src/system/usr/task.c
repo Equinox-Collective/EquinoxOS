@@ -8,6 +8,7 @@
 #include "../../syslibc/string.h"
 #include "../fs/vfs.h"
 #include "../fs/fd.h"
+#include "../misc/random.h"   /* Этап 6b: rdrand_bytes для AT_RANDOM */
 #include "signal.h"
 #include <stdint.h>
 
@@ -429,12 +430,21 @@ bool task_load_image(const char *path, char *const argv[], int argc,
 
     /* --- PT_LOAD сегменты --- */
     Elf64_Phdr *phdr = (Elf64_Phdr *)(elf_raw + header->e_phoff);
+    /* Этап 6b: адрес таблицы Program Headers в памяти процесса (AT_PHDR).
+     * Нужен musl, чтобы найти PT_TLS при инициализации TLS. Ищем PT_LOAD,
+     * который физически перекрывает e_phoff в файле. */
+    uint64_t phdr_user = 0;
+    uint64_t phsz = (uint64_t)header->e_phnum * header->e_phentsize;
     for (int i = 0; i < header->e_phnum; i++) {
         if (phdr[i].p_type != 1) continue; /* PT_LOAD */
         uint64_t vaddr  = phdr[i].p_vaddr;
         uint64_t memsz  = phdr[i].p_memsz;
         uint64_t filesz = phdr[i].p_filesz;
         uint64_t offset = phdr[i].p_offset;
+        if (phdr_user == 0 &&
+            offset <= header->e_phoff &&
+            header->e_phoff + phsz <= offset + phdr[i].p_filesz)
+            phdr_user = vaddr + (header->e_phoff - offset);
         if (offset + filesz > elf_size)
             filesz = (offset < elf_size) ? (elf_size - offset) : 0;
 
@@ -460,6 +470,7 @@ bool task_load_image(const char *path, char *const argv[], int argc,
     /* --- пользовательский стек (8 МБ) + TLS (как в task_create) --- */
     uint64_t stack_top   = 0x70000000000ULL;
     uint64_t stack_pages = 2048;
+    void *top_stack_phys = 0;            /* Этап 6b: верхняя страница стека */
     for (uint64_t i = 0; i < stack_pages; i++) {
         uint64_t v = stack_top - (stack_pages * 4096) + (i * 4096);
         void *phys = pmm_alloc();
@@ -472,6 +483,7 @@ bool task_load_image(const char *path, char *const argv[], int argc,
         vmm_map(proc_pml4, v, (uint64_t)phys,
                 PTE_PRESENT | PTE_USER | PTE_WRITABLE);
         memset((void *)VIRT(phys), 0, 4096);
+        if (v == stack_top - 4096) top_stack_phys = phys;
     }
     uint64_t tls_virt = 0x60000000000ULL;
     void *tls_phys = pmm_alloc();
@@ -536,8 +548,99 @@ bool task_load_image(const char *path, char *const argv[], int argc,
     }
     env_arr[eput] = 0;
 
+    /* ----------------------------------------------------------------------
+     * Этап 6b — System V AMD64 initial stack (для musl / Linux-ABI бинарей).
+     *
+     * Родной crt0 читает argc/argv/envp из РЕГИСТРОВ (rdi/rsi/rdx) и стек при
+     * входе не читает. musl же читает их из стека в _start. Поэтому мы СТРОИМ
+     * полный SysV-кадр на вершине стека ДОПОЛНИТЕЛЬНО — детект ABI не нужен:
+     *
+     *   rsp -> argc
+     *          argv[0..argc-1], NULL
+     *          envp[0..n-1],    NULL
+     *          auxv пары ...,   AT_NULL
+     *          (выше) строки argv/envp + 16 байт AT_RANDOM
+     *
+     * Всё умещаем в верхнюю страницу стека [stack_top-4096, stack_top).
+     * При переполнении страницы откатываемся к старому поведению (stack_top-16),
+     * родные приложения от этого не страдают.
+     * -------------------------------------------------------------------- */
+    uint64_t sysv_rsp = stack_top - 16;
+    if (top_stack_phys) {
+        uint64_t base_user = stack_top - 4096;
+        uint8_t *top = (uint8_t *)VIRT(top_stack_phys);
+        #define U2K(u) ((void *)(top + ((u) - base_user)))
+        uint64_t sp = stack_top;
+        int ok = 1;
+
+        /* 1. строки argv */
+        uint64_t argv_u[17];
+        for (int i = 0; i < argc; i++) {
+            const char *s = argv[i] ? argv[i] : "";
+            int len = (int)strlen(s) + 1;
+            if (sp - (uint64_t)len < base_user + 512) { argc = i; break; }
+            sp -= len;
+            memcpy(U2K(sp), s, len);
+            argv_u[i] = sp;
+        }
+        /* 2. строки envp (берём из исходного envp[], как и env_arr выше) */
+        uint64_t envp_u[32];
+        for (int i = 0; i < eput; i++) {
+            const char *s = (envp && envp[i]) ? envp[i] : "";
+            int len = (int)strlen(s) + 1;
+            if (sp - (uint64_t)len < base_user + 512) { eput = i; break; }
+            sp -= len;
+            memcpy(U2K(sp), s, len);
+            envp_u[i] = sp;
+        }
+        /* 3. 16 случайных байт для AT_RANDOM (canary/TLS у musl) */
+        sp -= 16;
+        rdrand_bytes(U2K(sp), 16);
+        uint64_t at_random = sp;
+
+        /* выравниваем вершину строк по 16 */
+        sp &= ~0xFULL;
+
+        /* 4. auxv (key, val) */
+        uint64_t aux[32]; int an = 0;
+        if (phdr_user) {
+            aux[an++] = 3;  aux[an++] = phdr_user;              /* AT_PHDR  */
+            aux[an++] = 4;  aux[an++] = header->e_phentsize;    /* AT_PHENT */
+            aux[an++] = 5;  aux[an++] = header->e_phnum;        /* AT_PHNUM */
+        }
+        aux[an++] = 6;  aux[an++] = 4096;                      /* AT_PAGESZ */
+        aux[an++] = 9;  aux[an++] = header->e_entry;           /* AT_ENTRY  */
+        aux[an++] = 11; aux[an++] = 0;                         /* AT_UID    */
+        aux[an++] = 12; aux[an++] = 0;                         /* AT_EUID   */
+        aux[an++] = 13; aux[an++] = 0;                         /* AT_GID    */
+        aux[an++] = 14; aux[an++] = 0;                         /* AT_EGID   */
+        aux[an++] = 23; aux[an++] = 0;                         /* AT_SECURE */
+        aux[an++] = 17; aux[an++] = 100;                       /* AT_CLKTCK */
+        aux[an++] = 25; aux[an++] = at_random;                 /* AT_RANDOM */
+        aux[an++] = 0;  aux[an++] = 0;                         /* AT_NULL   */
+
+        /* 5. слоты: argc + (argv+NULL) + (envp+NULL) + auxv; финал rsp%16==0 */
+        int slots = 1 + (argc + 1) + (eput + 1) + an;
+        if (slots & 1) sp -= 8;                /* паддинг до чётного числа слотов */
+        sp -= (uint64_t)slots * 8;
+        if (sp < base_user) { ok = 0; }        /* не влезли — откат */
+
+        if (ok) {
+            uint64_t *w = (uint64_t *)U2K(sp);
+            int idx = 0;
+            w[idx++] = (uint64_t)argc;
+            for (int i = 0; i < argc; i++) w[idx++] = argv_u[i];
+            w[idx++] = 0;
+            for (int i = 0; i < eput; i++)  w[idx++] = envp_u[i];
+            w[idx++] = 0;
+            for (int i = 0; i < an; i++)    w[idx++] = aux[i];
+            sysv_rsp = sp;
+        }
+        #undef U2K
+    }
+
     *out_entry    = header->e_entry;
-    *out_user_rsp = stack_top - 16;
+    *out_user_rsp = sysv_rsp;
     *out_argv_ptr = user_argv_page;
     *out_envp_ptr = user_env_page;
     *out_cr3      = phys_pml4;
