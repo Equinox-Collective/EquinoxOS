@@ -143,6 +143,21 @@ int main(int argc, char* argv[]) {
         /* Выводим буфер на экран (дергает UpdateWindowFramebuffer) */
         SDL_RenderPresent(renderer);
         if (frame == 0) DBG("[SDLT] 9: after RenderPresent, before Delay\n");
+        if (frame == 0) {
+            /* ВИЗУАЛЬНЫЙ ТЕСТ: пишем magenta напрямую в surface окна, минуя
+             * рендерер SDL, и презентим вручную. Если экран мигнёт пурпурным —
+             * значит буфер+блит работают, а баг строго в draw-路ине SDL. */
+            SDL_Surface *ws = SDL_GetWindowSurface(window);
+            if (ws && ws->pixels) {
+                Uint32 *p = (Uint32 *)ws->pixels;
+                int n = ws->w * ws->h;
+                for (int i = 0; i < n; i++) p[i] = 0xFFFF00FF; /* ARGB magenta */
+                DBGN("[SDLT] manual magenta fill px0=", (unsigned long)p[0]);
+                SDL_UpdateWindowSurface(window);
+                DBG("[SDLT] manual present done -> screen should flash MAGENTA\n");
+                SDL_Delay(1500);
+            }
+        }
         SDL_Delay(16); /* ~60 FPS */
         if (frame == 0) DBG("[SDLT] 10: after first Delay (frame 0 complete)\n");
         frame++;
