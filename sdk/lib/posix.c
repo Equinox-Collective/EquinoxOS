@@ -96,7 +96,11 @@ long ftell(FILE* stream) {
 }
 
 int fflush(FILE* stream) {
-    if (!stream || !stream->buffer || stream->filename[0] == '\0') return 0;
+    /* stdout/stderr/NULL/fd-сентинелы выводятся сразу (буфера нет) — не
+     * разыменовываем (иначе fflush((FILE*)1) -> page fault на stream->buffer). */
+    if (!stream || stream == stdout || stream == stderr ||
+        (uintptr_t)stream < 0x1000) return 0;
+    if (!stream->buffer || stream->filename[0] == '\0') return 0;
     // Синхронизируем буфер с диском через SYS_WRITE_FILE (3)
     _syscall(3, (uint64_t)stream->filename, (uint64_t)stream->buffer, stream->pos, 0, 0);
     return 0;
@@ -112,9 +116,31 @@ int fclose(FILE* stream) {
 }
 
 size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
-  if (!stream || !ptr) return 0;
+  if (!ptr) return 0;
 
   size_t total = size * nmemb;
+  if (total == 0) return nmemb;
+
+  /* stdout/stderr, NULL и fd-сентинелы (например (FILE*)1) НЕ разыменовываем как
+   * FILE* — выводим в консоль через syscall 1 (SYS_PRINT), как уже делает
+   * vfprintf. Защищает от page fault, если в качестве потока пришёл номер
+   * дескриптора (fd 0/1/2) или испорченный указатель. stdout/stderr
+   * сравниваем по символу, поэтому печать корректна даже если указатель
+   * глобала перезаписан. */
+  if (stream == stdout || stream == stderr || !stream ||
+      (uintptr_t)stream < 0x1000) {
+    char tmp[1025];
+    size_t off = 0;
+    while (off < total) {
+      size_t chunk = total - off;
+      if (chunk > sizeof(tmp) - 1) chunk = sizeof(tmp) - 1;
+      memcpy(tmp, (const char *)ptr + off, chunk);
+      tmp[chunk] = '\0';
+      _syscall(1, (uint64_t)tmp, 0, 0, 0, 0);
+      off += chunk;
+    }
+    return nmemb;
+  }
 
   if (stream->pos + total > stream->size) {
     size_t new_size = stream->pos + total + 4096;
