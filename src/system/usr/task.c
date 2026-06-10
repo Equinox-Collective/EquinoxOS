@@ -921,7 +921,10 @@ task_t* task_by_id(uint64_t pid) {
     return NULL;
 }
 
-int64_t task_waitpid(uint64_t pid, int* status_out) {
+/* Этап 6e-2: общая реализация. nohang!=0 => не блокируемся: вернуть 0, если
+ * дети есть, но ни один ещё не зомби (поведение WNOHANG). Блокирующий
+ * task_waitpid() = вызов с nohang=0. */
+int64_t task_waitpid_ex(uint64_t pid, int* status_out, int nohang) {
     while (1) {
         bool have_child = false;
         task_t* found = NULL;
@@ -952,6 +955,9 @@ int64_t task_waitpid(uint64_t pid, int* status_out) {
         if (!have_child)
             return -1; /* ECHILD: у процесса нет таких детей */
 
+        if (nohang)
+            return 0;  /* WNOHANG: дети есть, но готовых зомби нет */
+
         /* Этап 4: если есть доставляемый сигнал (кроме SIGCHLD — это наш
          * штатный «будильник»), прерываем ожидание с -1 (EINTR). Обработчик
          * запустится при возврате из сисколла (signal_deliver). Проверка
@@ -967,6 +973,10 @@ int64_t task_waitpid(uint64_t pid, int* status_out) {
         yield();
         current_task->waiting  = false;
     }
+}
+
+int64_t task_waitpid(uint64_t pid, int* status_out) {
+    return task_waitpid_ex(pid, status_out, 0);
 }
 
 // В task.c

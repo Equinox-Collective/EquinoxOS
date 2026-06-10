@@ -69,6 +69,8 @@ typedef struct {
 #define K_TCSETSF    0x5404
 #define K_TIOCGWINSZ 0x5413
 #define K_TIOCSWINSZ 0x5414
+#define K_TIOCGPGRP  0x540F  /* tcgetpgrp: получить foreground-группу терминала */
+#define K_TIOCSPGRP  0x5410  /* tcsetpgrp: задать foreground-группу терминала */
 
 struct kwinsize {
     uint16_t ws_row;

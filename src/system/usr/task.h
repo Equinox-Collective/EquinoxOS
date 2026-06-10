@@ -119,6 +119,7 @@ void task_exit_current(int code);
  * завершившегося ребёнка, либо -1 если у процесса нет таких детей (ECHILD).
  * Блокирует (через yield) пока подходящий ребёнок не станет зомби. */
 int64_t task_waitpid(uint64_t pid, int* status_out);
+int64_t task_waitpid_ex(uint64_t pid, int* status_out, int nohang);
 task_t* task_by_id(uint64_t pid);
 
 /* Этап 2: вернуть таблицу дескрипторов текущего процесса (для fs/fd.c). */

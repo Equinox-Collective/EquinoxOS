@@ -79,6 +79,11 @@ uint64_t copy_to_user(void *kernel_buf, uint64_t size)
   return target_virt;
 }
 
+/* Этап 6e-2: foreground-группа управляющего терминала (job control).
+ * 0 == ещё не задана → tcgetpgrp вернёт группу вызывающего (он «на переднем
+ * плане» по умолчанию). tcsetpgrp задаёт явно. */
+static uint64_t g_tty_fg_pgrp = 0;
+
 void syscall_handler(syscall_regs_t *regs)
 {
   uint64_t num = regs->rax;
@@ -1451,6 +1456,22 @@ void syscall_handler(syscall_regs_t *regs)
       regs->rax = 0;
       break;
     }
+    case K_TIOCGPGRP: {  /* tcgetpgrp(fd): foreground-группа терминала */
+      if (!arg) { regs->rax = (uint64_t)(int64_t)-1; break; }
+      uint64_t fg = g_tty_fg_pgrp ? g_tty_fg_pgrp
+                  : (current_task->pgid ? current_task->pgid : current_task->id);
+      stac(); *(int *)arg = (int)fg; clac();
+      regs->rax = 0;
+      break;
+    }
+    case K_TIOCSPGRP: {  /* tcsetpgrp(fd, pgrp): задать foreground-группу */
+      if (!arg) { regs->rax = (uint64_t)(int64_t)-1; break; }
+      int pg; stac(); pg = *(int *)arg; clac();
+      if (pg <= 0) { regs->rax = (uint64_t)(int64_t)-1; break; }
+      g_tty_fg_pgrp = (uint64_t)pg;
+      regs->rax = 0;
+      break;
+    }
     default:
       regs->rax = (uint64_t)(int64_t)-1;  /* неизвестный ioctl */
       break;
@@ -1998,11 +2019,15 @@ void linux_syscall_handler(syscall_regs_t *regs)
   /* ---- Этап 6e: ожидание потомков + группы процессов (job control) ----- */
   case 61: {  /* wait4(pid, int *status, options, rusage*) */
     int raw = 0;
-    int64_t r = task_waitpid(regs->rdi, &raw);
-    if (r < 0) {
+    int nohang = (int)(regs->rdx & 1 /* WNOHANG */);
+    int64_t r = task_waitpid_ex(regs->rdi, &raw, nohang);
+    if (r == 0 && nohang) {
+      /* WNOHANG: дети есть, но ни один не завершился → 0, status не трогаем. */
+      regs->rax = 0;
+    } else if (r < 0) {
       /* task_waitpid отдаёт -1 и при «нет детей», и при прерывании сигналом.
        * Разбираем как Linux: есть доставляемый сигнал (кроме SIGCHLD) → EINTR,
-       * иначе ECHILD. (rusage и WNOHANG пока игнорируются — см. 6e-2.) */
+       * иначе ECHILD. (rusage игнорируется.) */
       uint64_t deliverable = current_task->sig_pending &
                              ~current_task->sig_blocked & ~(1ULL << 17 /*SIGCHLD*/);
       regs->rax = deliverable ? LERR(L_EINTR) : LERR(L_ECHILD);
