@@ -1,20 +1,6 @@
 #define __SYSCALL_LL_E(x) (x)
 #define __SYSCALL_LL_O(x) (x)
 
-/*
- * EquinoxOS (Этап 6b-2): musl на x86_64 обычно использует инструкцию `syscall`.
- * В EquinoxOS пользовательские программы попадают в Linux-ABI-шлюз через
- * программное прерывание `int $0x81` (см. src/system/usr/syscall.c,
- * linux_syscall_handler из Этапа 6a). Соглашение об аргументах ИДЕНТИЧНО
- * Linux/SysV: номер в rax, аргументы rdi, rsi, rdx, r10, r8, r9; результат в
- * rax. Поэтому достаточно заменить мнемонику `syscall` на `int $0x81` — всё
- * остальное (включая 4-й аргумент в r10, а не rcx) совпадает.
- *
- * Клоберы rcx/r11 оставлены для совместимости: настоящий `syscall` их затирает,
- * `int` — нет, но «лишний» клобер безопасен (просто запрещает компилятору
- * держать там живые значения через границу вызова).
- */
-
 static __inline long __syscall0(long n)
 {
 	unsigned long ret;
@@ -75,10 +61,5 @@ static __inline long __syscall6(long n, long a1, long a2, long a3, long a4, long
 	return ret;
 }
 
-/*
- * Без vDSO: EquinoxOS не отдаёт AT_SYSINFO_EHDR в auxv, поэтому НЕ объявляем
- * VDSO_*. musl тогда не пытается резолвить __vdso_clock_gettime и идёт прямым
- * сисколлом clock_gettime (его мы добавляем в шлюз на Этапе 6b-2).
- */
 
 #define IPC_64 0

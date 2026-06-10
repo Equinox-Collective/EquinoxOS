@@ -17,6 +17,15 @@ musl на самой Windows НЕ нужно — `make` просто линку�
   использует `int $0x81` (Linux-ABI-шлюз, Этап 6a) вместо инструкции `syscall`.
   Соглашение об аргументах идентично Linux (rdi/rsi/rdx/r10/r8/r9, номер в rax).
 
+ВАЖНО: `int $0x81` стоит НЕ ТОЛЬКО в inline-обёртках C (`syscall_arch.h`), но и во
+ВСЕХ ассемблерных заглушках x86_64, где musl зовёт `syscall` напрямую (иначе #UD,
+т.к. наша ОС не включает инструкцию `syscall`/EFER.SCE). Пропатчены:
+`src/thread/x86_64/__set_thread_area.s` (TLS, arch_prctl — на ней и падало),
+`src/thread/x86_64/syscall_cp.s`, `clone.s`, `__unmapself.s`,
+`src/process/x86_64/vfork.s`, `src/signal/x86_64/restore.s`.
+Проверка: `objdump -d lib/libc.a | grep '0f 05'` → пусто (ни одной сырой `syscall`).
+VDSO_* дефайны убраны (AT_SYSINFO_EHDR мы не отдаём).
+
 ## Как это было собрано (для воспроизводимости, на POSIX-хосте)
 ```
 # musl-1.2.5, в arch/x86_64/syscall_arch.h заменён `syscall` на `int $0x81`
