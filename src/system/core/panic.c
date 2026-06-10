@@ -129,6 +129,31 @@ void panic_handler(interrupt_frame_t* frame) {
     serial_puts(COM1, &hex_buf[pos]);
     serial_puts(COM1, "\n");
 
+    /* Этап 8: pid упавшей задачи + байты кода по RIP + RBP — без этого
+     * дампа баг с грязными mmap-страницами было не найти. Оставляем. */
+    {
+        extern int sprintf(char*, const char*, ...);
+        extern unsigned current_task_id_for_panic(void);
+        char db[160];
+        sprintf(db, "PANIC PID: %u\n", current_task_id_for_panic());
+        serial_puts(COM1, db);
+        unsigned char *p = (unsigned char *)frame->rip;
+        char *w = db; const char *H = "0123456789ABCDEF";
+        for (int i = -8; i < 8; i++) {
+            *w++ = ' '; *w++ = H[p[i] >> 4]; *w++ = H[p[i] & 0xF];
+        }
+        *w++ = '\n'; *w = 0;
+        serial_puts(COM1, "CODE@RIP:"); serial_puts(COM1, db);
+        /* RBP/R8/R11 руками (формат %lx ядро может не знать). */
+        uint64_t vals[3] = { frame->rbp, frame->r8, frame->r11 };
+        const char *names[3] = { "RBP: 0x", "R8:  0x", "R11: 0x" };
+        for (int v = 0; v < 3; v++) {
+            w = db;
+            for (int i = 15; i >= 0; i--) *w++ = H[(vals[v] >> (i*4)) & 0xF];
+            *w++ = '\n'; *w = 0;
+            serial_puts(COM1, names[v]); serial_puts(COM1, db);
+        }
+    }
     serial_puts(COM1, "!!! SYSTEM HALTED !!!\n");
 
     vesa_draw_string_hex_direct("INT_NO: ", 300, 110, frame->int_no, 0xFFFFFF);

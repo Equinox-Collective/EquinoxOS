@@ -539,6 +539,13 @@ void syscall_handler(syscall_regs_t *regs)
       regs->rax = 0;
       break;
     }
+    /* MAP_ANONYMOUS обязан возвращать ЗАНУЛЁННЫЕ страницы. pmm_alloc_continuous
+     * переиспользует физические страницы умерших процессов (например, старый
+     * текст bash после execve), и mallocng из musl проверяет инварианты своих
+     * структур прямо в свежезамапленной памяти: мусор в ней приводил к
+     * намеренному a_crash() (hlt в ring3 -> GPF) в ребёнке пайплайна
+     * `ls | grep`. SYS_BRK страницы уже зануляет — теперь и mmap. */
+    memset((void *)VIRT((uint64_t)phys), 0, pages * 4096);
     static uint64_t mmap_ptr = 0x700000000000;
     uint64_t virt = mmap_ptr;
     mmap_ptr += (pages * 4096);
@@ -1984,6 +1991,20 @@ void linux_syscall_handler(syscall_regs_t *regs)
     signal_deliver(regs);
     return;
   }
+  case 89:                                    /* readlink(path, buf, sz) — Этап 8 */
+  case 267:                                   /* readlinkat(dirfd, path, buf, sz) */
+  {
+    /* Симлинков у ext2-драйвера пока нет: существующий путь -> EINVAL
+     * («не симлинк», как в Linux), несуществующий -> ENOENT. musl/bash
+     * корректно переживают оба ответа (realpath, canonicalize). */
+    char path[256];
+    lx_copy_path((n == 89) ? regs->rdi : regs->rsi, path, sizeof(path));
+    uint32_t m; uint64_t s;
+    regs->rax = (lx_path_stat(path, &m, &s) == 0) ? LERR(L_EINVAL) : LERR(L_ENOENT);
+    signal_deliver(regs);
+    return;
+  }
+
   case 269:                                   /* faccessat(dirfd, path, mode, flag) */
   case 439:                                   /* faccessat2 — то же + flags (Этап 7: bash) */
   {

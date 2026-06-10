@@ -1129,3 +1129,8 @@ bool task_snapshot_at(int idx, task_snapshot_t *out) {
   } while (curr && curr != start);
   return false;
 }
+
+/* Этап 8 (отладка): pid текущей задачи для panic_handler. */
+unsigned current_task_id_for_panic(void) {
+    return current_task ? (unsigned)current_task->id : 0u;
+}

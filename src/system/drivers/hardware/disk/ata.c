@@ -76,7 +76,20 @@ static inline void insw(uint16_t port, void* addr, uint32_t count) {
     __asm__ volatile("rep insw" : "+D"(addr), "+c"(count) : "d"(port) : "memory");
 }
 
-void read_sectors_ata_pio(uintptr_t target_address, uint64_t LBA, uint32_t sector_count) {
+/* Этап 8: ATA PIO — невытесняемая секция. Два одновременных процесса
+ * (пайплайн `ls | grep`: два execve читают ELF с диска) перемежали свои
+ * порт-команды и получали мусор («file not found»/«not a valid ELF» и
+ * случайные панику/порчу памяти). На UP-ядре достаточно IRQ-off. */
+static inline uint64_t ata_irq_save(void) {
+    uint64_t flags;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(flags) :: "memory");
+    return flags;
+}
+static inline void ata_irq_restore(uint64_t flags) {
+    __asm__ volatile("push %0; popfq" :: "r"(flags) : "memory", "cc");
+}
+
+static void read_sectors_ata_pio_unlocked(uintptr_t target_address, uint64_t LBA, uint32_t sector_count) {
     if (sector_count == 0) return;
 
     while (sector_count > 0) {
@@ -105,8 +118,14 @@ void read_sectors_ata_pio(uintptr_t target_address, uint64_t LBA, uint32_t secto
     }
 }
 
+void read_sectors_ata_pio(uintptr_t target_address, uint64_t LBA, uint32_t sector_count) {
+    uint64_t f = ata_irq_save();
+    read_sectors_ata_pio_unlocked(target_address, LBA, sector_count);
+    ata_irq_restore(f);
+}
+
 // src/drivers/disk/ata.c
-void write_sectors_ata_pio(uintptr_t source_address, uint64_t LBA,
+static void write_sectors_ata_pio_unlocked(uintptr_t source_address, uint64_t LBA,
                            uint32_t sector_count) {
   uint16_t *ptr =
       (uint16_t *)source_address; // Кастим адрес к указателю на слова
@@ -139,4 +158,10 @@ void write_sectors_ata_pio(uintptr_t source_address, uint64_t LBA,
     sector_count -= chunk;
     LBA += chunk;
   }
+}
+void write_sectors_ata_pio(uintptr_t source_address, uint64_t LBA,
+                           uint32_t sector_count) {
+    uint64_t f = ata_irq_save();
+    write_sectors_ata_pio_unlocked(source_address, LBA, sector_count);
+    ata_irq_restore(f);
 }
