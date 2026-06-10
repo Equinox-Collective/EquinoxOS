@@ -448,7 +448,12 @@ int fd_readdir(int fd, char *name_out, int name_sz, int *is_dir_out) {
             const char *rest = nm + plen;
             if (rest[0]) {
                 first_component(rest, comp, sizeof(comp), &isd);
-                if (!comp_seen_before(prefix, comp, f)) {
+                /* "." и ".." синтезируются выше (pos 0/1); пропускаем их,
+                 * если они реально присутствуют в плоском namespace (корневой
+                 * inode ext2 хранит собственные "." и ".."), иначе дубли. */
+                int is_dot = (comp[0] == '.' &&
+                              (comp[1] == '\0' || (comp[1] == '.' && comp[2] == '\0')));
+                if (!is_dot && !comp_seen_before(prefix, comp, f)) {
                     int n = 0;
                     for (; comp[n] && n < name_sz - 1; n++) name_out[n] = comp[n];
                     name_out[n] = '\0';
