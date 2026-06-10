@@ -1501,6 +1501,10 @@ struct l_timespec { int64_t tv_sec; int64_t tv_nsec; };
 #define L_ENOMEM 12
 #define L_ENOENT 2
 #define L_EBADF  9
+#define L_EINTR  4
+#define L_ECHILD 10
+#define L_ESRCH  3
+#define L_EPERM  1
 
 /* ---- Этап 6d: Linux x86-64 struct sigaction (kernel-ABI, как его передаёт
  * musl __libc_sigaction). Поля/смещения фиксированы ядром Linux:
@@ -1672,7 +1676,7 @@ void linux_syscall_handler(syscall_regs_t *regs)
   case 59: regs->rax = 54; break;            /* execve(path,argv,envp) -> SYS_EXECVE */
   case 60: regs->rax = 10; break;            /* exit -> SYS_EXIT */
   case 231: regs->rax = 10; break;           /* exit_group -> SYS_EXIT */
-  case 61: regs->rax = 52; break;            /* wait4(pid,status,opt,ru) -> SYS_WAITPID (opt/ru игнор) */
+
   case 62: regs->rax = 102; break;           /* kill(pid,sig) -> SYS_KILL */
   case 200: regs->rax = 102; break;          /* tkill(tid,sig) -> SYS_KILL (tid==pid; raise() в musl) */
   case 79: regs->rax = 100; break;           /* getcwd(buf,size) -> SYS_GETCWD */
@@ -1990,6 +1994,64 @@ void linux_syscall_handler(syscall_regs_t *regs)
     }
     regs->rax = 0; signal_deliver(regs); return;
   }
+
+  /* ---- Этап 6e: ожидание потомков + группы процессов (job control) ----- */
+  case 61: {  /* wait4(pid, int *status, options, rusage*) */
+    int raw = 0;
+    int64_t r = task_waitpid(regs->rdi, &raw);
+    if (r < 0) {
+      /* task_waitpid отдаёт -1 и при «нет детей», и при прерывании сигналом.
+       * Разбираем как Linux: есть доставляемый сигнал (кроме SIGCHLD) → EINTR,
+       * иначе ECHILD. (rusage и WNOHANG пока игнорируются — см. 6e-2.) */
+      uint64_t deliverable = current_task->sig_pending &
+                             ~current_task->sig_blocked & ~(1ULL << 17 /*SIGCHLD*/);
+      regs->rax = deliverable ? LERR(L_EINTR) : LERR(L_ECHILD);
+    } else {
+      if (regs->rsi) {
+        /* Кодируем Linux wait-status. Нормальный выход: WIFEXITED → биты 0..6
+         * == 0, WEXITSTATUS == (status>>8)&0xff. (Сигнальную смерть ядро пока
+         * не различает — отдаём как обычный выход с кодом.) */
+        int wstatus = (raw & 0xff) << 8;
+        stac(); *(int *)regs->rsi = wstatus; clac();
+      }
+      regs->rax = (uint64_t)r;
+    }
+    signal_deliver(regs); return;
+  }
+
+  case 111:   /* getpgrp() -> группа текущего процесса */
+    regs->rax = current_task->pgid ? current_task->pgid : current_task->id;
+    signal_deliver(regs); return;
+
+  case 121: { /* getpgid(pid) -> группа процесса pid (0 == текущий) */
+    uint64_t pid = regs->rdi;
+    task_t *t = pid ? task_by_id(pid) : current_task;
+    if (!t) { regs->rax = LERR(L_ESRCH); signal_deliver(regs); return; }
+    regs->rax = t->pgid ? t->pgid : t->id;
+    signal_deliver(regs); return;
+  }
+
+  case 124:   /* getsid(pid) — сессий не различаем, отдаём группу как прокси */
+    regs->rax = current_task->pgid ? current_task->pgid : current_task->id;
+    signal_deliver(regs); return;
+
+  case 109: { /* setpgid(pid, pgid): pid 0=текущий, pgid 0=сделать pid лидером */
+    uint64_t pid  = regs->rdi ? regs->rdi : current_task->id;
+    uint64_t pgid = regs->rsi;
+    task_t *t = (pid == current_task->id) ? current_task : task_by_id(pid);
+    if (!t) { regs->rax = LERR(L_ESRCH); signal_deliver(regs); return; }
+    /* Менять можно только себя или своего ребёнка (POSIX). */
+    if (t != current_task && t->parent_id != current_task->id) {
+      regs->rax = LERR(L_EPERM); signal_deliver(regs); return;
+    }
+    t->pgid = pgid ? pgid : t->id;
+    regs->rax = 0; signal_deliver(regs); return;
+  }
+
+  case 112:   /* setsid(): новая сессия/группа — текущий становится лидером */
+    current_task->pgid = current_task->id;
+    regs->rax = current_task->id;
+    signal_deliver(regs); return;
 
   default:
     regs->rax = LERR(L_ENOSYS);

@@ -29,6 +29,7 @@ typedef struct task {
      * планировщика. fd-таблица пока глобальная (см. fs/fd.c) — её разнос
      * по процессам будет в следующем этапе. */
     uint64_t parent_id;   /* pid родителя (0 = нет родителя / init) */
+    uint64_t pgid;        /* Этап 6e: группа процессов (0 == группа == own id). Наследуется при fork; setpgid меняет. */
     bool     zombie;      /* процесс вызвал exit(), но ещё не reaped через waitpid */
     int      exit_code;   /* код возврата из SYS_EXIT — отдаётся в waitpid */
     bool     waiting;     /* родитель спит внутри waitpid()                */
@@ -118,6 +119,7 @@ void task_exit_current(int code);
  * завершившегося ребёнка, либо -1 если у процесса нет таких детей (ECHILD).
  * Блокирует (через yield) пока подходящий ребёнок не станет зомби. */
 int64_t task_waitpid(uint64_t pid, int* status_out);
+task_t* task_by_id(uint64_t pid);
 
 /* Этап 2: вернуть таблицу дескрипторов текущего процесса (для fs/fd.c). */
 struct fd_table *task_current_fdt(void);

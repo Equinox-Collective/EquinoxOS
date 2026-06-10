@@ -779,6 +779,7 @@ uint64_t task_fork(stack_frame_t* parent_frame) {
     child->cr3       = PHYS(child_pml4);
     child->id        = next_pid++;
     child->parent_id = parent->id;
+    child->pgid      = parent->pgid ? parent->pgid : parent->id; /* Этап 6e: наследуем группу родителя */
     child->running   = true;
     child->brk       = parent->brk;
     child->fs_base   = parent->fs_base; /* тот же TLS-vaddr (страница скопирована) */
@@ -906,6 +907,18 @@ static void task_reap(task_t* z) {
     }
 
     kfree(z);
+}
+
+/* Этап 6e: поиск задачи по pid в кольце планировщика (task_list — static,
+ * поэтому доступ извне только через эту функцию). NULL если нет такой. */
+task_t* task_by_id(uint64_t pid) {
+    if (!task_list) return NULL;
+    task_t* t = task_list;
+    do {
+        if (t->id == pid) return t;
+        t = t->next;
+    } while (t && t != task_list);
+    return NULL;
 }
 
 int64_t task_waitpid(uint64_t pid, int* status_out) {
