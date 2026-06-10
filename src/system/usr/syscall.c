@@ -1530,6 +1530,7 @@ _Static_assert(sizeof(struct l_stat) == 144, "l_stat must match x86_64 kstat");
 #define L_S_IFCHR 0x2000u
 #define L_S_IFIFO 0x1000u
 #define L_AT_EMPTY_PATH 0x1000
+#define L_O_DIRECTORY 0200000   /* musl O_DIRECTORY (x86_64), восьмеричное */
 
 /* Скопировать путь из юзерспейса (stac/clac) и нормализовать к cwd процесса. */
 static void lx_copy_path(uint64_t uptr, char *out, int outsz)
@@ -1589,7 +1590,44 @@ static int lx_fd_stat(int fd, uint32_t *out_mode, uint64_t *out_size)
     case OFD_CONSOLE: *out_mode = L_S_IFCHR | 0620u; *out_size = 0;  break;
     case OFD_PIPE_R:
     case OFD_PIPE_W:  *out_mode = L_S_IFIFO | 0600u; *out_size = 0;  break;
+    case OFD_DIR:     *out_mode = L_S_IFDIR | 0755u; *out_size = 0;  break;
     default:          *out_mode = L_S_IFREG | 0644u; *out_size = sz; break;
+  }
+  return 0;
+}
+
+/* Этап 6c-2: если path — каталог (или задан O_DIRECTORY и это не файл),
+ * открыть его как OFD_DIR (для opendir/getdents64). Используется и open(2),
+ * и openat(257) — musl на x86_64 для open() шлёт именно SYS_open=2.
+ * Возвращает 1, если обработано (regs->rax уже выставлен), иначе 0. */
+static int lx_open_dir_maybe(syscall_regs_t *regs, uint64_t path_uptr, int lflags)
+{
+  char kpath[256];
+  int ci = 0;
+  const char *upath = (const char *)path_uptr;
+  if (upath) {
+    stac();
+    while (ci < (int)sizeof(kpath) - 1 && upath[ci]) { kpath[ci] = upath[ci]; ci++; }
+    clac();
+  }
+  kpath[ci] = '\0';
+
+  char rpath[256];
+  task_resolve_fs_path(kpath, rpath, sizeof(rpath));  /* плоский путь без '/' */
+
+  uint32_t fsz = 0;
+  int is_file = (fd_stat_path(rpath, &fsz) == 0);
+
+  char logical[260];
+  logical[0] = '/';
+  int lj = 0;
+  for (; rpath[lj] && lj < (int)sizeof(logical) - 2; lj++) logical[lj + 1] = rpath[lj];
+  logical[lj + 1] = '\0';
+
+  if (!is_file && ((lflags & L_O_DIRECTORY) || vfs_dir_exists(logical))) {
+    int fd = fd_opendir(rpath);
+    regs->rax = (fd < 0) ? LERR(L_ENOENT) : (uint64_t)fd;
+    return 1;
   }
   return 0;
 }
@@ -1603,7 +1641,10 @@ void linux_syscall_handler(syscall_regs_t *regs)
   /* ---- совпадающая семантика: переписать номер и делегировать ---------- */
   case 0:  regs->rax = 92; break;            /* read(fd,buf,cnt) -> SYS_READ_FD */
   case 1:  regs->rax = 93; break;            /* write -> SYS_WRITE_FD */
-  case 2:  regs->rax = 90; break;            /* open(path,flags,mode) -> SYS_OPEN(path,flags) */
+  case 2:                                    /* open(path,flags,mode) */
+    /* Этап 6c-2: каталог -> OFD_DIR; иначе -> SYS_OPEN(path,flags). */
+    if (lx_open_dir_maybe(regs, regs->rdi, (int)regs->rsi)) { signal_deliver(regs); return; }
+    regs->rax = 90; break;
   case 3:  regs->rax = 91; break;            /* close -> SYS_CLOSE_FD */
   case 8:  regs->rax = 94; break;            /* lseek(fd,off,whence) -> SYS_SEEK */
   case 12: regs->rax = 15; break;            /* brk(addr) -> SYS_BRK */
@@ -1629,10 +1670,54 @@ void linux_syscall_handler(syscall_regs_t *regs)
 
   /* ---- требуют перетасовки аргументов, затем делегирование ------------- */
   case 257:                                  /* openat(dirfd,path,flags,mode) */
+    /* Этап 6c-2: каталог -> OFD_DIR; иначе делегируем родному SYS_OPEN. */
+    if (lx_open_dir_maybe(regs, regs->rsi, (int)regs->rdx)) { signal_deliver(regs); return; }
     regs->rdi = regs->rsi;                    /* path */
     regs->rsi = regs->rdx;                    /* flags */
-    regs->rax = 90;                           /* -> SYS_OPEN(path,flags) (dirfd=AT_FDCWD игнор) */
+    regs->rax = 90;                           /* -> SYS_OPEN (dirfd=AT_FDCWD игнор) */
     break;
+
+  case 217:                                  /* getdents64(fd, void *dirp, size_t count) */
+  {
+    int fd = (int)regs->rdi;
+    uint8_t *dirp = (uint8_t *)regs->rsi;
+    uint64_t count = regs->rdx;
+    uint64_t filled = 0;
+    int err = 0;
+    char name[160];
+    int isd;
+    stac();
+    for (;;) {
+      int saved = fd_dir_tell(fd);
+      if (saved < 0) { err = 1; break; }       /* не каталог / плохой fd */
+      int rc = fd_readdir(fd, name, sizeof(name), &isd);
+      if (rc < 0) { err = 1; break; }
+      if (rc == 0) break;                       /* конец каталога */
+
+      int nlen = 0;
+      while (name[nlen]) nlen++;
+      /* struct linux_dirent64: d_ino@0, d_off@8, d_reclen@16, d_type@18,
+       * d_name@19 (NUL-terminated). reclen выровнен на 8 байт. */
+      uint64_t reclen = (uint64_t)(19 + nlen + 1);
+      reclen = (reclen + 7) & ~7ULL;
+      if (filled + reclen > count) {
+        fd_dir_seek(fd, saved);                 /* откат: запись не влезла */
+        break;
+      }
+      uint8_t *rec = dirp + filled;
+      *(uint64_t *)(rec + 0)  = (uint64_t)(filled + 1);    /* d_ino (синтет.) */
+      *(int64_t  *)(rec + 8)  = (int64_t)(filled + reclen);/* d_off */
+      *(uint16_t *)(rec + 16) = (uint16_t)reclen;          /* d_reclen */
+      rec[18] = isd ? 4 : 8;                                /* d_type: DT_DIR/DT_REG */
+      for (int k = 0; k < nlen; k++) rec[19 + k] = (uint8_t)name[k];
+      rec[19 + nlen] = '\0';
+      filled += reclen;
+    }
+    clac();
+    regs->rax = err ? LERR(L_EBADF) : filled;
+    signal_deliver(regs);
+    return;
+  }
 
   /* ---- mmap: длина в rsi совпадает; родной возвращает 0 при ошибке ------ */
   case 9:                                     /* mmap(addr,len,prot,flags,fd,off) */

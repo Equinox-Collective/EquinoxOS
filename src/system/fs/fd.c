@@ -205,6 +205,8 @@ int fd_read(int fd, void *buf, uint32_t size) {
         /* Этап 5: stdin читается из консоли (COM1) через дисциплину линии. */
         if (o->console_no == 0) return tty_read(buf, size);
         return -1;  /* чтение из stdout/stderr недопустимо */
+    case OFD_DIR:
+        return -1;  /* read() на каталоге запрещён (исп. getdents64) */
     }
     return -1;
 }
@@ -238,6 +240,8 @@ int fd_write(int fd, const void *buf, uint32_t size) {
         return (int)pipe_write(o->pipe_id, buf, size);
     case OFD_PIPE_R:
         return -1;
+    case OFD_DIR:
+        return -1;  /* write() на каталоге запрещён */
     case OFD_FILE: {
         if (!o->is_write) return -1;
         uint32_t write_pos = o->is_append ? o->size : o->pos;
@@ -317,6 +321,159 @@ int fd_stat_path(const char *path, uint32_t *out_size) {
         dev = dev->next;
     }
     return -1;
+}
+
+/* ------------------------------------------------------------------ *
+ *  Этап 6c-2: каталоги (OFD_DIR) поверх плоского ext2-namespace
+ *
+ *  ext2-образ хранит ВСЕ файлы в корневом каталоге под ПОЛНЫМ путём как
+ *  именем ("bin/foo.elf", "res/sysgui/init.lua"). Настоящих подкаталогов нет.
+ *  Логический каталог D перечисляется так: берём все плоские записи, чьё имя
+ *  начинается на префикс P (для "/bin" -> "bin/", для корня -> ""), и для
+ *  каждой выдаём ПЕРВЫЙ компонент остатка: если в остатке есть '/', это
+ *  подкаталог (DT_DIR), иначе файл (DT_REG). Имена подкаталогов дедуплицируются.
+ * ------------------------------------------------------------------ */
+
+/* Имя плоской записи №index по всем устройствам с readdir. 1/0. */
+static int flat_entry(int index, char *out, int outsz) {
+    vfs_node_t *dev = vfs_root ? vfs_root->next : NULL;
+    int base = 0;
+    while (dev) {
+        if (dev->readdir) {
+            for (int i = 0; ; i++) {
+                vfs_dirent_t *de = dev->readdir(dev, (uint32_t)i);
+                if (!de) break;
+                if (base == index) {
+                    int j = 0;
+                    for (; de->name[j] && j < outsz - 1; j++) out[j] = de->name[j];
+                    out[j] = '\0';
+                    return 1;
+                }
+                base++;
+            }
+        }
+        dev = dev->next;
+    }
+    return 0;
+}
+
+/* Первый компонент rest до '/' (или весь rest). is_dir=1, если был '/'. */
+static void first_component(const char *rest, char *out, int outsz, int *is_dir) {
+    int k = 0;
+    while (rest[k] && rest[k] != '/') k++;
+    if (is_dir) *is_dir = (rest[k] == '/') ? 1 : 0;
+    int n = k; if (n > outsz - 1) n = outsz - 1;
+    for (int i = 0; i < n; i++) out[i] = rest[i];
+    out[n] = '\0';
+}
+
+/* startswith: возвращает длину prefix, если nm начинается на prefix, иначе -1. */
+static int starts_with(const char *nm, const char *prefix) {
+    int m = 0;
+    while (prefix[m] && nm[m] == prefix[m]) m++;
+    return prefix[m] == '\0' ? m : -1;
+}
+
+/* Появлялся ли компонент comp под префиксом prefix среди плоских записей
+ * с индексом < limit? (дедуп подкаталогов) */
+static int comp_seen_before(const char *prefix, const char *comp, int limit) {
+    char nm[256], c2[160];
+    for (int j = 0; j < limit; j++) {
+        if (!flat_entry(j, nm, sizeof(nm))) break;
+        int plen = starts_with(nm, prefix);
+        if (plen < 0) continue;
+        const char *rest = nm + plen;
+        if (!rest[0]) continue;
+        first_component(rest, c2, sizeof(c2), 0);
+        if (strcmp(c2, comp) == 0) return 1;
+    }
+    return 0;
+}
+
+int fd_opendir(const char *flatdir) {
+    if (!flatdir) return -1;
+
+    /* Логический путь "/"+flatdir для проверки существования каталога. */
+    char logical[200];
+    logical[0] = '/';
+    int j = 0;
+    for (; flatdir[j] && j < (int)sizeof(logical) - 2; j++) logical[j + 1] = flatdir[j];
+    logical[j + 1] = '\0';
+    if (!vfs_dir_exists(logical)) return -1;
+
+    ofd_t *o = (ofd_t *)kmalloc(sizeof(ofd_t));
+    if (!o) return -1;
+    memset(o, 0, sizeof(*o));
+    o->kind     = OFD_DIR;
+    o->refcount = 1;
+
+    /* path хранит ПРЕФИКС: flatdir + "/" (для корня — пустая строка). */
+    int p = 0;
+    if (flatdir[0]) {
+        for (; flatdir[p] && p < (int)sizeof(o->path) - 2; p++) o->path[p] = flatdir[p];
+        o->path[p++] = '/';
+    }
+    o->path[p] = '\0';
+    o->pos = 0; /* 0=".", 1="..", 2+ = (плоский индекс + 2) */
+
+    int fd = install_lowest(o);
+    if (fd < 0) { ofd_unref(o); return -1; }
+    return fd;
+}
+
+int fd_readdir(int fd, char *name_out, int name_sz, int *is_dir_out) {
+    ofd_t *o = resolve(fd);
+    if (!o || o->kind != OFD_DIR) return -1;
+
+    if (o->pos == 0) {
+        o->pos = 1;
+        if (name_sz > 1) { name_out[0] = '.'; name_out[1] = '\0'; }
+        if (is_dir_out) *is_dir_out = 1;
+        return 1;
+    }
+    if (o->pos == 1) {
+        o->pos = 2;
+        if (name_sz > 2) { name_out[0] = '.'; name_out[1] = '.'; name_out[2] = '\0'; }
+        if (is_dir_out) *is_dir_out = 1;
+        return 1;
+    }
+
+    const char *prefix = o->path; /* "bin/" или "" */
+    char nm[256], comp[160];
+    int isd, f = (int)o->pos - 2;
+    for (;;) {
+        if (!flat_entry(f, nm, sizeof(nm))) return 0; /* конец */
+        int plen = starts_with(nm, prefix);
+        if (plen >= 0) {
+            const char *rest = nm + plen;
+            if (rest[0]) {
+                first_component(rest, comp, sizeof(comp), &isd);
+                if (!comp_seen_before(prefix, comp, f)) {
+                    int n = 0;
+                    for (; comp[n] && n < name_sz - 1; n++) name_out[n] = comp[n];
+                    name_out[n] = '\0';
+                    if (is_dir_out) *is_dir_out = isd;
+                    o->pos = (uint32_t)(f + 1 + 2);
+                    return 1;
+                }
+            }
+        }
+        f++;
+    }
+}
+
+int fd_dir_tell(int fd) {
+    ofd_t *o = resolve(fd);
+    if (!o || o->kind != OFD_DIR) return -1;
+    return (int)o->pos;
+}
+
+int fd_dir_seek(int fd, int pos) {
+    ofd_t *o = resolve(fd);
+    if (!o || o->kind != OFD_DIR) return -1;
+    if (pos < 0) pos = 0;
+    o->pos = (uint32_t)pos;
+    return 0;
 }
 
 /* ------------------------------------------------------------------ *

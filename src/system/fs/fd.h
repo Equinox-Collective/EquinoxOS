@@ -45,7 +45,8 @@ typedef enum {
     OFD_FILE = 1,
     OFD_PIPE_R,
     OFD_PIPE_W,
-    OFD_CONSOLE
+    OFD_CONSOLE,
+    OFD_DIR              /* Этап 6c-2: открытый каталог (для getdents64) */
 } ofd_kind_t;
 
 /* Открытое описание файла — разделяемый объект с refcount. */
@@ -93,6 +94,19 @@ int  fd_stat_path(const char *path, uint32_t *out_size);
  * OFD_CONSOLE), чтобы шлюз выставил st_mode (S_IFREG, S_IFIFO, S_IFCHR).
  * Возвращает 0 / -1. */
 int  fd_statx(int fd, int *out_kind, uint32_t *out_size);
+
+/* Этап 6c-2: каталоги (opendir/readdir/getdents64).
+ *  fd_opendir(flatdir) — flatdir это плоский путь БЕЗ ведущего '/'
+ *    (как отдаёт task_resolve_fs_path): напр. "bin", "res/sysgui" или "" для
+ *    корня. Создаёт ofd вида OFD_DIR, если каталог существует. -> fd / -1.
+ *  fd_readdir(fd,...) — выдать СЛЕДУЮЩУЮ запись каталога (включая "." и ".."):
+ *    1 = запись получена (name_out + is_dir_out заполнены), 0 = конец, -1 ошибка.
+ *  fd_dir_tell/seek — курсор перечисления (для отката в getdents64, когда
+ *    запись не влезает в пользовательский буфер). */
+int  fd_opendir(const char *flatdir);
+int  fd_readdir(int fd, char *name_out, int name_sz, int *is_dir_out);
+int  fd_dir_tell(int fd);
+int  fd_dir_seek(int fd, int pos);
 
 /* Этап 2: дублирование и пайпы. */
 int  fd_dup(int oldfd);                 /* -> новый fd / -1 */
