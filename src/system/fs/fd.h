@@ -88,6 +88,11 @@ int  fd_tell(int fd);
 int  fd_close(int fd);
 int  fd_stat(int fd, uint32_t *out_size);
 int  fd_stat_path(const char *path, uint32_t *out_size);
+/* Этап 6c: расширенный fstat для Linux struct stat — отдаёт вид ofd (ofd_kind_t)
+ * и размер. out_kind получает значение ofd_kind_t (OFD_FILE, OFD_PIPE_R/W,
+ * OFD_CONSOLE), чтобы шлюз выставил st_mode (S_IFREG, S_IFIFO, S_IFCHR).
+ * Возвращает 0 / -1. */
+int  fd_statx(int fd, int *out_kind, uint32_t *out_size);
 
 /* Этап 2: дублирование и пайпы. */
 int  fd_dup(int oldfd);                 /* -> новый fd / -1 */

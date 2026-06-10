@@ -289,6 +289,14 @@ int fd_stat(int fd, uint32_t *out_size) {
     return 0;
 }
 
+int fd_statx(int fd, int *out_kind, uint32_t *out_size) {
+    ofd_t *o = resolve(fd);
+    if (!o) return -1;
+    if (out_kind) *out_kind = (int)o->kind;
+    if (out_size) *out_size = (o->kind == OFD_FILE) ? o->size : 0;
+    return 0;
+}
+
 int fd_stat_path(const char *path, uint32_t *out_size) {
     if (!path) return -1;
     vfs_node_t *dev = vfs_root->next;

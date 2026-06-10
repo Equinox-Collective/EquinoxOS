@@ -1499,6 +1499,100 @@ struct l_timespec { int64_t tv_sec; int64_t tv_nsec; };
 #define L_ENOSYS 38
 #define L_EINVAL 22
 #define L_ENOMEM 12
+#define L_ENOENT 2
+#define L_EBADF  9
+
+/* ---- Этап 6c: Linux x86-64 struct stat (== struct kstat в musl, 144 байта).
+ * На x86_64 musl заполняет ИМЕННО этот layout через SYS_fstat/stat/lstat/
+ * fstatat (statx пропускается, т.к. st_atime_sec == time_t). Поля/смещения
+ * взяты из musl arch/x86_64/kstat.h — менять нельзя. */
+struct l_stat {
+  uint64_t st_dev;        /* 0  */
+  uint64_t st_ino;        /* 8  */
+  uint64_t st_nlink;      /* 16 */
+  uint32_t st_mode;       /* 24 */
+  uint32_t st_uid;        /* 28 */
+  uint32_t st_gid;        /* 32 */
+  uint32_t __pad0;        /* 36 */
+  uint64_t st_rdev;       /* 40 */
+  int64_t  st_size;       /* 48 */
+  int64_t  st_blksize;    /* 56 */
+  int64_t  st_blocks;     /* 64 */
+  int64_t  st_atime_sec, st_atime_nsec;  /* 72, 80  */
+  int64_t  st_mtime_sec, st_mtime_nsec;  /* 88, 96  */
+  int64_t  st_ctime_sec, st_ctime_nsec;  /* 104,112 */
+  int64_t  __unused[3];                  /* 120     */
+};
+_Static_assert(sizeof(struct l_stat) == 144, "l_stat must match x86_64 kstat");
+
+#define L_S_IFREG 0x8000u
+#define L_S_IFDIR 0x4000u
+#define L_S_IFCHR 0x2000u
+#define L_S_IFIFO 0x1000u
+#define L_AT_EMPTY_PATH 0x1000
+
+/* Скопировать путь из юзерспейса (stac/clac) и нормализовать к cwd процесса. */
+static void lx_copy_path(uint64_t uptr, char *out, int outsz)
+{
+  char kpath[256];
+  const char *p = (const char *)uptr;
+  int i = 0;
+  if (p) {
+    stac();
+    while (i < (int)sizeof(kpath) - 1 && p[i]) { kpath[i] = p[i]; i++; }
+    clac();
+  }
+  kpath[i] = '\0';
+  char rpath[256];
+  task_resolve_fs_path(kpath, rpath, sizeof(rpath));
+  const char *src = rpath[0] ? rpath : kpath;
+  int j = 0;
+  for (; src[j] && j < outsz - 1; j++) out[j] = src[j];
+  out[j] = '\0';
+}
+
+/* Заполнить пользовательский struct l_stat (mode уже включает тип S_IF*). */
+static void lx_fill_stat(uint64_t uptr, uint32_t mode, uint64_t size)
+{
+  if (!uptr) return;
+  struct l_stat st;
+  memset(&st, 0, sizeof(st));
+  st.st_dev     = 1;
+  st.st_ino     = 1;
+  st.st_nlink   = 1;
+  st.st_mode    = mode;
+  st.st_size    = (int64_t)size;
+  st.st_blksize = 4096;
+  st.st_blocks  = (int64_t)((size + 511) / 512);
+  int64_t now   = (int64_t)rtc_unix_time();
+  st.st_atime_sec = st.st_mtime_sec = st.st_ctime_sec = now;
+  stac();
+  memcpy((void *)uptr, &st, sizeof(st));
+  clac();
+}
+
+/* stat по пути: 0 + mode/size если существует (файл/каталог), иначе -1. */
+static int lx_path_stat(const char *path, uint32_t *out_mode, uint64_t *out_size)
+{
+  uint32_t sz = 0;
+  if (fd_stat_path(path, &sz) == 0) { *out_mode = L_S_IFREG | 0644u; *out_size = sz; return 0; }
+  if (vfs_dir_exists(path))         { *out_mode = L_S_IFDIR | 0755u; *out_size = 0;  return 0; }
+  return -1;
+}
+
+/* stat по fd: вид ofd -> mode (+ size для обычных файлов). */
+static int lx_fd_stat(int fd, uint32_t *out_mode, uint64_t *out_size)
+{
+  int kind = 0; uint32_t sz = 0;
+  if (fd_statx(fd, &kind, &sz) != 0) return -1;
+  switch (kind) {
+    case OFD_CONSOLE: *out_mode = L_S_IFCHR | 0620u; *out_size = 0;  break;
+    case OFD_PIPE_R:
+    case OFD_PIPE_W:  *out_mode = L_S_IFIFO | 0600u; *out_size = 0;  break;
+    default:          *out_mode = L_S_IFREG | 0644u; *out_size = sz; break;
+  }
+  return 0;
+}
 
 void linux_syscall_handler(syscall_regs_t *regs)
 {
@@ -1674,6 +1768,70 @@ void linux_syscall_handler(syscall_regs_t *regs)
       clac();
     }
     regs->rax = 0;
+    signal_deliver(regs);
+    return;
+  }
+
+  /* ---- stat-семейство (Этап 6c): Linux struct stat (kstat layout) ------ */
+  case 5:                                     /* fstat(fd, statbuf) */
+  {
+    uint32_t mode; uint64_t size;
+    if (lx_fd_stat((int)regs->rdi, &mode, &size) == 0) {
+      lx_fill_stat(regs->rsi, mode, size); regs->rax = 0;
+    } else regs->rax = LERR(L_EBADF);
+    signal_deliver(regs);
+    return;
+  }
+  case 4:                                     /* stat(path, statbuf) */
+  case 6:                                     /* lstat — символ. ссылок нет, как stat */
+  {
+    char path[256];
+    lx_copy_path(regs->rdi, path, sizeof(path));
+    uint32_t mode; uint64_t size;
+    if (lx_path_stat(path, &mode, &size) == 0) {
+      lx_fill_stat(regs->rsi, mode, size); regs->rax = 0;
+    } else regs->rax = LERR(L_ENOENT);
+    signal_deliver(regs);
+    return;
+  }
+  case 262:                                   /* newfstatat(dirfd, path, statbuf, flag) */
+  {
+    const char *pp = (const char *)regs->rsi;
+    char c = 0;
+    if (pp) { stac(); c = pp[0]; clac(); }
+    int empty = (pp == 0 || c == '\0');
+    uint32_t mode; uint64_t size;
+    if (((int)regs->r10 & L_AT_EMPTY_PATH) || empty) {  /* AT_EMPTY_PATH -> fstat(dirfd) */
+      if (lx_fd_stat((int)regs->rdi, &mode, &size) == 0) {
+        lx_fill_stat(regs->rdx, mode, size); regs->rax = 0;
+      } else regs->rax = LERR(L_EBADF);
+    } else {
+      char path[256];
+      lx_copy_path(regs->rsi, path, sizeof(path));
+      if (lx_path_stat(path, &mode, &size) == 0) {
+        lx_fill_stat(regs->rdx, mode, size); regs->rax = 0;
+      } else regs->rax = LERR(L_ENOENT);
+    }
+    signal_deliver(regs);
+    return;
+  }
+
+  /* ---- access / faccessat (Этап 6c): 0 если существует, иначе -ENOENT --- */
+  case 21:                                    /* access(path, mode) */
+  {
+    char path[256];
+    lx_copy_path(regs->rdi, path, sizeof(path));
+    uint32_t m; uint64_t s;
+    regs->rax = (lx_path_stat(path, &m, &s) == 0) ? 0 : LERR(L_ENOENT);
+    signal_deliver(regs);
+    return;
+  }
+  case 269:                                   /* faccessat(dirfd, path, mode, flag) */
+  {
+    char path[256];
+    lx_copy_path(regs->rsi, path, sizeof(path));
+    uint32_t m; uint64_t s;
+    regs->rax = (lx_path_stat(path, &m, &s) == 0) ? 0 : LERR(L_ENOENT);
     signal_deliver(regs);
     return;
   }
