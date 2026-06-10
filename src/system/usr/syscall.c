@@ -1487,8 +1487,8 @@ void syscall_handler(syscall_regs_t *regs)
  * сисколлы возвращают -1; musl трактует любой возврат в [-4095,-1] как ошибку
  * (errno = -ret), поэтому -1 «работает» (errno будет 1/EPERM — уточним в 6d).
  *
- * TODO(6d): корректные линукс-структуры (stat/dirent/sigaction/utsname),
- * настоящий rt_sigaction (сейчас no-op), access/uname/clock_gettime, errno.
+ * 6d (done): настоящий rt_sigaction/rt_sigprocmask (linux struct sigaction).
+ * TODO: utsname/uname, clock_gettime, точные errno по остальным сисколлам.
  * ========================================================================= */
 
 /* Линуксовые аргументы (x86-64): a1=rdi a2=rsi a3=rdx a4=r10 a5=r8 a6=r9. */
@@ -1501,6 +1501,18 @@ struct l_timespec { int64_t tv_sec; int64_t tv_nsec; };
 #define L_ENOMEM 12
 #define L_ENOENT 2
 #define L_EBADF  9
+
+/* ---- Этап 6d: Linux x86-64 struct sigaction (kernel-ABI, как его передаёт
+ * musl __libc_sigaction). Поля/смещения фиксированы ядром Linux:
+ *   sa_handler@0, sa_flags@8, sa_restorer@16, sa_mask@24 (sigsetsize байт).
+ * musl всегда ставит SA_RESTORER и кладёт адрес трамплина в sa_restorer. */
+struct l_sigaction {
+  uint64_t sa_handler;   /* 0  : 0=SIG_DFL, 1=SIG_IGN, иначе адрес ring3 */
+  uint64_t sa_flags;     /* 8  */
+  uint64_t sa_restorer;  /* 16 : трамплин sigreturn (при SA_RESTORER) */
+  uint64_t sa_mask;      /* 24 : младшие 64 бита маски (sigsetsize=8) */
+};
+#define L_SA_RESTORER 0x04000000ULL
 
 /* ---- Этап 6c: Linux x86-64 struct stat (== struct kstat в musl, 144 байта).
  * На x86_64 musl заполняет ИМЕННО этот layout через SYS_fstat/stat/lstat/
@@ -1662,13 +1674,19 @@ void linux_syscall_handler(syscall_regs_t *regs)
   case 231: regs->rax = 10; break;           /* exit_group -> SYS_EXIT */
   case 61: regs->rax = 52; break;            /* wait4(pid,status,opt,ru) -> SYS_WAITPID (opt/ru игнор) */
   case 62: regs->rax = 102; break;           /* kill(pid,sig) -> SYS_KILL */
+  case 200: regs->rax = 102; break;          /* tkill(tid,sig) -> SYS_KILL (tid==pid; raise() в musl) */
   case 79: regs->rax = 100; break;           /* getcwd(buf,size) -> SYS_GETCWD */
   case 80: regs->rax = 101; break;           /* chdir(path) -> SYS_CHDIR */
-  case 14: regs->rax = 105; break;           /* rt_sigprocmask(how,set,old,sz) -> SYS_SIGPROCMASK */
   case 15: regs->rax = 104; break;           /* rt_sigreturn -> SYS_SIGRETURN */
   case 318: regs->rax = 86; break;           /* getrandom(buf,len,flags) -> SYS_GETRANDOM */
 
   /* ---- требуют перетасовки аргументов, затем делегирование ------------- */
+  case 234:                                  /* tgkill(tgid, tid, sig) -> SYS_KILL(tid,sig) */
+    regs->rdi = regs->rsi;                    /* pid = tid */
+    regs->rsi = regs->rdx;                    /* sig */
+    regs->rax = 102;
+    break;
+
   case 257:                                  /* openat(dirfd,path,flags,mode) */
     /* Этап 6c-2: каталог -> OFD_DIR; иначе делегируем родному SYS_OPEN. */
     if (lx_open_dir_maybe(regs, regs->rsi, (int)regs->rdx)) { signal_deliver(regs); return; }
@@ -1926,8 +1944,46 @@ void linux_syscall_handler(syscall_regs_t *regs)
   case 102: case 104: case 107: case 108:     /* getuid/getgid/geteuid/getegid */
     regs->rax = 0; signal_deliver(regs); return;                                  /* «root» */
   case 110: regs->rax = 1; signal_deliver(regs); return;                          /* getppid */
+  case 186: regs->rax = (uint64_t)current_task->id; signal_deliver(regs); return; /* gettid (==pid, однопоточно) */
   case 72:  regs->rax = 0; signal_deliver(regs); return;                          /* fcntl (no-op) */
-  case 13:  regs->rax = 0; signal_deliver(regs); return;                          /* rt_sigaction TODO(6d) */
+
+  /* ---- Этап 6d: настоящие сигналы (rt_sigaction / rt_sigprocmask) ------- */
+  case 13: {  /* rt_sigaction(sig, act*, oldact*, sigsetsize) */
+    int sig = (int)regs->rdi;
+    /* act==NULL → только прочитать прежний обработчик (SIG_QUERY). */
+    uint64_t handler = 0xFFFFFFFFFFFFFFFFULL, restorer = 0;
+    if (regs->rsi) {
+      struct l_sigaction act;
+      stac(); act = *(const struct l_sigaction *)regs->rsi; clac();
+      handler  = act.sa_handler;
+      restorer = (act.sa_flags & L_SA_RESTORER) ? act.sa_restorer : 0;
+    }
+    uint64_t old = 0;
+    int rc = signal_setaction(sig, handler, restorer, &old);
+    if (rc != 0) { regs->rax = LERR(L_EINVAL); signal_deliver(regs); return; }
+    if (regs->rdx) {  /* вернуть прежний обработчик в oldact */
+      struct l_sigaction oa;
+      oa.sa_handler  = old;
+      oa.sa_flags    = L_SA_RESTORER;
+      oa.sa_restorer = current_task ? current_task->sig_restorer : 0;
+      oa.sa_mask     = 0;
+      stac(); *(struct l_sigaction *)regs->rdx = oa; clac();
+    }
+    regs->rax = 0; signal_deliver(regs); return;
+  }
+  case 14: {  /* rt_sigprocmask(how, set*, oldset*, sigsetsize) — Linux передаёт
+               * set/oldset УКАЗАТЕЛЯМИ (натив ждёт значение), поэтому inline. */
+    uint64_t setv = 0, old = 0;
+    int how = (int)regs->rdi;
+    if (regs->rsi) {  /* есть новый набор — применить */
+      stac(); setv = *(const uint64_t *)regs->rsi; clac();
+      signal_procmask(how, setv, &old);
+    } else {          /* set==NULL — только прочитать текущую маску */
+      signal_procmask(0 /*BLOCK*/, 0, &old);
+    }
+    if (regs->rdx) { stac(); *(uint64_t *)regs->rdx = old; clac(); }
+    regs->rax = 0; signal_deliver(regs); return;
+  }
 
   default:
     regs->rax = LERR(L_ENOSYS);
