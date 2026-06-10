@@ -36,10 +36,33 @@ extern uint64_t hhdm_offset;
 extern volatile uint32_t tick;
 static uint64_t kernel_cr3 = 0;
 
+/* --- Этап 9: FPU/SSE-контекст ---------------------------------------------
+ * Эталонное чистое состояние (fninit + дефолтный MXCSR) снимается один раз
+ * лениво: текущее состояние сохраняем, инициализируем FPU, снимаем слепок,
+ * возвращаем как было. Новые задачи стартуют с копией слепка. */
+static uint8_t fpu_clean_state[512] __attribute__((aligned(16)));
+static bool    fpu_clean_ready = false;
+
+void task_fpu_init_area(task_t* t) {
+    if (!fpu_clean_ready) {
+        uint8_t tmp[512 + 15];
+        void* live = (void*)(((uint64_t)tmp + 15) & ~(uint64_t)15);
+        __asm__ volatile("fxsave64 (%0)" :: "r"(live) : "memory");
+        __asm__ volatile("fninit");
+        uint32_t mxcsr = 0x1F80; /* default: все SSE-исключения замаскированы */
+        __asm__ volatile("ldmxcsr %0" :: "m"(mxcsr));
+        __asm__ volatile("fxsave64 (%0)" :: "r"(fpu_clean_state) : "memory");
+        __asm__ volatile("fxrstor64 (%0)" :: "r"(live) : "memory");
+        fpu_clean_ready = true;
+    }
+    memcpy(task_fpu_area(t), fpu_clean_state, 512);
+}
+
 void task_init() {
     __asm__ volatile("mov %%cr3, %0" : "=r"(kernel_cr3));
     current_task = (task_t*)kmalloc(sizeof(task_t));
     memset(current_task, 0, sizeof(task_t));
+    task_fpu_init_area(current_task);
     current_task->cr3 = kernel_cr3;
     current_task->id = next_pid++;
     current_task->running = true;
@@ -104,6 +127,7 @@ task_t* task_create_full(void (*entry)(), uint64_t arg1, uint64_t arg2,
                          uint64_t cr3, const sysv_args_t *sv) {
   task_t *new_task = (task_t *)kmalloc(sizeof(task_t));
   memset(new_task, 0, sizeof(task_t));
+  task_fpu_init_area(new_task); /* Этап 9: чистый FPU/SSE-контекст */
   void *top_stack_phys = 0; /* Этап 6b: phys верхней страницы user-стека */
   new_task->brk = 0x40000000;
   new_task->id = next_pid++;
@@ -280,6 +304,13 @@ uint64_t schedule(uint64_t current_rsp) {
         }
     // Крутимся в цикле, если задача не готова к работе ИЛИ всё ещё спит
     } while (!current_task->running || current_task->sleep_until != 0);
+
+    /* Этап 9: переключение FPU/SSE-контекста. Без этого XMM/x87-регистры
+     * «протекали» между задачами (см. комментарий к fpu_state в task.h). */
+    if (current_task != start) {
+        __asm__ volatile("fxsave64 (%0)"  :: "r"(task_fpu_area(start))        : "memory");
+        __asm__ volatile("fxrstor64 (%0)" :: "r"(task_fpu_area(current_task)) : "memory");
+    }
 
     uint64_t new_cr3 = (current_task->cr3 == 0) ? kernel_cr3 : current_task->cr3;
     __asm__ volatile("mov %0, %%cr3" : : "r"(new_cr3) : "memory");
@@ -776,6 +807,10 @@ uint64_t task_fork(stack_frame_t* parent_frame) {
     /* 2. Структура задачи ребёнка. */
     task_t* child = (task_t*)kmalloc(sizeof(task_t));
     memset(child, 0, sizeof(task_t));
+    /* Этап 9: ребёнок наследует ЖИВОЕ FPU/SSE-состояние родителя — мы сейчас
+     * в его контексте (int 0x80/0x81 регистры XMM не трогает), поэтому
+     * снимаем его прямо с CPU. */
+    __asm__ volatile("fxsave64 (%0)" :: "r"(task_fpu_area(child)) : "memory");
     child->cr3       = PHYS(child_pml4);
     child->id        = next_pid++;
     child->parent_id = parent->id;

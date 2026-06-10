@@ -52,7 +52,25 @@ typedef struct task {
     uint64_t sig_blocked;
     uint64_t sig_handlers[32];
     uint64_t sig_restorer;
+    /* --- Этап 9: FPU/SSE-контекст задачи -------------------------------- *
+     * fxsave64-область (512 байт). До этого этапа ядро НЕ сохраняло
+     * XMM/x87-регистры при переключении задач: пока работал один юзер-
+     * процесс, это сходило с рук, но фоновые задачи bash (`cmd &`) гоняют
+     * несколько SSE-активных процессов параллельно, и регистры «протекали»
+     * между ними (классический симптом — мусорный указатель в metadata
+     * mallocng и page fault с маленьким CR2). task_t выделяется kmalloc'ом
+     * без гарантии выравнивания, а fxsave требует 16 байт — поэтому буфер
+     * на 15 байт больше, рабочий адрес считает task_fpu_area(). */
+    uint8_t fpu_state[512 + 15];
 } task_t;
+
+static inline void* task_fpu_area(task_t* t) {
+    return (void*)(((uint64_t)t->fpu_state + 15) & ~(uint64_t)15);
+}
+
+/* Кладёт в fpu-область задачи эталонное «чистое» состояние (fninit +
+ * MXCSR=0x1F80). Вызывать при создании каждой задачи. */
+void task_fpu_init_area(task_t* t);
 
 extern task_t* current_task; 
 void task_init();

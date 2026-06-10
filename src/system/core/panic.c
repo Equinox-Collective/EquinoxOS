@@ -2,6 +2,7 @@
 #include "../drivers/hardware/serial/serial.h"
 #include <stdint.h>
 #include "../drivers/devices/audio/ac97.h"
+#include "../usr/task.h"
 
 typedef struct {
     uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
@@ -23,7 +24,57 @@ static const char* exception_messages[32] = {
     "Hypervisor Injection", "VMM Communication", "Security Exception", "Reserved"
 };
 
+/* --- Этап 9: краш юзер-процесса не должен ронять всю ОС -------------------
+ * Если исключение прилетело из ring 3 (CPL в CS == 3) — это краш ОДНОГО
+ * пользовательского процесса. Убиваем его через штатный exit-путь (закрытие
+ * fd, освобождение адресного пространства, zombie + побудка родителя в
+ * waitpid), печатаем диагностику в COM1 и отдаём управление планировщику.
+ * KERNEL PANIC остаётся только для исключений самого ядра (CPL=0). */
+static void hex64(char* dst, uint64_t v) {
+    static const char* d = "0123456789ABCDEF";
+    for (int i = 0; i < 16; i++) dst[i] = d[(v >> (60 - i * 4)) & 0xF];
+    dst[16] = '\0';
+}
+
+static void user_crash_handler(interrupt_frame_t* frame, uint64_t cr2) {
+    extern task_t* current_task;
+    char hb[20];
+
+    serial_puts(COM1, "\n[CRASH] user process fault: ");
+    serial_puts(COM1, frame->int_no < 32 ? exception_messages[frame->int_no]
+                                         : "Unknown");
+    serial_puts(COM1, "\nPID:  ");
+    hex64(hb, current_task->id);       serial_puts(COM1, hb);
+    serial_puts(COM1, "\nRIP:  ");
+    hex64(hb, frame->rip);             serial_puts(COM1, hb);
+    serial_puts(COM1, "\nCR2:  ");
+    hex64(hb, cr2);                    serial_puts(COM1, hb);
+    serial_puts(COM1, "\nERR:  ");
+    hex64(hb, frame->err_code);        serial_puts(COM1, hb);
+    serial_puts(COM1, "\nRSP:  ");
+    hex64(hb, frame->rsp);             serial_puts(COM1, hb);
+    serial_puts(COM1, "\n[CRASH] killing process, OS keeps running\n");
+
+    /* Linux-подобный код выхода 128+sig: PF/GPF -> SIGSEGV(11),
+     * invalid opcode -> SIGILL(4), деление на 0 -> SIGFPE(8). */
+    int sig = 11;
+    if (frame->int_no == 6)  sig = 4;
+    if (frame->int_no == 0 || frame->int_no == 16 || frame->int_no == 19)
+        sig = 8;
+    task_exit_current(128 + sig); /* не возвращается */
+}
+
 void panic_handler(interrupt_frame_t* frame) {
+    /* Этап 9: исключение из ring 3 — убиваем процесс, а не всю ОС.
+     * CR2 читаем ДО всего остального, пока его не затёрло. */
+    {
+        uint64_t ucr2;
+        __asm__ volatile ("mov %%cr2, %0" : "=r"(ucr2));
+        extern task_t* current_task;
+        if ((frame->cs & 3) == 3 && current_task && current_task->id != 1)
+            user_crash_handler(frame, ucr2); /* не возвращается */
+    }
+
     // 1. ЖЕСТКО ВЫКЛЮЧАЕМ ПРЕРЫВАНИЯ
     ac97_stop();
     __asm__ volatile ("cli");
