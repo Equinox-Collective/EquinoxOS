@@ -1972,16 +1972,22 @@ void linux_syscall_handler(syscall_regs_t *regs)
     regs->rax = 0; signal_deliver(regs); return;
   }
   case 14: {  /* rt_sigprocmask(how, set*, oldset*, sigsetsize) — Linux передаёт
-               * set/oldset УКАЗАТЕЛЯМИ (натив ждёт значение), поэтому inline. */
-    uint64_t setv = 0, old = 0;
+               * set/oldset УКАЗАТЕЛЯМИ (натив ждёт значение), поэтому inline.
+               * ВАЖНО: Linux sigset кладёт сигнал N в бит N-1, а наше ядро
+               * (signal.c SIGBIT=1<<s) — в бит N. Конвертируем сдвигом. */
+    uint64_t old = 0;
     int how = (int)regs->rdi;
     if (regs->rsi) {  /* есть новый набор — применить */
-      stac(); setv = *(const uint64_t *)regs->rsi; clac();
-      signal_procmask(how, setv, &old);
+      uint64_t lset;
+      stac(); lset = *(const uint64_t *)regs->rsi; clac();
+      signal_procmask(how, lset << 1 /* linux->native */, &old);
     } else {          /* set==NULL — только прочитать текущую маску */
       signal_procmask(0 /*BLOCK*/, 0, &old);
     }
-    if (regs->rdx) { stac(); *(uint64_t *)regs->rdx = old; clac(); }
+    if (regs->rdx) {
+      uint64_t lold = old >> 1;  /* native->linux */
+      stac(); *(uint64_t *)regs->rdx = lold; clac();
+    }
     regs->rax = 0; signal_deliver(regs); return;
   }
 
