@@ -328,6 +328,7 @@ APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_RO
 # Apps that link against libbearssl.a (phase 3b+). These get their own
 # explicit rules below because they need (a) BearSSL public headers in the
 # include path and (b) libbearssl.a appended at link time.
+APP_ELFS_MUSL   = $(ISO_ROOT)/bin/musltest.elf
 APP_ELFS_TLS    = $(ISO_ROOT)/bin/tlsboot.elf $(ISO_ROOT)/bin/tlstest.elf $(ISO_ROOT)/bin/catest.elf $(ISO_ROOT)/bin/httpsget.elf $(ISO_ROOT)/bin/urlget.elf $(ISO_ROOT)/bin/browser.elf
 APP_ELFS_QJS    = $(ISO_ROOT)/bin/jstest.elf $(ISO_ROOT)/bin/domtest.elf $(ISO_ROOT)/bin/jsdomtest.elf $(ISO_ROOT)/bin/jsfetchtest.elf $(ISO_ROOT)/bin/jspagetest.elf
 
@@ -350,7 +351,7 @@ $(KERNEL_OBJS) $(SDK_OBJS) $(APP_OBJS) $(DOOM_OBJS): | setup
 
 # BearSSL / TLS / QuickJS deps are dynamic (see SKIP= switch above) so a
 # `make SKIP=bearssl` minimal build drops them cleanly.
-apps: setup $(SDK_OBJS) $(BEARSSL_DEP) $(QUICKJS_DEP) $(SDL_LIB) $(APP_ELFS_SIMPLE) $(TLS_APPS_DEP) $(QJS_APPS_DEP) sysgui_app
+apps: setup $(SDK_OBJS) $(BEARSSL_DEP) $(QUICKJS_DEP) $(SDL_LIB) $(APP_ELFS_SIMPLE) $(APP_ELFS_MUSL) $(TLS_APPS_DEP) $(QJS_APPS_DEP) sysgui_app
 
 $(ISO_ROOT)/bin/%.elf: app/%.o $(SDK_OBJS)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< -o $@
@@ -365,6 +366,24 @@ $(ISO_ROOT)/bin/stktest.elf: app/stktest.o
 # контекста. Тоже свой _start, без SDK_OBJS.
 $(ISO_ROOT)/bin/fstest.elf: app/fstest.o
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start app/fstest.o -o $@
+
+# musltest.elf — Этап 6b-2: первый запуск НАСТОЯЩЕЙ musl libc.
+# Линкуется с предсобранной vendored-musl (third_party/musl) — собирать musl
+# на Windows НЕ нужно. _start/crt1 musl читает SysV-кадр (6b-1) и ставит TLS.
+#   * Компилируем БЕЗ SDK-инклудов: -nostdinc + только musl-заголовки.
+#   * Своё правило app/musltest.o перекрывает общий шаблон app/%.o.
+MUSL_DIR  = third_party/musl
+MUSL_LIB  = $(MUSL_DIR)/lib
+MUSL_CFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector \
+              -fno-pic -g -nostdinc -isystem $(MUSL_DIR)/include
+
+app/musltest.o: app/musltest.c
+	$(CC) $(MUSL_CFLAGS) -c $< -o $@
+
+$(ISO_ROOT)/bin/musltest.elf: app/musltest.o $(MUSL_LIB)/libc.a
+	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 \
+	  $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/musltest.o \
+	  $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
 
 app/%.o: app/%.c
 	$(CC) $(USER_CFLAGS) -c $< -o $@

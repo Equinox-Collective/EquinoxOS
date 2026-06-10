@@ -16,6 +16,7 @@
 #include "../mem/vmm.h"
 #include "../misc/random.h"
 #include "../misc/rtc.h"
+#include "../misc/timer.h"
 #include "../shell/shellsyntx.h"
 #include "../usr/task.h"
 #include "ipc.h"
@@ -1630,6 +1631,49 @@ void linux_syscall_handler(syscall_regs_t *regs)
     } else {
       regs->rax = LERR(L_EINVAL);
     }
+    signal_deliver(regs);
+    return;
+  }
+
+  /* ---- clock_gettime(clk_id, struct timespec*) — Этап 6b-2 ------------- */
+  case 228:
+  {
+    int clk = (int)regs->rdi;
+    uint64_t uts = regs->rsi;                 /* user struct timespec {long sec; long nsec} */
+    uint64_t ms = (uint64_t)tick;             /* PIT @ 1 kHz => мс с загрузки */
+    int64_t sec, nsec = (int64_t)(ms % 1000) * 1000000;
+    if (clk == 0 || clk == 5)                 /* CLOCK_REALTIME / _COARSE */
+      sec = (int64_t)rtc_unix_time();
+    else                                      /* MONOTONIC(1)/RAW(4)/COARSE(6)/BOOTTIME(7) */
+      sec = (int64_t)(ms / 1000);
+    if (uts) { stac(); ((int64_t *)uts)[0] = sec; ((int64_t *)uts)[1] = nsec; clac(); }
+    regs->rax = 0;
+    signal_deliver(regs);
+    return;
+  }
+
+  /* ---- uname(struct utsname*) — Этап 6b-2 ------------------------------ */
+  case 63:
+  {
+    uint64_t up = regs->rdi;
+    if (up) {
+      /* Linux struct utsname: 6 полей по 65 байт
+       * (sysname, nodename, release, version, machine, domainname). */
+      static const char *const uf[6] = {
+        "EquinoxOS", "equinox", "1.0", "EquinoxOS 6b musl", "x86_64", "(none)"
+      };
+      stac();
+      char *p = (char *)up;
+      for (int f = 0; f < 6; f++) {
+        char *dst = p + f * 65;
+        const char *s = uf[f];
+        int i = 0;
+        for (; s[i] && i < 64; i++) dst[i] = s[i];
+        for (; i < 65; i++) dst[i] = 0;
+      }
+      clac();
+    }
+    regs->rax = 0;
     signal_deliver(regs);
     return;
   }
