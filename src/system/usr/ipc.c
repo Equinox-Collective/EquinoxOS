@@ -115,6 +115,17 @@ int32_t pipe_write(int id, const void *user_buf, uint32_t size) {
     return (int32_t)written;
 }
 
+/* Этап 7 (bash): неблокирующая проверка читаемости для poll/select.
+ * Без захвата мьютекса: одно чтение count/closed атомарно достаточно для
+ * level-triggered опроса (poll повторит проверку в цикле). */
+int pipe_has_data(int id) {
+    if (!pipe_valid(id)) return -1;
+    pipe_t *p = &pipes[id];
+    if (p->count > 0) return 1;
+    if (p->closed || p->writers_open == 0) return 1;  /* EOF тоже «читаемо» */
+    return 0;
+}
+
 void pipe_close(int id) {
     if (!pipe_valid(id)) return;
     pipe_t *p = &pipes[id];

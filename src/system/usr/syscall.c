@@ -39,6 +39,7 @@ static volatile bool k_app_win_active = false;
 #include "uregs.h"
 #include "signal.h"
 #include "tty.h"
+#include "../drivers/hardware/serial/serial.h"  /* Этап 7: FIONREAD + лог ENOSYS */
 
 extern int mouse_x, mouse_y;
 extern bool mouse_left_button;
@@ -1429,7 +1430,15 @@ void syscall_handler(syscall_regs_t *regs)
     uint64_t  req = regs->rsi;
     void     *arg = (void *)regs->rdx;
 
-    if (fd < 0 || fd > 2) { regs->rax = (uint64_t)(int64_t)-1; break; }
+    /* Этап 7 (bash): консольный fd не обязан быть 0/1/2 — bash двигает свой
+     * tty-fd наверх через fcntl(F_DUPFD). Проверяем ВИД дескриптора. */
+    {
+      int kind = 0; uint32_t sz_ = 0;
+      if (fd_statx(fd, &kind, &sz_) != 0 || kind != OFD_CONSOLE) {
+        regs->rax = (uint64_t)(int64_t)-1;  /* не tty -> ENOTTY для isatty() */
+        break;
+      }
+    }
 
     switch (req) {
     case K_TCGETS: {
@@ -1469,6 +1478,14 @@ void syscall_handler(syscall_regs_t *regs)
       int pg; stac(); pg = *(int *)arg; clac();
       if (pg <= 0) { regs->rax = (uint64_t)(int64_t)-1; break; }
       g_tty_fg_pgrp = (uint64_t)pg;
+      regs->rax = 0;
+      break;
+    }
+    case 0x541B: {  /* FIONREAD (Этап 7, readline): байт во входном буфере tty */
+      if (!arg) { regs->rax = (uint64_t)(int64_t)-1; break; }
+      extern int serial_received(uint16_t port);
+      int avail = serial_received(COM1) ? 1 : 0;   /* UART без FIFO-учёта: 0/1 */
+      stac(); *(int *)arg = avail; clac();
       regs->rax = 0;
       break;
     }
@@ -1526,6 +1543,7 @@ struct l_timespec { int64_t tv_sec; int64_t tv_nsec; };
 #define L_ECHILD 10
 #define L_ESRCH  3
 #define L_EPERM  1
+#define L_EMFILE 24
 
 /* ---- Этап 6d: Linux x86-64 struct sigaction (kernel-ABI, как его передаёт
  * musl __libc_sigaction). Поля/смещения фиксированы ядром Linux:
@@ -1681,6 +1699,13 @@ void linux_syscall_handler(syscall_regs_t *regs)
   case 2:                                    /* open(path,flags,mode) */
     /* Этап 6c-2: каталог -> OFD_DIR; иначе -> SYS_OPEN(path,flags). */
     if (lx_open_dir_maybe(regs, regs->rdi, (int)regs->rsi)) { signal_deliver(regs); return; }
+    /* Этап 7: несуществующий файл без O_CREAT -> честный ENOENT (родной
+     * SYS_OPEN отдаёт -1, что в Linux-errno читалось бы как EPERM). */
+    if (!((int)regs->rsi & 0x40 /* O_CREAT */)) {
+      char p7[256]; uint32_t m7; uint64_t s7;
+      lx_copy_path(regs->rdi, p7, sizeof(p7));
+      if (lx_path_stat(p7, &m7, &s7) != 0) { regs->rax = LERR(L_ENOENT); signal_deliver(regs); return; }
+    }
     regs->rax = 90; break;
   case 3:  regs->rax = 91; break;            /* close -> SYS_CLOSE_FD */
   case 8:  regs->rax = 94; break;            /* lseek(fd,off,whence) -> SYS_SEEK */
@@ -1715,6 +1740,11 @@ void linux_syscall_handler(syscall_regs_t *regs)
   case 257:                                  /* openat(dirfd,path,flags,mode) */
     /* Этап 6c-2: каталог -> OFD_DIR; иначе делегируем родному SYS_OPEN. */
     if (lx_open_dir_maybe(regs, regs->rsi, (int)regs->rdx)) { signal_deliver(regs); return; }
+    if (!((int)regs->rdx & 0x40 /* O_CREAT */)) {   /* Этап 7: честный ENOENT */
+      char p7[256]; uint32_t m7; uint64_t s7;
+      lx_copy_path(regs->rsi, p7, sizeof(p7));
+      if (lx_path_stat(p7, &m7, &s7) != 0) { regs->rax = LERR(L_ENOENT); signal_deliver(regs); return; }
+    }
     regs->rdi = regs->rsi;                    /* path */
     regs->rsi = regs->rdx;                    /* flags */
     regs->rax = 90;                           /* -> SYS_OPEN (dirfd=AT_FDCWD игнор) */
@@ -1955,6 +1985,7 @@ void linux_syscall_handler(syscall_regs_t *regs)
     return;
   }
   case 269:                                   /* faccessat(dirfd, path, mode, flag) */
+  case 439:                                   /* faccessat2 — то же + flags (Этап 7: bash) */
   {
     char path[256];
     lx_copy_path(regs->rsi, path, sizeof(path));
@@ -1970,7 +2001,188 @@ void linux_syscall_handler(syscall_regs_t *regs)
     regs->rax = 0; signal_deliver(regs); return;                                  /* «root» */
   case 110: regs->rax = 1; signal_deliver(regs); return;                          /* getppid */
   case 186: regs->rax = (uint64_t)current_task->id; signal_deliver(regs); return; /* gettid (==pid, однопоточно) */
-  case 72:  regs->rax = 0; signal_deliver(regs); return;                          /* fcntl (no-op) */
+
+  /* ---- Этап 7 (bash): честный fcntl ------------------------------------ */
+  case 72: { /* fcntl(fd, cmd, arg) */
+    int fd  = (int)regs->rdi;
+    int cmd = (int)regs->rsi;
+    long arg = (long)regs->rdx;
+    int kind = 0; uint32_t fsz = 0;
+    int valid = (fd_statx(fd, &kind, &fsz) == 0);
+    switch (cmd) {
+      case 0:     /* F_DUPFD */
+      case 1030: { /* F_DUPFD_CLOEXEC (CLOEXEC не отслеживаем — exec'и наши) */
+        if (!valid) { regs->rax = LERR(L_EBADF); break; }
+        int nfd = fd_dup_from(fd, (int)arg);
+        regs->rax = (nfd < 0) ? LERR(L_EMFILE) : (uint64_t)nfd;
+        break;
+      }
+      case 1:  /* F_GETFD */
+        regs->rax = valid ? 0 : LERR(L_EBADF);   /* FD_CLOEXEC не храним */
+        break;
+      case 2:  /* F_SETFD — принять и забыть (наш execve fd не наследует «лишних») */
+        regs->rax = valid ? 0 : LERR(L_EBADF);
+        break;
+      case 3:  /* F_GETFL */
+        if (!valid) { regs->rax = LERR(L_EBADF); break; }
+        switch (kind) {
+          case OFD_CONSOLE: regs->rax = 2; break;  /* O_RDWR */
+          case OFD_PIPE_W:  regs->rax = 1; break;  /* O_WRONLY */
+          default:          regs->rax = 0; break;  /* O_RDONLY */
+        }
+        break;
+      case 4:  /* F_SETFL — O_NONBLOCK/O_APPEND игнорируем (документировано) */
+        regs->rax = valid ? 0 : LERR(L_EBADF);
+        break;
+      default:
+        regs->rax = LERR(L_EINVAL);
+        break;
+    }
+    signal_deliver(regs); return;
+  }
+
+  /* ---- Этап 7 (bash): umask / rlimit / times / группы ------------------- */
+  case 95: { /* umask(mask) — глобально (процессную маску пока не различаем) */
+    static uint32_t k_umask = 022;
+    uint32_t old = k_umask;
+    k_umask = (uint32_t)regs->rdi & 0777u;
+    regs->rax = old;
+    signal_deliver(regs); return;
+  }
+
+  case 97:   /* getrlimit(res, rlim*) */
+  case 302: { /* prlimit64(pid, res, new*, old*) — new игнорируем */
+    int res = (int)((n == 97) ? regs->rdi : regs->rsi);
+    uint64_t uptr = (n == 97) ? regs->rsi : regs->r10;
+    if (uptr) {
+      uint64_t cur, max;
+      if (res == 7 /* RLIMIT_NOFILE */) { cur = max = FD_MAX; }
+      else { cur = max = ~0ULL; }      /* RLIM_INFINITY */
+      stac();
+      ((uint64_t *)uptr)[0] = cur;
+      ((uint64_t *)uptr)[1] = max;
+      clac();
+    }
+    regs->rax = 0;
+    signal_deliver(regs); return;
+  }
+
+  case 160:  /* setrlimit — принять и игнорировать */
+    regs->rax = 0; signal_deliver(regs); return;
+
+  case 100: { /* times(struct tms*) -> clock ticks (PIT 1 кГц == CLK_TCK 100? нет:
+               * musl __SC_CLK_TCK = 100, поэтому отдаём тики/10). Поля tms —
+               * нули: учёта cpu-времени у ядра пока нет, честный минимум. */
+    uint64_t t10 = (uint64_t)tick / 10;
+    if (regs->rdi) {
+      stac();
+      ((int64_t *)regs->rdi)[0] = 0; ((int64_t *)regs->rdi)[1] = 0;
+      ((int64_t *)regs->rdi)[2] = 0; ((int64_t *)regs->rdi)[3] = 0;
+      clac();
+    }
+    regs->rax = t10;
+    signal_deliver(regs); return;
+  }
+
+  case 115:  /* getgroups(size, list*) — дополнительных групп нет */
+    regs->rax = 0; signal_deliver(regs); return;
+
+  case 96: { /* gettimeofday(tv*, tz*) */
+    if (regs->rdi) {
+      int64_t sec  = (int64_t)rtc_unix_time();
+      int64_t usec = (int64_t)((uint64_t)tick % 1000) * 1000;
+      stac();
+      ((int64_t *)regs->rdi)[0] = sec;
+      ((int64_t *)regs->rdi)[1] = usec;
+      clac();
+    }
+    regs->rax = 0;
+    signal_deliver(regs); return;
+  }
+
+  /* ---- Этап 7 (bash/readline): poll / select / pselect6 ----------------- */
+  case 7: { /* poll(pollfd*, nfds, timeout_ms) */
+    uint64_t ufds = regs->rdi;
+    int nfds = (int)regs->rsi;
+    int64_t timeout = (int64_t)(int32_t)regs->rdx;   /* мс; <0 = бесконечно */
+    uint64_t deadline = (timeout >= 0) ? (uint64_t)tick + (uint64_t)timeout : 0;
+    int nready;
+    for (;;) {
+      nready = 0;
+      stac();
+      for (int i = 0; i < nfds; i++) {
+        /* struct pollfd { int fd; short events; short revents; } — 8 байт */
+        int32_t  pfd = *(int32_t *)(ufds + (uint64_t)i * 8);
+        int16_t  ev  = *(int16_t *)(ufds + (uint64_t)i * 8 + 4);
+        int16_t  rev = 0;
+        if (pfd >= 0) {
+          int rin = fd_ready_in(pfd);
+          if (rin < 0) rev |= 0x020;                       /* POLLNVAL */
+          else {
+            if ((ev & 0x001) && rin) rev |= 0x001;          /* POLLIN  */
+            if (ev & 0x004) rev |= 0x004;                   /* POLLOUT: пишем без блокировки */
+          }
+        }
+        *(int16_t *)(ufds + (uint64_t)i * 8 + 6) = rev;
+        if (rev) nready++;
+      }
+      clac();
+      if (nready > 0 || timeout == 0) break;
+      if (timeout > 0 && (uint64_t)tick >= deadline) break;
+      uint64_t deliverable = current_task->sig_pending & ~current_task->sig_blocked;
+      if (deliverable) { regs->rax = LERR(L_EINTR); signal_deliver(regs); return; }
+      yield();
+    }
+    regs->rax = (uint64_t)nready;
+    signal_deliver(regs); return;
+  }
+
+  case 23:   /* select(nfds, r*, w*, e*, timeval*) */
+  case 270: { /* pselect6(nfds, r*, w*, e*, timespec*, sigmask) — маску игнорируем */
+    int nfds = (int)regs->rdi;
+    uint64_t urd = regs->rsi, uwr = regs->rdx, uex = regs->r10, uts = regs->r8;
+    if (nfds < 0 || nfds > FD_MAX) nfds = (nfds < 0) ? 0 : FD_MAX;
+    int64_t timeout = -1;                            /* мс; <0 = бесконечно */
+    if (uts) {
+      stac();
+      int64_t a = ((int64_t *)uts)[0];
+      int64_t b = ((int64_t *)uts)[1];
+      clac();
+      timeout = (n == 23) ? a * 1000 + b / 1000      /* timeval: usec */
+                          : a * 1000 + b / 1000000;  /* timespec: nsec */
+      if (timeout < 0) timeout = 0;
+    }
+    uint64_t deadline = (timeout >= 0) ? (uint64_t)tick + (uint64_t)timeout : 0;
+    uint64_t rd = 0, wr = 0, ex = 0;
+    stac();
+    if (urd) rd = *(uint64_t *)urd;                  /* fd < 64 => одно слово */
+    if (uwr) wr = *(uint64_t *)uwr;
+    if (uex) ex = *(uint64_t *)uex;
+    clac();
+    (void)ex;
+    uint64_t ord, owr;
+    int nready;
+    for (;;) {
+      ord = 0; owr = 0; nready = 0;
+      for (int fd = 0; fd < nfds && fd < 64; fd++) {
+        uint64_t bit = 1ULL << fd;
+        if ((rd & bit) && fd_ready_in(fd) > 0) { ord |= bit; nready++; }
+        if (wr & bit)                           { owr |= bit; nready++; }
+      }
+      if (nready > 0 || timeout == 0) break;
+      if (timeout > 0 && (uint64_t)tick >= deadline) break;
+      uint64_t deliverable = current_task->sig_pending & ~current_task->sig_blocked;
+      if (deliverable) { regs->rax = LERR(L_EINTR); signal_deliver(regs); return; }
+      yield();
+    }
+    stac();
+    if (urd) { *(uint64_t *)urd = ord; for (int w = 1; w < 16; w++) ((uint64_t *)urd)[w] = 0; }
+    if (uwr) { *(uint64_t *)uwr = owr; for (int w = 1; w < 16; w++) ((uint64_t *)uwr)[w] = 0; }
+    if (uex) { for (int w = 0; w < 16; w++) ((uint64_t *)uex)[w] = 0; }
+    clac();
+    regs->rax = (uint64_t)nready;
+    signal_deliver(regs); return;
+  }
 
   /* ---- Этап 6d: настоящие сигналы (rt_sigaction / rt_sigprocmask) ------- */
   case 13: {  /* rt_sigaction(sig, act*, oldact*, sigsetsize) */
@@ -2078,10 +2290,17 @@ void linux_syscall_handler(syscall_regs_t *regs)
     regs->rax = current_task->id;
     signal_deliver(regs); return;
 
-  default:
+  default: {
+    /* Этап 7: каждый незнакомый Linux-сисколл светим в COM1 — так дыры под
+     * bash/новые порты видны сразу, а не как «тихий» сбой юзерспейса. */
+    char eb[64];
+    sprintf(eb, "[lx] ENOSYS syscall %u (pid %u)\n",
+            (unsigned)n, (unsigned)(current_task ? current_task->id : 0));
+    serial_puts(COM1, eb);
     regs->rax = LERR(L_ENOSYS);
     signal_deliver(regs);
     return;
+  }
   }
 
   /* делегируем в родной диспетчер (он доставит сигналы и вернётся в ring3) */

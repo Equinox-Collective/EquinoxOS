@@ -53,6 +53,11 @@ void    pipe_close(int id);
 void    pipe_set_ends(int id, int readers, int writers);
 void    pipe_unref(int id, bool write_end);
 
+/* Этап 7 (bash): неблокирующая проверка читаемости для poll/select.
+ * 1 = read не заблокируется (есть данные ИЛИ все writer'ы закрыты -> EOF),
+ * 0 = пусто, -1 = плохой id. */
+int     pipe_has_data(int id);
+
 int     mq_create(uint32_t msg_size);
 int32_t mq_send(int id, const void *buf, uint32_t prio);
 int32_t mq_recv(int id, void *buf); /* returns bytes received, or -1 */

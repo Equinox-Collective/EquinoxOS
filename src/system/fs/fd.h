@@ -103,6 +103,15 @@ int  fd_statx(int fd, int *out_kind, uint32_t *out_size);
  *    1 = запись получена (name_out + is_dir_out заполнены), 0 = конец, -1 ошибка.
  *  fd_dir_tell/seek — курсор перечисления (для отката в getdents64, когда
  *    запись не влезает в пользовательский буфер). */
+/* Этап 7 (bash, fcntl F_DUPFD): дублировать oldfd в НАИМЕНЬШИЙ свободный
+ * слот >= minfd. Возвращает новый fd или -1 (EBADF/EMFILE). */
+int  fd_dup_from(int oldfd, int minfd);
+
+/* Этап 7 (bash, poll/select): неблокирующая проверка «read не заблокируется».
+ * 1 = готов (файл/каталог всегда; консоль — есть байт в COM1; pipe —
+ * есть данные или EOF), 0 = не готов, -1 = плохой fd. */
+int  fd_ready_in(int fd);
+
 int  fd_opendir(const char *flatdir);
 int  fd_readdir(int fd, char *name_out, int name_sz, int *is_dir_out);
 int  fd_dir_tell(int fd);

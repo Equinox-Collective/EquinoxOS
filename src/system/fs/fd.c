@@ -15,6 +15,7 @@
 #include "../../syslibc/string.h"
 #include "../../syslibc/stdio.h"
 #include "../usr/tty.h"
+#include "../drivers/hardware/serial/serial.h"   /* Этап 7: fd_ready_in (COM1) */
 
 extern void term_print(const char *str);
 
@@ -491,6 +492,37 @@ int fd_dup(int oldfd) {
     if (fd < 0) return -1;
     ofd_ref(o);
     return fd;
+}
+
+/* Этап 7 (bash): fcntl(F_DUPFD) — наименьший свободный слот >= minfd.
+ * bash двигает свои служебные fd (tty, here-doc'и) «наверх» именно так. */
+int fd_dup_from(int oldfd, int minfd) {
+    ofd_t *o = resolve(oldfd);
+    if (!o) return -1;
+    if (minfd < 0) minfd = 0;
+    if (minfd >= FD_MAX) return -1;
+    fd_table_t *t = cur();
+    if (!t) return -1;
+    for (int i = minfd; i < FD_MAX; i++) {
+        if (!t->slots[i]) {
+            t->slots[i] = o;
+            ofd_ref(o);
+            return i;
+        }
+    }
+    return -1; /* EMFILE */
+}
+
+/* Этап 7 (bash): level-triggered готовность к чтению для poll/select. */
+int fd_ready_in(int fd) {
+    ofd_t *o = resolve(fd);
+    if (!o) return -1;
+    switch (o->kind) {
+        case OFD_CONSOLE: return serial_received(COM1) ? 1 : 0;
+        case OFD_PIPE_R:  { int r = pipe_has_data(o->pipe_id); return r < 0 ? 1 : r; }
+        case OFD_PIPE_W:  return 1;   /* «читать» write-конец бессмысленно, но не блокирует: EBADF позже */
+        default:          return 1;   /* файлы/каталоги всегда готовы */
+    }
 }
 
 int fd_dup2(int oldfd, int newfd) {
