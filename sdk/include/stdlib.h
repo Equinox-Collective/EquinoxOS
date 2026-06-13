@@ -16,6 +16,11 @@ int atoi(const char* s);
 double atof(const char* s);
 int system(const char* command);
 char *getenv(const char *name);
+/* Этап 3: модификация окружения. */
+int   setenv(const char *name, const char *value, int overwrite);
+int   unsetenv(const char *name);
+int   putenv(char *string);
+int   clearenv(void);
 double strtod(const char *nptr, char **endptr);
 void abort(void);
 

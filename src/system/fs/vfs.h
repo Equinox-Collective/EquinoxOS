@@ -38,4 +38,16 @@ void vfs_register_device(vfs_node_t* node);
 void vfs_ls(void);
 uint8_t* vfs_read_file(const char* name, uint32_t* out_size);
 
+/* Этап 3 (cwd): нормализация логического пути.
+ * Соединяет cwd (абсолютный, напр. "/" или "/bin") с path (абсолютным или
+ * относительным), сворачивает "." и "..", убирает повторные/хвостовые '/'.
+ * Результат — нормализованный абсолютный путь ("/..."). Возвращает длину
+ * (>=1) или -1 при переполнении out. */
+int vfs_normalize(const char* cwd, const char* path, char* out, int outsz);
+
+/* Существует ли каталог logical (нормализованный абсолютный путь)? "/" —
+ * всегда да. Иначе истина, если в плоском ext2-namespace есть хотя бы одна
+ * запись с именем, начинающимся на "<logical без ведущего '/'>/". */
+int vfs_dir_exists(const char* logical);
+
 #endif

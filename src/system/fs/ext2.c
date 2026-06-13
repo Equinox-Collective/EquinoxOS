@@ -117,7 +117,12 @@ struct vfs_dirent* ext2_vfs_readdir(vfs_node_t* node, uint32_t index) {
 // O(N^2) чтений ATA PIO на каждый открываемый файл. При большом числе файлов
 // в образе это давало десятки тысяч медленных PIO-чтений (~30 c на старте GUI).
 // finddir читает каталог один раз и сразу отдаёт узел с inode и размером.
-static vfs_node_t shared_find_node;
+/* Этап 8: кольцо узлов вместо одного static — при двух одновременных execve
+ * (пайплайн `ls | grep`) планировщик перемежал finddir двух процессов, и
+ * второй вызов затирал узел первого ещё до чтения файла («file not found» /
+ * «not a valid ELF» на существующих файлах). */
+static vfs_node_t shared_find_nodes[8];
+static uint32_t   shared_find_idx = 0;
 struct vfs_node* ext2_vfs_finddir(vfs_node_t* node, char* name) {
     ext2_inode_t dir_inode;
     ext2_read_inode(node->inode, &dir_inode);
@@ -144,14 +149,15 @@ struct vfs_node* ext2_vfs_finddir(vfs_node_t* node, char* name) {
                     ext2_inode_t file_inode;
                     ext2_read_inode(entry->inode, &file_inode);
 
-                    memset(&shared_find_node, 0, sizeof(shared_find_node));
-                    strcpy(shared_find_node.name, ename);
-                    shared_find_node.inode = entry->inode;
-                    shared_find_node.size  = file_inode.size;
-                    shared_find_node.read  = ext2_vfs_read;
+                    vfs_node_t *fn = &shared_find_nodes[shared_find_idx++ & 7u];
+                    memset(fn, 0, sizeof(*fn));
+                    strcpy(fn->name, ename);
+                    fn->inode = entry->inode;
+                    fn->size  = file_inode.size;
+                    fn->read  = ext2_vfs_read;
 
                     kfree(buffer);
-                    return &shared_find_node;
+                    return fn;
                 }
             }
             offset += entry->rec_len;
@@ -305,27 +311,29 @@ uint32_t ext2_resolve_path(const char* path) {
     uint32_t current_inode_num = 2; // Start at root
     ext2_inode_t current_inode;
     
-    char* path_copy = kmalloc(strlen(path) + 1);
-    strcpy(path_copy, path);
-    
-    char* token = strtok(path_copy, "/");
-    while (token != NULL) {
+    /* Этап 8: локальный токенайзер вместо strtok — strtok держит общее
+     * статическое состояние, и при двух одновременных execve (пайплайн
+     * `ls | grep`) процессы затирали его друг другу: оба resolve падали. */
+    char path_copy[256];
+    size_t plen = strlen(path);
+    if (plen >= sizeof(path_copy)) return 0;
+    memcpy(path_copy, path, plen + 1);
+
+    char *p = path_copy;
+    while (*p) {
+        while (*p == '/') p++;                 /* пропустить разделители */
+        if (!*p) break;
+        char *token = p;
+        while (*p && *p != '/') p++;
+        if (*p) { *p = '\0'; p++; }
+
         ext2_read_inode(current_inode_num, &current_inode);
-        if (!(current_inode.mode & EXT2_S_IFDIR)) {
-            kfree(path_copy);
-            return 0;
-        }
-        
+        if (!(current_inode.mode & EXT2_S_IFDIR)) return 0;
+
         current_inode_num = ext2_find_entry(&current_inode, token);
-        if (current_inode_num == 0) {
-            kfree(path_copy);
-            return 0;
-        }
-        
-        token = strtok(NULL, "/");
+        if (current_inode_num == 0) return 0;
     }
-    
-    kfree(path_copy);
+
     return current_inode_num;
 }
 
@@ -576,8 +584,17 @@ uint32_t ext2_write(uint32_t inode_num, uint32_t offset, uint32_t size, uint8_t*
 
 void ext2_overwrite(const char* name, const char* data, uint32_t size) {
     uint32_t existing_ino = ext2_resolve_path(name);
+    /* Этап 8: образ у нас ПЛОСКИЙ (WINDOWS_ext2.py кладёт все файлы в корень
+     * с полным путём в имени: «bin/foo.elf», «tmp/x»). resolve_path такие
+     * имена не находит, поэтому дополнительно ищем плоскую запись в корне —
+     * иначе каждый rewrite плодил дубликат, а чтение видело старый inode. */
+    if (existing_ino == 0) {
+        ext2_inode_t root_inode;
+        ext2_read_inode(2, &root_inode);
+        existing_ino = ext2_find_entry(&root_inode, name + 1);
+    }
     uint32_t ino = existing_ino;
-    
+
     if (ino == 0) {
         ino = ext2_allocate_inode();
         if (ino == 0) return;
@@ -588,7 +605,8 @@ void ext2_overwrite(const char* name, const char* data, uint32_t size) {
         new_inode.size = 0;
         new_inode.links_count = 1;
         ext2_write_inode(ino, &new_inode);
-        
+
+        /* Плоская запись в корне с полным путём в имени — как делает packer. */
         ext2_add_entry(2, ino, name + 1, 1);
         ext2_save_bgd();
     } else {

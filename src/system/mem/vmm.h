@@ -27,6 +27,13 @@ void *vmm_alloc_large_buffer(uint64_t size);
 
 void vmm_map(page_table_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags);
 page_table_t *vmm_create_address_space(void);
+
+/* Этап 1: глубокая копия пользовательской половины (PML4[0..255]) адресного
+ * пространства parent_cr3_phys. Старшая половина (ядро/HHDM, индексы 256..511)
+ * разделяется как и в vmm_create_address_space. Каждая present USER-страница
+ * physически копируется (eager copy, без COW). Возвращает VIRT-указатель на
+ * новый PML4 или NULL при нехватке памяти. */
+page_table_t *vmm_clone_address_space(uint64_t parent_cr3_phys);
 uint64_t vmm_get_phys(page_table_t *pml4, uint64_t virt);
 void vmm_destroy_address_space(uint64_t cr3_phys);
 

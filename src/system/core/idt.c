@@ -9,6 +9,7 @@ extern void timer_handler();
 extern void mouse_handler();
 extern void irq0_handler_asm();
 extern void syscall_interrupt_asm();
+extern void linux_syscall_interrupt_asm();
 
 void set_idt_gate(int n, uint64_t handler, uint16_t sel) {
   idt[n].low_offset = (uint16_t)(handler & 0xFFFF);
@@ -45,6 +46,11 @@ void init_idt() {
   set_idt_gate(0x80, (uint64_t)syscall_interrupt_asm, sel);
   idt[0x80].flags = 0xEF;
 
+  /* Этап 6a: Linux-ABI шлюз (int 0x81) для musl. Тот же ring3-доступный
+   * trap gate (0xEF), что и 0x80. */
+  set_idt_gate(0x81, (uint64_t)linux_syscall_interrupt_asm, sel);
+  idt[0x81].flags = 0xEF;
+
   __asm__ __volatile__("lidt %0" : : "m"(idt_reg));
 }
 
@@ -53,4 +59,13 @@ void init_idt() {
 // действует сразу — CPU читает дескриптор при каждом int 0x80, lidt не нужен.
 void idt_set_syscall_trap_gate(int on) {
   idt[0x80].flags = on ? 0xEF : 0xEE;
+  /* Этап 8: Linux-шлюз 0x81 ОБЯЗАН переключаться вместе с 0x80. Раньше он
+   * навсегда оставался trap gate (IF=1 внутри сисколла), и таймер вытеснял
+   * процесс ПОСРЕДИ fork/execve/kmalloc/pmm_alloc. При пайплайне из двух
+   * внешних команд (`ls | grep`) два процесса гонялись в аллокаторах ядра,
+   * получали одну и ту же физическую страницу и падали в GPF/PF. С interrupt
+   * gate сисколл на UP-ядре атомарен; блокирующие пути (пайпы, tty, sleep,
+   * waitpid) явно зовут yield()/wq_sleep, а сетевые ожидания делают sti+hlt
+   * сами, так что вытеснение там, где оно нужно, сохраняется. */
+  idt[0x81].flags = on ? 0xEF : 0xEE;
 }

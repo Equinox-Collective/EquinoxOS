@@ -30,6 +30,19 @@
 #define SYS_GET_TOTAL_MEM 35
 #define SYS_EXEC 50
 
+/* --- Этап 1: процессная модель (fork / waitpid / getpid) ----------------- *
+ *   51 SYS_FORK     ()                  -> pid ребёнка (родителю) / 0 (ребёнку) / -1
+ *   52 SYS_WAITPID  (pid, int *status)  -> pid завершившегося / -1 (ECHILD)
+ *   53 SYS_GETPID   ()                  -> pid текущего процесса
+ * pid == 0 в waitpid означает "любой ребёнок". status получает код,
+ * переданный в exit(). */
+#define SYS_FORK    51
+#define SYS_WAITPID 52
+#define SYS_GETPID  53
+/* 54 SYS_EXECVE (path, argv, envp) — заменяет образ текущего процесса.
+ * При успехе НЕ возвращается; при ошибке возвращает -1. */
+#define SYS_EXECVE  54
+
 /* --- IPC (added in HAL/sync/ipc patch set) --- */
 #define SYS_PIPE_CREATE 60
 #define SYS_PIPE_READ   61
@@ -107,6 +120,23 @@
 #define SYS_SEEK       94
 #define SYS_FSTAT      95
 #define SYS_STAT_PATH  96
+/* Этап 2: процессная fd-таблица — пайпы и дублирование дескрипторов. */
+#define SYS_PIPE       97   /* (int fds[2])      -> 0 / -1                 */
+#define SYS_DUP        98   /* (oldfd)           -> newfd / -1            */
+#define SYS_DUP2       99   /* (oldfd, newfd)    -> newfd / -1            */
+
+/* Этап 3: cwd. */
+#define SYS_GETCWD     100  /* (char *buf, size) -> len / -1              */
+#define SYS_CHDIR      101  /* (const char *path)-> 0 / -1                */
+
+/* --- Этап 4: сигналы --------------------------------------------------- */
+#define SYS_KILL       102  /* (pid, sig)                  -> 0 / -1       */
+#define SYS_SIGACTION  103  /* (sig, handler, restorer, &old) -> 0 / -1    */
+#define SYS_SIGRETURN  104  /* ()  — возврат из обработчика (не возвращ.)  */
+#define SYS_SIGPROCMASK 105 /* (how, set, &old)            -> 0            */
+
+/* --- Этап 5: tty / termios -------------------------------------------- */
+#define SYS_IOCTL      106  /* (fd, request, argp)         -> 0 / -1       */
 
 typedef struct {
   uint64_t pid;
@@ -136,6 +166,22 @@ static inline uint64_t _syscall(uint64_t num, uint64_t a1, uint64_t a2,
 
 static inline void *get_system_font() {
   return (void *)_syscall(SYS_GET_FONT, 0, 0, 0, 0, 0);
+}
+
+/* --- Этап 1: тонкие обёртки процессной модели ---------------------------- */
+static inline int64_t sys_fork(void) {
+  return (int64_t)_syscall(SYS_FORK, 0, 0, 0, 0, 0);
+}
+static inline int64_t sys_waitpid(int64_t pid, int *status) {
+  return (int64_t)_syscall(SYS_WAITPID, (uint64_t)pid, (uint64_t)status, 0, 0, 0);
+}
+static inline int64_t sys_getpid(void) {
+  return (int64_t)_syscall(SYS_GETPID, 0, 0, 0, 0, 0);
+}
+static inline int64_t sys_execve(const char *path, char *const argv[],
+                                 char *const envp[]) {
+  return (int64_t)_syscall(SYS_EXECVE, (uint64_t)path, (uint64_t)argv,
+                           (uint64_t)envp, 0, 0);
 }
 
 static inline void write_file(const char *name, void *buf, uint32_t size) {
@@ -232,6 +278,43 @@ static inline int sys_fstat(int fd, uint32_t *out_size) {
 }
 static inline int sys_stat_path(const char *path, uint32_t *out_size) {
   return (int)_syscall(SYS_STAT_PATH, (uint64_t)path, (uint64_t)out_size, 0, 0, 0);
+}
+/* Этап 2: pipe / dup / dup2. */
+static inline int sys_pipe(int fds[2]) {
+  return (int)_syscall(SYS_PIPE, (uint64_t)fds, 0, 0, 0, 0);
+}
+static inline int sys_dup(int oldfd) {
+  return (int)_syscall(SYS_DUP, (uint64_t)oldfd, 0, 0, 0, 0);
+}
+static inline int sys_dup2(int oldfd, int newfd) {
+  return (int)_syscall(SYS_DUP2, (uint64_t)oldfd, (uint64_t)newfd, 0, 0, 0);
+}
+
+/* Этап 3: cwd. */
+static inline int sys_getcwd(char *buf, uint32_t size) {
+  return (int)_syscall(SYS_GETCWD, (uint64_t)buf, (uint64_t)size, 0, 0, 0);
+}
+static inline int sys_chdir(const char *path) {
+  return (int)_syscall(SYS_CHDIR, (uint64_t)path, 0, 0, 0, 0);
+}
+
+/* Этап 4: сигналы. */
+static inline int sys_kill(uint64_t pid, int sig) {
+  return (int)_syscall(SYS_KILL, pid, (uint64_t)sig, 0, 0, 0);
+}
+static inline int sys_sigaction(int sig, uint64_t handler, uint64_t restorer,
+                                uint64_t *old_out) {
+  return (int)_syscall(SYS_SIGACTION, (uint64_t)sig, handler, restorer,
+                       (uint64_t)old_out, 0);
+}
+static inline int sys_sigprocmask(int how, uint64_t set, uint64_t *old_out) {
+  return (int)_syscall(SYS_SIGPROCMASK, (uint64_t)how, set, (uint64_t)old_out,
+                       0, 0);
+}
+
+/* Этап 5: ioctl (termios/winsize). */
+static inline int sys_ioctl(int fd, uint64_t request, void *argp) {
+  return (int)_syscall(SYS_IOCTL, (uint64_t)fd, request, (uint64_t)argp, 0, 0);
 }
 
 #endif
