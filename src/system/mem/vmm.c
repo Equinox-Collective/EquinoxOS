@@ -139,6 +139,52 @@ page_table_t *vmm_create_address_space() {
   return new_pml4;
 }
 
+page_table_t *vmm_clone_address_space(uint64_t parent_cr3_phys) {
+  page_table_t *child = vmm_create_address_space();
+  if (!child)
+    return NULL;
+
+  page_table_t *parent = (page_table_t *)VIRT(parent_cr3_phys);
+
+  /* Обходим только пользовательскую половину (PML4 0..255). Старшая
+   * половина (ядро) уже скопирована по ссылке в vmm_create_address_space. */
+  for (int i = 0; i < 256; i++) {
+    if (!(parent[i] & PTE_PRESENT))
+      continue;
+    page_table_t *pdpt = (page_table_t *)VIRT(parent[i] & ~0xFFFULL);
+    for (int j = 0; j < 512; j++) {
+      if (!(pdpt[j] & PTE_PRESENT))
+        continue;
+      page_table_t *pd = (page_table_t *)VIRT(pdpt[j] & ~0xFFFULL);
+      for (int k = 0; k < 512; k++) {
+        if (!(pd[k] & PTE_PRESENT))
+          continue;
+        page_table_t *pt = (page_table_t *)VIRT(pd[k] & ~0xFFFULL);
+        for (int l = 0; l < 512; l++) {
+          if (!(pt[l] & PTE_PRESENT))
+            continue;
+
+          uint64_t flags = pt[l] & 0xFFFULL;          /* сохраняем атрибуты PTE */
+          uint64_t src_phys = pt[l] & ~0xFFFULL;
+          uint64_t virt = ((uint64_t)i << 39) | ((uint64_t)j << 30) |
+                          ((uint64_t)k << 21) | ((uint64_t)l << 12);
+
+          void *dst_phys = pmm_alloc();
+          if (!dst_phys) {
+            /* OOM посреди клонирования — откатываем уже выделенное. */
+            vmm_destroy_address_space(PHYS(child));
+            return NULL;
+          }
+          memcpy((void *)VIRT((uint64_t)dst_phys), (void *)VIRT(src_phys),
+                 PAGE_SIZE);
+          vmm_map(child, virt, (uint64_t)dst_phys, flags);
+        }
+      }
+    }
+  }
+  return child;
+}
+
 uint64_t vmm_get_phys(page_table_t *pml4, uint64_t virt) {
   uint64_t pml4_idx = (virt >> 39) & 0x1FF;
   uint64_t pdpt_idx = (virt >> 30) & 0x1FF;

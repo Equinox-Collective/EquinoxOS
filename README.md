@@ -6,14 +6,14 @@
 
 **A hobby monolithic kernel for x86_64 — with a real GUI, preemptive multitasking, networking, and audio.**
 
-[![License: GPL-2.0](https://img.shields.io/github/license/Equinox-Collective/EquinoxOS?style=for-the-badge&color=ff6b35&logo=gnu)](LICENSE)
-[![Kernel](https://img.shields.io/badge/Kernel-Monolithic-crimson?style=for-the-badge)](src/kernel.c)
-![Arch](https://img.shields.io/badge/Arch-x86__64-5c6bc0?style=for-the-badge)
-[![Boot](https://img.shields.io/badge/Bootloader-Limine-1a1a2e?style=for-the-badge)](src/boot/limine/limine.h)
-![Language](https://img.shields.io/badge/Language-C%20%2B%20ASM-00897b?style=for-the-badge&logo=c&logoColor=white)
-![Status](https://img.shields.io/badge/Status-Active%20Development-f9a825?style=for-the-badge)
-[![Ring3](https://img.shields.io/badge/Ring%203-User%20Mode-8e24aa?style=for-the-badge)](src/system/usr/task.c)
-[![Sound](https://img.shields.io/badge/Audio-AC97-e53935?style=for-the-badge)](src/system/drivers/devices/audio/ac97.c)
+[![License: GPL-2.0](https://img.shields.io/github/license/Equinox-Collective/EquinoxOS?style=for-the-badge&color=ff6b35&logo=gnu)](#)
+[![Kernel](https://img.shields.io/badge/Kernel-Monolithic-crimson?style=for-the-badge)](#)
+[![Arch](https://img.shields.io/badge/Arch-x86__64-5c6bc0?style=for-the-badge)](#)
+[![Boot](https://img.shields.io/badge/Bootloader-Limine-1a1a2e?style=for-the-badge)](#)
+[![Language](https://img.shields.io/badge/Language-C%20%2B%20ASM-00897b?style=for-the-badge&logo=c&logoColor=white)](#)
+[![Status](https://img.shields.io/badge/Status-Active%20Development-f9a825?style=for-the-badge)](#)
+[![Ring3](https://img.shields.io/badge/Ring%203-User%20Mode-8e24aa?style=for-the-badge)](#)
+[![Sound](https://img.shields.io/badge/Audio-AC97-e53935?style=for-the-badge)](#)
 
 </div>
 

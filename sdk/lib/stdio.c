@@ -129,13 +129,19 @@ int printf(const char* format, ...) {
     va_start(args, format);
     int len = vsprintf(buffer, format, args);
     va_end(args);
-    _syscall(1, (uint64_t)buffer, 0, 0, 0, 0); 
+    /* Этап 2: вывод через fd 1 (а не SYS_PRINT) — чтобы printf уважал
+     * перенаправление stdout (dup2 в пайп/файл). Консольный fd 1 ядро
+     * по-прежнему печатает на экран. */
+    int n = len;
+    if (n < 0) n = 0;
+    if (n > (int)sizeof(buffer) - 1) n = (int)sizeof(buffer) - 1;
+    sys_write_fd(1, buffer, (uint32_t)n);
     return len;
 }
 
 int putchar(int c) {
-    char buf[2] = {(char)c, 0};
-    _syscall(1, (uint64_t)buf, 0, 0, 0, 0);
+    char buf[1] = {(char)c};
+    sys_write_fd(1, buf, 1);
     return c;
 }
 
@@ -156,7 +162,12 @@ int vfprintf(FILE* stream, const char* format, va_list ap) {
     char buffer[2048];
     int len = vsprintf(buffer, format, ap);
     if (stream == stdout || stream == stderr || !stream) {
-        _syscall(1, (uint64_t)buffer, 0, 0, 0, 0);
+        /* Этап 2: через fd (1/2), чтобы уважать перенаправление. */
+        int fd = (stream == stderr) ? 2 : 1;
+        int n = len;
+        if (n < 0) n = 0;
+        if (n > (int)sizeof(buffer) - 1) n = (int)sizeof(buffer) - 1;
+        sys_write_fd(fd, buffer, (uint32_t)n);
     } else {
         fwrite(buffer, 1, len, stream);
     }

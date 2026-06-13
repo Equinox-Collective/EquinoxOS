@@ -323,11 +323,12 @@ doom.elf: setup $(SDK_OBJS) $(DOOM_OBJS)
 # --- APPS BUILD RULES --------------------------------------------------------
 APP_SRCS = $(wildcard app/*.c)
 APP_OBJS = $(patsubst app/%.c,app/%.o,$(APP_SRCS))
-APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_ROOT)/bin/htmlview.elf $(ISO_ROOT)/bin/niplay.elf $(ISO_ROOT)/bin/widget_demo.elf $(ISO_ROOT)/bin/ipc_test.elf $(ISO_ROOT)/bin/randtest.elf $(ISO_ROOT)/bin/socktest.elf $(ISO_ROOT)/bin/sdltest.elf
+APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_ROOT)/bin/htmlview.elf $(ISO_ROOT)/bin/niplay.elf $(ISO_ROOT)/bin/widget_demo.elf $(ISO_ROOT)/bin/ipc_test.elf $(ISO_ROOT)/bin/randtest.elf $(ISO_ROOT)/bin/socktest.elf $(ISO_ROOT)/bin/sdltest.elf $(ISO_ROOT)/bin/forktest.elf $(ISO_ROOT)/bin/exectest.elf $(ISO_ROOT)/bin/pipetest.elf $(ISO_ROOT)/bin/envtest.elf $(ISO_ROOT)/bin/sigtest.elf $(ISO_ROOT)/bin/ttytest.elf $(ISO_ROOT)/bin/lxtest.elf $(ISO_ROOT)/bin/stktest.elf $(ISO_ROOT)/bin/fstest.elf $(ISO_ROOT)/bin/mmfork.elf
 
 # Apps that link against libbearssl.a (phase 3b+). These get their own
 # explicit rules below because they need (a) BearSSL public headers in the
 # include path and (b) libbearssl.a appended at link time.
+APP_ELFS_MUSL   = $(ISO_ROOT)/bin/musltest.elf $(ISO_ROOT)/bin/stattest.elf $(ISO_ROOT)/bin/dirtest.elf $(ISO_ROOT)/bin/ltsig.elf $(ISO_ROOT)/bin/ltjob.elf $(ISO_ROOT)/bin/ltjob2.elf $(ISO_ROOT)/bin/bash.elf $(ISO_ROOT)/bin/busybox.elf
 APP_ELFS_TLS    = $(ISO_ROOT)/bin/tlsboot.elf $(ISO_ROOT)/bin/tlstest.elf $(ISO_ROOT)/bin/catest.elf $(ISO_ROOT)/bin/httpsget.elf $(ISO_ROOT)/bin/urlget.elf $(ISO_ROOT)/bin/browser.elf
 APP_ELFS_QJS    = $(ISO_ROOT)/bin/jstest.elf $(ISO_ROOT)/bin/domtest.elf $(ISO_ROOT)/bin/jsdomtest.elf $(ISO_ROOT)/bin/jsfetchtest.elf $(ISO_ROOT)/bin/jspagetest.elf
 
@@ -350,10 +351,101 @@ $(KERNEL_OBJS) $(SDK_OBJS) $(APP_OBJS) $(DOOM_OBJS): | setup
 
 # BearSSL / TLS / QuickJS deps are dynamic (see SKIP= switch above) so a
 # `make SKIP=bearssl` minimal build drops them cleanly.
-apps: setup $(SDK_OBJS) $(BEARSSL_DEP) $(QUICKJS_DEP) $(SDL_LIB) $(APP_ELFS_SIMPLE) $(TLS_APPS_DEP) $(QJS_APPS_DEP) sysgui_app
+apps: setup $(SDK_OBJS) $(BEARSSL_DEP) $(QUICKJS_DEP) $(SDL_LIB) $(APP_ELFS_SIMPLE) $(APP_ELFS_MUSL) $(TLS_APPS_DEP) $(QJS_APPS_DEP) sysgui_app
 
 $(ISO_ROOT)/bin/%.elf: app/%.o $(SDK_OBJS)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< -o $@
+
+# stktest.elf — Этап 6b-1: тест SysV initial stack. Определяет СВОЙ _start
+# (читает argc/argv/envp/auxv прямо со стека, как musl), поэтому линкуется БЕЗ
+# SDK_OBJS — иначе конфликт символа _start с crt0.
+$(ISO_ROOT)/bin/stktest.elf: app/stktest.o
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start app/stktest.o -o $@
+
+# fstest.elf — Этап 6b: тест выживания FS_BASE (TLS) через переключения
+# контекста. Тоже свой _start, без SDK_OBJS.
+$(ISO_ROOT)/bin/fstest.elf: app/fstest.o
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start app/fstest.o -o $@
+
+# musltest.elf — Этап 6b-2: первый запуск НАСТОЯЩЕЙ musl libc.
+# Линкуется с предсобранной vendored-musl (third_party/musl) — собирать musl
+# на Windows НЕ нужно. _start/crt1 musl читает SysV-кадр (6b-1) и ставит TLS.
+#   * Компилируем БЕЗ SDK-инклудов: -nostdinc + только musl-заголовки.
+#   * Своё правило app/musltest.o перекрывает общий шаблон app/%.o.
+MUSL_DIR  = third_party/musl
+MUSL_LIB  = $(MUSL_DIR)/lib
+MUSL_CFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector \
+              -fno-pic -g -nostdinc -isystem $(MUSL_DIR)/include
+
+app/musltest.o: app/musltest.c
+	$(CC) $(MUSL_CFLAGS) -c $< -o $@
+
+$(ISO_ROOT)/bin/musltest.elf: app/musltest.o $(MUSL_LIB)/libc.a
+	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 \
+	  $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/musltest.o \
+	  $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
+
+# stattest.elf — Этап 6c-1: stdio-файлы musl + Linux struct stat. Та же схема
+# линковки с vendored-musl, что и у musltest.
+app/stattest.o: app/stattest.c
+	$(CC) $(MUSL_CFLAGS) -c $< -o $@
+
+$(ISO_ROOT)/bin/stattest.elf: app/stattest.o $(MUSL_LIB)/libc.a
+	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 \
+	  $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/stattest.o \
+	  $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
+
+# dirtest.elf — Этап 6c-2: каталоги через musl opendir/readdir (getdents64).
+# Та же схема линковки с vendored-musl, что и у stattest/musltest.
+app/dirtest.o: app/dirtest.c
+	$(CC) $(MUSL_CFLAGS) -c $< -o $@
+
+$(ISO_ROOT)/bin/dirtest.elf: app/dirtest.o $(MUSL_LIB)/libc.a
+	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 \
+	  $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/dirtest.o \
+	  $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
+
+# ltsig.elf — Этап 6d: настоящий rt_sigaction/rt_sigprocmask через vendored-musl.
+app/ltsig.o: app/ltsig.c
+	$(CC) $(MUSL_CFLAGS) -c $< -o $@
+
+$(ISO_ROOT)/bin/ltsig.elf: app/ltsig.o $(MUSL_LIB)/libc.a
+	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 \
+	  $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/ltsig.o \
+	  $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
+
+# ltjob.elf — Этап 6e-1: fork/wait4 (wait-status) + группы процессов (pgid).
+app/ltjob.o: app/ltjob.c
+	$(CC) $(MUSL_CFLAGS) -c $< -o $@
+
+$(ISO_ROOT)/bin/ltjob.elf: app/ltjob.o $(MUSL_LIB)/libc.a
+	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 \
+	  $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/ltjob.o \
+	  $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
+
+# ltjob2.elf — Этап 6e-2: tcsetpgrp/tcgetpgrp (ioctl) + WNOHANG в wait4.
+app/ltjob2.o: app/ltjob2.c
+	$(CC) $(MUSL_CFLAGS) -c $< -o $@
+
+$(ISO_ROOT)/bin/ltjob2.elf: app/ltjob2.o $(MUSL_LIB)/libc.a
+	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 \
+	  $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/ltjob2.o \
+	  $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
+
+# bash.elf — Этап 7: НАСТОЯЩИЙ GNU bash 5.2.37 поверх vendored-musl.
+# third_party/bash/bash.o — предсобранный relocatable-объект (ld -r всех
+# .o bash'а, без libc), собирать bash на Windows НЕ нужно. Как он сделан —
+# см. third_party/bash/BUILD_NOTES.md. Линкуется по той же схеме, что и
+# musltest: musl crt1 + libc.a, статически, Ttext=0x1000000.
+$(ISO_ROOT)/bin/bash.elf: third_party/bash/bash.o $(MUSL_LIB)/libc.a
+	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 \
+	  $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o third_party/bash/bash.o \
+	  $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
+
+$(ISO_ROOT)/bin/busybox.elf: third_party/busybox/busybox.o $(MUSL_LIB)/libc.a
+	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 \
+	  $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o third_party/busybox/busybox.o \
+	  $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
 
 app/%.o: app/%.c
 	$(CC) $(USER_CFLAGS) -c $< -o $@
@@ -617,7 +709,7 @@ QEMU_ACCEL := -accel whpx,kernel-irqchip=off -accel kvm -accel hvf -accel tcg
 # курсор в десктопе работает сразу (без `mouse_set` в мониторе). USB-мышь
 # смотри в run-usb.
 run:
-	$(QEMU) $(QEMU_BASE) -serial stdio $(QEMU_ACCEL)
+	$(QEMU) $(QEMU_BASE) -serial mon:stdio $(QEMU_ACCEL)
 
 # Загрузка С USB-мышью на UHCI: запускает загрузочный тест мыши
 # ("MOVE YOUR MOUSE" + dX/dY). ВАЖНО: пока гостевая ОС конфигурирует
@@ -628,12 +720,12 @@ run:
 # Поэтому обычный `make run` идёт БЕЗ USB-мыши (рабочий курсор в десктопе),
 # а тест мыши смотри здесь.
 run-usb:
-	$(QEMU) $(QEMU_BASE) -serial stdio -device usb-mouse,bus=uhci.0 $(QEMU_ACCEL)
+	$(QEMU) $(QEMU_BASE) -serial mon:stdio -device usb-mouse,bus=uhci.0 $(QEMU_ACCEL)
 
 # Run with pure software emulation (no hypervisor). Slower but more
 # deterministic — useful when WHPX/KVM behave oddly with network I/O.
 run-tcg:
-	$(QEMU) $(QEMU_BASE) -serial stdio -accel tcg
+	$(QEMU) $(QEMU_BASE) -serial mon:stdio -accel tcg
 
 # Запуск с записью COM1 в файл boot_serial.log — для профилирования загрузки.
 # После выхода открой boot_serial.log и смотри строки [T=...ms]:
@@ -642,7 +734,7 @@ run-log:
 	$(QEMU) $(QEMU_BASE) -serial file:boot_serial.log $(QEMU_ACCEL)
 
 run-debug:
-	$(QEMU) $(QEMU_BASE) -serial stdio -d int,guest_errors,mmu -D qemu.log
+	$(QEMU) $(QEMU_BASE) -serial mon:stdio -d int,guest_errors,mmu -D qemu.log
 
 cleanrun: clean all run
 

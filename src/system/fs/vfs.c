@@ -510,6 +510,8 @@ vfs_node_t *devfs_create_root(void) {
 
 uint8_t *vfs_read_file(const char *path, uint32_t *out_size) {
     if (!path || !out_size) return NULL;
+
+    /* --- v2 path: через dentry/inode_ops --- */
     vfs_file_t *f = vfs_open(path, VFS_O_RDONLY);
     if (f) {
         uint32_t sz = f->node->size;
@@ -520,6 +522,29 @@ uint8_t *vfs_read_file(const char *path, uint32_t *out_size) {
         vfs_read(f, buf, sz);
         vfs_close(f);
         return buf;
+    }
+
+    /* --- v1 fallback: через legacy linked list (ext2 finddir) ---
+     * Убираем ведущий '/' перед поиском, т.к. ext2 хранит плоские имена
+     * вида "bin/foo.elf" без ведущего слеша. */
+    const char *flat = path;
+    while (*flat == '/') flat++;
+    if (*flat == '\0') return NULL;
+
+    vfs_node_t *dev = vfs_root ? vfs_root->next : NULL;
+    while (dev) {
+        if (dev->finddir) {
+            vfs_node_t *fn = dev->finddir(dev, (char *)flat);
+            if (fn && fn->read && fn->size > 0) {
+                uint32_t sz = fn->size;
+                *out_size = sz;
+                uint8_t *buf = (uint8_t *)kmalloc(sz);
+                if (!buf) return NULL;
+                fn->read(fn, 0, sz, buf);
+                return buf;
+            }
+        }
+        dev = dev->next;
     }
     return NULL;
 }
@@ -533,7 +558,16 @@ int vfs_write_file(const char *path, const uint8_t *data, uint32_t size) {
 }
 
 void vfs_register_device(vfs_node_t *node) {
-    (void)node; // No-op in v2
+    if (!node) return;
+    /* Добавляем в конец списка vfs_root->next (v1 legacy). */
+    if (!vfs_root->next) {
+        vfs_root->next = node;
+    } else {
+        vfs_node_t *cur = vfs_root->next;
+        while (cur->next) cur = cur->next;
+        cur->next = node;
+    }
+    node->next = NULL;
 }
 
 /* ================================================================== */
@@ -554,4 +588,92 @@ void vfs_dump_mounts(void) {
 
 void vfs_ls(void) {
     term_print("[VFS] Directory listing not implemented fully in v2 debug helper.\n");
+}
+
+/* ===== Этап 3: нормализация путей и проверка каталогов (cwd) ============= */
+
+int vfs_normalize(const char* cwd, const char* path, char* out, int outsz) {
+    if (!out || outsz < 2) return -1;
+    /* 1. Собираем "сырой" абсолютный путь во временном буфере. */
+    char raw[512];
+    int n = 0;
+    if (path && path[0] == '/') {
+        /* абсолютный — cwd игнорируется */
+    } else {
+        const char* c = (cwd && cwd[0]) ? cwd : "/";
+        for (int i = 0; c[i] && n < (int)sizeof(raw) - 1; i++) raw[n++] = c[i];
+        if (n == 0 || raw[n - 1] != '/') {
+            if (n < (int)sizeof(raw) - 1) raw[n++] = '/';
+        }
+    }
+    if (path) {
+        for (int i = 0; path[i] && n < (int)sizeof(raw) - 1; i++) raw[n++] = path[i];
+    }
+    raw[n] = '\0';
+
+    /* 2. Токенизируем по '/', сворачивая "." и "..". Стек компонент в out. */
+    /* offs[] хранит позиции начала каждой компоненты в out (для pop ".."). */
+    int offs[64];
+    int depth = 0;
+    int olen = 0;
+    out[0] = '\0';
+    int i = 0;
+    while (raw[i]) {
+        while (raw[i] == '/') i++;          /* пропускаем слэши */
+        if (!raw[i]) break;
+        int start = i;
+        while (raw[i] && raw[i] != '/') i++;
+        int complen = i - start;
+        if (complen == 1 && raw[start] == '.') continue;          /* "." */
+        if (complen == 2 && raw[start] == '.' && raw[start + 1] == '.') {
+            if (depth > 0) { depth--; olen = offs[depth]; out[olen] = '\0'; }
+            continue;                                              /* ".." */
+        }
+        if (depth >= 64) return -1;
+        if (olen + 1 + complen >= outsz) return -1;
+        offs[depth++] = olen;
+        out[olen++] = '/';
+        for (int k = 0; k < complen; k++) out[olen++] = raw[start + k];
+        out[olen] = '\0';
+    }
+    if (olen == 0) { out[0] = '/'; out[1] = '\0'; olen = 1; }
+    return olen;
+}
+
+int vfs_dir_exists(const char* logical) {
+    if (!logical) return 0;
+    if (logical[0] == '/' && logical[1] == '\0') return 1;     /* корень */
+
+    /* Сначала пробуем v2-путь через dentry-дерево. */
+    vfs_dentry_t *d = vfs_resolve_path(logical);
+    if (d && d->node && (d->node->flags & VFS_FLAG_DIR)) return 1;
+
+    /* Фоллбэк: плоский ext2-namespace ("bin/foo.elf").
+     * Логический путь "/bin" -> prefix "bin/". Если хотя бы одна запись
+     * в v1-списке начинается на этот префикс — каталог «существует». */
+    const char* p = logical;
+    while (*p == '/') p++;
+    if (*p == '\0') return 1;   /* "/" уже обработан выше */
+
+    char prefix[258];
+    int n = 0;
+    for (; p[n] && n < (int)sizeof(prefix) - 2; n++) prefix[n] = p[n];
+    prefix[n++] = '/';
+    prefix[n] = '\0';
+
+    vfs_node_t* dev = vfs_root ? vfs_root->next : NULL;
+    while (dev) {
+        if (dev->readdir) {
+            for (int idx = 0; idx < 1024; idx++) {
+                vfs_dirent_t* de = (vfs_dirent_t*)dev->readdir(dev, idx);
+                if (!de) break;
+                /* запись начинается на prefix? */
+                int m = 0;
+                while (prefix[m] && de->name[m] == prefix[m]) m++;
+                if (prefix[m] == '\0') return 1;
+            }
+        }
+        dev = dev->next;
+    }
+    return 0;
 }

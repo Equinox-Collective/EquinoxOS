@@ -85,13 +85,21 @@ struct vfs_node {
     uint32_t          size;        /* размер в байтах */
     uint32_t          refcount;    /* счетчик ссылок */
 
-    vfs_inode_ops_t  *inode_ops;
-    vfs_file_ops_t   *file_ops;
+    vfs_inode_ops_t  *inode_ops;   /* v2: операции над директорией/метаданными */
+    vfs_file_ops_t   *file_ops;    /* v2: операции над открытым файлом */
 
     /* Данные бэкенда (опционально, например указатель на devops) */
     void             *impl;
 
-    /* Legacy-список (для devfs) - TODO: удалить в будущем */
+    /* v1 Legacy: прямые указатели на функции (используются ext2, fat32, fd.c).
+     * Параллельны v2-ops; оба набора валидны одновременно.
+     * TODO: удалить после полного перевода бэкендов на v2. */
+    uint32_t (*read)   (struct vfs_node *node, uint32_t off, uint32_t sz, uint8_t *buf);
+    uint32_t (*write)  (struct vfs_node *node, uint32_t off, uint32_t sz, uint8_t *buf);
+    struct vfs_dirent *(*readdir)(struct vfs_node *node, uint32_t idx);
+    struct vfs_node   *(*finddir)(struct vfs_node *node, char *name);
+
+    /* Legacy-список устройств (vfs_root->next -> ext2_node -> fat32_node -> NULL) */
     struct vfs_node  *next;
 };
 
@@ -132,6 +140,7 @@ typedef struct {
 /* ------------------------------------------------------------------ */
 
 void vfs_init(void);
+void vfs_register_device(vfs_node_t *node);
 
 /* Управление нодами (вызывается драйверами) */
 vfs_node_t *vfs_alloc_node(void);
@@ -155,26 +164,29 @@ int  vfs_stat(const char *path, vfs_stat_t *out);
 vfs_dirent_t *vfs_readdir(const char *path, uint32_t index);
 int  vfs_mkdir(const char *path);
 int  vfs_unlink(const char *path);
+extern vfs_node_t *vfs_root;
 
+uint8_t* vfs_read_file(const char* name, uint32_t* out_size);
+int vfs_write_file(const char *path, const uint8_t *data, uint32_t size);
+
+/* Legacy: регистрация v1-устройства в связном списке vfs_root->next.
+ * Позволяет fd.c обходить устройства через next/readdir/finddir.
+ * Новый код должен использовать vfs_mount вместо этого. */
+void vfs_register_device(vfs_node_t *node);
 /* Отладка */
 void vfs_dump_mounts(void);
 void vfs_ls(void);
 
-/* ------------------------------------------------------------------ */
-/* Legacy / compatibility                                              */
-/* ------------------------------------------------------------------ */
+/* Этап 3 (cwd): нормализация логического пути.
+ * Соединяет cwd (абсолютный, напр. "/" или "/bin") с path (абсолютным или
+ * относительным), сворачивает "." и "..", убирает повторные/хвостовые '/'.
+ * Результат — нормализованный абсолютный путь ("/..."). Возвращает длину
+ * (>=1) или -1 при переполнении out. */
+int vfs_normalize(const char* cwd, const char* path, char* out, int outsz);
 
-uint8_t *vfs_read_file(const char *path, uint32_t *out_size);
-int vfs_write_file(const char *path, const uint8_t *data, uint32_t size);
-void vfs_register_device(vfs_node_t *node);
+/* Существует ли каталог logical (нормализованный абсолютный путь)? "/" —
+ * всегда да. Иначе истина, если в плоском ext2-namespace есть хотя бы одна
+ * запись с именем, начинающимся на "<logical без ведущего '/'>/". */
+int vfs_dir_exists(const char* logical);
 
-extern vfs_node_t *vfs_root;
-
-/* ------------------------------------------------------------------ */
-/* devfs                                                               */
-/* ------------------------------------------------------------------ */
-
-vfs_node_t *devfs_create_root(void);
-
-#endif /* VFS_H */
-
+#endif

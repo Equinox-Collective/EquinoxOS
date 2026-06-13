@@ -16,7 +16,8 @@ void ext2_write_inode(uint32_t inode, ext2_inode_t* in_inode);
 uint32_t ext2_get_inode_block(ext2_inode_t* inode, uint32_t block);
 uint32_t ext2_read(uint32_t inode_num, uint32_t offset, uint32_t size, uint8_t* buffer);
 uint32_t ext2_vfs_read(vfs_node_t* node, uint32_t offset, uint32_t size, uint8_t* buffer);
-struct vfs_node* ext2_vfs_finddir(vfs_node_t* node, char* name);
+vfs_dirent_t* ext2_vfs_readdir(vfs_node_t* node, uint32_t index);
+vfs_node_t* ext2_vfs_finddir(vfs_node_t* node, char* name);
 uint32_t ext2_write(uint32_t inode_num, uint32_t offset, uint32_t size, uint8_t* buffer);
 uint32_t ext2_vfs_write(vfs_node_t* node, uint32_t offset, uint32_t size, uint8_t* buffer);
 uint32_t ext2_allocate_block(void);
@@ -98,7 +99,7 @@ static void ext2_build_dir_cache(vfs_node_t* node) {
     kfree(buffer);
 }
 
-struct vfs_dirent* ext2_vfs_readdir(vfs_node_t* node, uint32_t index) {
+vfs_dirent_t* ext2_vfs_readdir(vfs_node_t* node, uint32_t index) {
     // Перестраиваем кэш только если он от другого каталога или ещё пуст.
     if (ext2_dir_cache_inode != node->inode || ext2_dir_cache_inode == 0) {
         ext2_build_dir_cache(node);
@@ -111,14 +112,17 @@ struct vfs_dirent* ext2_vfs_readdir(vfs_node_t* node, uint32_t index) {
     return &shared_dirent;
 }
 
-// O(n) поиск ONE компонента пути в каталоге за ОДИН проход по блокам.
-// Возвращает ноду для одного имени компонента (не полного пути).
-static vfs_node_t shared_find_node;
+// O(n) поиск файла в каталоге за ОДИН проход по блокам каталога.
+/* Этап 8: кольцо узлов вместо одного static — при двух одновременных execve
+ * (пайплайн `ls | grep`) планировщик перемежал finddir двух процессов, и
+ * второй вызов затирал узел первого ещё до чтения файла. */
+static vfs_node_t shared_find_nodes[8];
+static uint32_t   shared_find_idx = 0;
 
+/* Внутренняя функция: ищет единственный компонент name в каталоге node. */
 static vfs_node_t *ext2_finddir_one(vfs_node_t *node, const char *name) {
     ext2_inode_t dir_inode;
     ext2_read_inode(node->inode, &dir_inode);
-
     if (!(dir_inode.mode & EXT2_S_IFDIR)) return NULL;
 
     uint8_t *buffer = kmalloc(block_size);
@@ -144,28 +148,17 @@ static vfs_node_t *ext2_finddir_one(vfs_node_t *node, const char *name) {
                     ext2_inode_t file_inode;
                     ext2_read_inode(entry->inode, &file_inode);
 
-                    memset(&shared_find_node, 0, sizeof(shared_find_node));
-                    size_t nl = entry->name_len;
-                    if (nl >= sizeof(shared_find_node.name)) nl = sizeof(shared_find_node.name) - 1;
-                    memcpy(shared_find_node.name, ename, nl);
-                    shared_find_node.name[nl] = '\0';
-                    shared_find_node.inode    = entry->inode;
-                    shared_find_node.size     = file_inode.size;
-                    /* Директория или файл */
-                    if (file_inode.mode & EXT2_S_IFDIR) {
-                        shared_find_node.flags   = 0x01; /* VFS_FLAG_DIR */
-                        shared_find_node.read    = ext2_vfs_read;
-                        shared_find_node.readdir = ext2_vfs_readdir;
-                        shared_find_node.finddir = ext2_vfs_finddir;
-                        shared_find_node.write   = ext2_vfs_write;
-                    } else {
-                        shared_find_node.flags = 0x00; /* VFS_FLAG_FILE */
-                        shared_find_node.read  = ext2_vfs_read;
-                        shared_find_node.write = ext2_vfs_write;
-                    }
+                    vfs_node_t *fn = &shared_find_nodes[shared_find_idx++ & 7u];
+                    memset(fn, 0, sizeof(*fn));
+                    strncpy(fn->name, ename, sizeof(fn->name) - 1);
+                    fn->inode = entry->inode;
+                    fn->size  = file_inode.size;
+                    fn->flags = (file_inode.mode & EXT2_S_IFDIR) ? VFS_FLAG_DIR : VFS_FLAG_FILE;
+                    fn->read  = ext2_vfs_read;
+                    fn->write = ext2_vfs_write;
 
                     kfree(buffer);
-                    return &shared_find_node;
+                    return fn;
                 }
             }
             offset += entry->rec_len;
@@ -178,17 +171,17 @@ static vfs_node_t *ext2_finddir_one(vfs_node_t *node, const char *name) {
 }
 
 /*
- * ext2_vfs_finddir — публичный VFS-хук.
- * name может содержать единственный компонент пути ("bin") или
- * полный подпуть ("bin/snake.elf"). VFS-слой сам режет на компоненты,
- * но если старый код передаёт "bin/snake.elf" напрямую, мы тоже
- * умеем его разрешить.
+ * ext2_vfs_finddir — публичный VFS-хук (v1 поле node->finddir).
+ * name может содержать единственный компонент ("bin") или
+ * полный подпуть ("bin/snake.elf"). В последнем случае разрезаем и спускаемся.
  */
 struct vfs_node *ext2_vfs_finddir(vfs_node_t *node, char *name) {
     if (!name || name[0] == '\0') return NULL;
 
     /* Нет '/' в имени → одиночный компонент, быстрый путь */
-    if (!strchr(name, '/')) {
+    const char *slash = name;
+    while (*slash && *slash != '/') slash++;
+    if (*slash == '\0') {
         return ext2_finddir_one(node, name);
     }
 
@@ -200,22 +193,112 @@ struct vfs_node *ext2_vfs_finddir(vfs_node_t *node, char *name) {
     buf[nl] = '\0';
 
     vfs_node_t *cur = node;
-    char *token = strtok(buf, "/");
-    while (token) {
+    char *token = buf;
+    while (token && *token) {
+        char *next_slash = token;
+        while (*next_slash && *next_slash != '/') next_slash++;
+        bool has_more = (*next_slash == '/');
+        *next_slash = '\0';
+        if (*token == '\0') { token = has_more ? next_slash + 1 : NULL; continue; }
         cur = ext2_finddir_one(cur, token);
         if (!cur) return NULL;
-        token = strtok(NULL, "/");
+        token = has_more ? next_slash + 1 : NULL;
     }
     return cur;
 }
 
+/* v2 inode_ops для ext2 (lookup через finddir) */
+static int ext2_v2_lookup(vfs_node_t *dir, const char *name, vfs_node_t **out) {
+    vfs_node_t *found = ext2_finddir_one(dir, name);
+    if (!found) return -1;
+    /* Выделяем отдельную копию, чтобы refcount работал */
+    vfs_node_t *copy = (vfs_node_t *)kmalloc(sizeof(vfs_node_t));
+    if (!copy) return -1;
+    memcpy(copy, found, sizeof(vfs_node_t));
+    copy->refcount = 1;
+    *out = copy;
+    return 0;
+}
+
+static int ext2_v2_create(vfs_node_t *dir, const char *name, uint32_t mode) {
+    (void)mode;
+    uint32_t ino = ext2_allocate_inode();
+    if (!ino) return -1;
+    ext2_inode_t new_inode;
+    memset(&new_inode, 0, sizeof(ext2_inode_t));
+    new_inode.mode = EXT2_S_IFREG | 0644;
+    new_inode.links_count = 1;
+    ext2_write_inode(ino, &new_inode);
+    ext2_add_entry(dir->inode, ino, name, 1);
+    ext2_dir_cache_invalidate();
+    return 0;
+}
+
+static int ext2_v2_mkdir(vfs_node_t *dir, const char *name, uint32_t mode) {
+    (void)mode;
+    uint32_t ino = ext2_allocate_inode();
+    if (!ino) return -1;
+    ext2_inode_t new_inode;
+    memset(&new_inode, 0, sizeof(ext2_inode_t));
+    new_inode.mode = EXT2_S_IFDIR | 0755;
+    new_inode.links_count = 2;
+    ext2_write_inode(ino, &new_inode);
+    ext2_add_entry(dir->inode, ino, name, 2);
+    ext2_dir_cache_invalidate();
+    return 0;
+}
+
+static int ext2_v2_unlink(vfs_node_t *dir, const char *name) {
+    (void)dir; (void)name;
+    return -1; /* TODO */
+}
+
+static int ext2_v2_stat(vfs_node_t *node, vfs_stat_t *st) {
+    ext2_inode_t inode;
+    ext2_read_inode(node->inode, &inode);
+    st->size  = inode.size;
+    st->inode = node->inode;
+    st->type  = (inode.mode & EXT2_S_IFDIR) ? VFS_FLAG_DIR : VFS_FLAG_FILE;
+    return 0;
+}
+
+static vfs_inode_ops_t ext2_inode_ops = {
+    .lookup = ext2_v2_lookup,
+    .create = ext2_v2_create,
+    .mkdir  = ext2_v2_mkdir,
+    .unlink = ext2_v2_unlink,
+    .stat   = ext2_v2_stat,
+};
+
+/* v2 file_ops для ext2 (обёртка вокруг ext2_read/ext2_write) */
+static uint32_t ext2_file_ops_read(vfs_file_t *f, uint32_t off, uint32_t sz, uint8_t *buf) {
+    return ext2_read(f->node->inode, off, sz, buf);
+}
+static uint32_t ext2_file_ops_write(vfs_file_t *f, uint32_t off, uint32_t sz, uint8_t *buf) {
+    return ext2_write(f->node->inode, off, sz, buf);
+}
+static vfs_dirent_t *ext2_file_ops_readdir(vfs_file_t *f, uint32_t idx) {
+    return ext2_vfs_readdir(f->node, idx);
+}
+
+static vfs_file_ops_t ext2_file_ops = {
+    .read    = ext2_file_ops_read,
+    .write   = ext2_file_ops_write,
+    .readdir = ext2_file_ops_readdir,
+};
+
 vfs_node_t* ext2_get_root_node() {
     if (!sb) return NULL;
-    vfs_node_t* node = kmalloc(sizeof(vfs_node_t));
+    vfs_node_t* node = (vfs_node_t*)kmalloc(sizeof(vfs_node_t));
     memset(node, 0, sizeof(vfs_node_t));
     strcpy(node->name, "ext2");
-    node->inode   = 2;    /* EXT2 root inode */
-    node->flags   = 0x01; /* VFS_FLAG_DIR */
+    node->inode      = 2;              /* EXT2 root inode */
+    node->flags      = VFS_FLAG_DIR;
+    node->refcount   = 1;
+    /* v2 ops */
+    node->inode_ops  = &ext2_inode_ops;
+    node->file_ops   = &ext2_file_ops;
+    /* v1 legacy ops (используются fd.c, vfs_read_file fallback) */
     node->read    = ext2_vfs_read;
     node->readdir = ext2_vfs_readdir;
     node->finddir = ext2_vfs_finddir;
@@ -350,27 +433,29 @@ uint32_t ext2_resolve_path(const char* path) {
     uint32_t current_inode_num = 2; // Start at root
     ext2_inode_t current_inode;
     
-    char* path_copy = kmalloc(strlen(path) + 1);
-    strcpy(path_copy, path);
-    
-    char* token = strtok(path_copy, "/");
-    while (token != NULL) {
+    /* Этап 8: локальный токенайзер вместо strtok — strtok держит общее
+     * статическое состояние, и при двух одновременных execve (пайплайн
+     * `ls | grep`) процессы затирали его друг другу: оба resolve падали. */
+    char path_copy[256];
+    size_t plen = strlen(path);
+    if (plen >= sizeof(path_copy)) return 0;
+    memcpy(path_copy, path, plen + 1);
+
+    char *p = path_copy;
+    while (*p) {
+        while (*p == '/') p++;                 /* пропустить разделители */
+        if (!*p) break;
+        char *token = p;
+        while (*p && *p != '/') p++;
+        if (*p) { *p = '\0'; p++; }
+
         ext2_read_inode(current_inode_num, &current_inode);
-        if (!(current_inode.mode & EXT2_S_IFDIR)) {
-            kfree(path_copy);
-            return 0;
-        }
-        
+        if (!(current_inode.mode & EXT2_S_IFDIR)) return 0;
+
         current_inode_num = ext2_find_entry(&current_inode, token);
-        if (current_inode_num == 0) {
-            kfree(path_copy);
-            return 0;
-        }
-        
-        token = strtok(NULL, "/");
+        if (current_inode_num == 0) return 0;
     }
-    
-    kfree(path_copy);
+
     return current_inode_num;
 }
 
@@ -621,8 +706,17 @@ uint32_t ext2_write(uint32_t inode_num, uint32_t offset, uint32_t size, uint8_t*
 
 void ext2_overwrite(const char* name, const char* data, uint32_t size) {
     uint32_t existing_ino = ext2_resolve_path(name);
+    /* Этап 8: образ у нас ПЛОСКИЙ (WINDOWS_ext2.py кладёт все файлы в корень
+     * с полным путём в имени: «bin/foo.elf», «tmp/x»). resolve_path такие
+     * имена не находит, поэтому дополнительно ищем плоскую запись в корне —
+     * иначе каждый rewrite плодил дубликат, а чтение видело старый inode. */
+    if (existing_ino == 0) {
+        ext2_inode_t root_inode;
+        ext2_read_inode(2, &root_inode);
+        existing_ino = ext2_find_entry(&root_inode, name + 1);
+    }
     uint32_t ino = existing_ino;
-    
+
     if (ino == 0) {
         ino = ext2_allocate_inode();
         if (ino == 0) return;
@@ -633,7 +727,8 @@ void ext2_overwrite(const char* name, const char* data, uint32_t size) {
         new_inode.size = 0;
         new_inode.links_count = 1;
         ext2_write_inode(ino, &new_inode);
-        
+
+        /* Плоская запись в корне с полным путём в имени — как делает packer. */
         ext2_add_entry(2, ino, name + 1, 1);
         ext2_save_bgd();
     } else {

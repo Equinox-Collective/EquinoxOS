@@ -16,6 +16,7 @@
 #include "system/mem/pmm.h"
 #include "system/mem/shm.h"
 #include "system/usr/task.h"
+#include "system/usr/tty.h"
 #include "system/misc/timer.h"
 #include "system/misc/random.h"
 #include "system/mem/vmm.h"
@@ -34,6 +35,7 @@
 #include "system/fs/ext2.h"
 #include "system/fs/vfs.h"
 #include "system/shell/shell.h"
+#include "system/shell/shellsyntx.h"  /* Этап 7: shell_execute_line для autoexec */
 
 // --- ДИСПЕТЧЕР ВВОДА USB ---
 volatile int g_usb_mouse_found = 0;
@@ -329,6 +331,7 @@ static void hw_init_task_entry(void) {
 
 void kmain(void) {
   serial_init(COM1);
+  tty_init();                 /* Этап 5: дефолтные настройки termios консоли */
   serial_puts(COM1, "\n=== EquinoxOS Kernel Starting ===\n");
 
   if (hhdm_request.response == NULL) {
@@ -448,8 +451,9 @@ void kmain(void) {
   serial_puts(COM1, "Shared memory initialized\n");
   ipc_init();
   serial_puts(COM1, "IPC (pipes + mqueue) initialized\n");
-  fd_table_init();
-  serial_puts(COM1, "FD table initialized\n");
+  /* Этап 2: глобальной fd-таблицы больше нет — у каждого процесса своя
+   * (task->fdt, создаётся в task_init/task_create/fork). */
+  serial_puts(COM1, "FD tables are now per-process\n");
   hal_init();
   serial_puts(COM1, "HAL initialized\n");
 
@@ -481,6 +485,42 @@ void kmain(void) {
         uint32_t v = boot_measured_ms;
         ext2_overwrite("/boottime", (const char *)&v, sizeof(v));
         char bb[80]; sprintf(bb, "Boot time (to first GUI frame) = %u ms\n", (unsigned)v); serial_puts(COM1, bb);
+      }
+    }
+    /* Этап 7: autoexec — если на диске лежит файл `autoexec`, после первого
+     * кадра GUI его строки скармливаются шеллу (как будто их ввели в
+     * терминале). Нужен для headless-тестов по COM1 (QEMU/CI): кладём в
+     * iso_root/autoexec строку `run bin/bash.elf` — и тест-харнесс общается
+     * с процессом по серийному порту без GUI. В обычной сборке файла нет. */
+    {
+      extern volatile uint32_t boot_measured_ms;
+      static int autoexec_done = 0;
+      if (!autoexec_done && boot_measured_ms != 0) {
+        autoexec_done = 1;
+        uint32_t asz = 0;
+        uint8_t *ax = vfs_read_file("autoexec", &asz);
+        if (ax) {
+          serial_puts(COM1, "[autoexec] found, executing\n");
+          char line[160];
+          uint32_t li = 0;
+          for (uint32_t i = 0; i <= asz; i++) {
+            char c = (i < asz) ? (char)ax[i] : '\n';
+            if (c == '\r') continue;
+            if (c == '\n') {
+              line[li] = '\0';
+              if (li > 0 && line[0] != '#') {
+                serial_puts(COM1, "[autoexec] $ ");
+                serial_puts(COM1, line);
+                serial_puts(COM1, "\n");
+                shell_execute_line(line, term_print);
+              }
+              li = 0;
+            } else if (li < sizeof(line) - 1) {
+              line[li++] = c;
+            }
+          }
+          kfree(ax);
+        }
       }
     }
     if (should_run_app) {

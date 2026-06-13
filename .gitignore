@@ -12,3 +12,9 @@ hdd.img
 *.d
 *.a
 third_party/bearssl/libbearssl.a
+
+# Vendored предсобранная musl (Этап 6b-2): эти артефакты ДОЛЖНЫ коммититься,
+# несмотря на общие правила *.o / *.a / *.d выше.
+!third_party/musl/lib/*.o
+!third_party/bash/bash.o
+!third_party/musl/lib/*.a

@@ -15,6 +15,9 @@
 
 int errno = 0;
 
+/* Этап 3: глобальное окружение (определено в env.c). */
+extern char **environ;
+
 int access(const char *pathname, int mode) {
     return 0; 
 }
@@ -129,15 +132,17 @@ size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
    * глобала перезаписан. */
   if (stream == stdout || stream == stderr || !stream ||
       (uintptr_t)stream < 0x1000) {
-    char tmp[1025];
+    /* Этап 2: пишем через fd (1=stdout, 2=stderr), а НЕ через SYS_PRINT, —
+     * чтобы вывод уважал перенаправление (dup2 в пайп/файл). Консольный
+     * конец fd 1/2 ядро по-прежнему печатает на экран. */
+    int fd = (stream == stderr) ? 2 : 1;
     size_t off = 0;
     while (off < total) {
       size_t chunk = total - off;
-      if (chunk > sizeof(tmp) - 1) chunk = sizeof(tmp) - 1;
-      memcpy(tmp, (const char *)ptr + off, chunk);
-      tmp[chunk] = '\0';
-      _syscall(1, (uint64_t)tmp, 0, 0, 0, 0);
-      off += chunk;
+      if (chunk > 0x40000) chunk = 0x40000; /* батчим крупные записи */
+      int wr = sys_write_fd(fd, (const char *)ptr + off, (uint32_t)chunk);
+      if (wr <= 0) break;
+      off += (size_t)wr;
     }
     return nmemb;
   }
@@ -267,7 +272,7 @@ time_t time(time_t *t) {
 }
 
 char *strerror(int errnum) { return "Unknown error"; }
-char *getenv(const char *name) { return NULL; }
+/* getenv/setenv/putenv/unsetenv/clearenv и `environ` живут в env.c (Этап 3). */
 
 double strtod(const char *nptr, char **endptr) {
   double res = atof(nptr);
@@ -279,8 +284,7 @@ double strtod(const char *nptr, char **endptr) {
 }
 
 void abort(void) { exit(1); }
-void (*signal(int sig, void (*func)(int)))(int) { return SIG_ERR; }
-int raise(int sig) { return -1; }
+/* signal/raise/kill/sigaction/sigprocmask реализованы в sdk/lib/signal.c (Этап 4). */
 clock_t clock(void) { return (clock_t)time(NULL); }
 struct tm *localtime(const time_t *t) { static struct tm tmp; return &tmp; }
 struct tm *gmtime(const time_t *t) { static struct tm tmp; return &tmp; }
@@ -502,35 +506,93 @@ int unlink(const char *pathname) {
 }
 
 int dup(int oldfd) {
-    /* Stub */
-    (void)oldfd;
-    return -1;
+    return sys_dup(oldfd);
 }
 
 int dup2(int oldfd, int newfd) {
-    (void)oldfd; (void)newfd;
-    return -1;
+    return sys_dup2(oldfd, newfd);
+}
+
+int pipe(int fds[2]) {
+    return sys_pipe(fds);
 }
 
 char *getcwd(char *buf, size_t size) {
-    if (!buf || size < 2) return NULL;
-    buf[0] = '/';
-    buf[1] = '\0';
+    /* Этап 3: настоящая cwd из ядра (per-process). */
+    if (!buf || size < 2) { errno = 22 /* EINVAL */; return NULL; }
+    int rc = sys_getcwd(buf, (uint32_t)size);
+    if (rc < 0) { errno = 34 /* ERANGE */; return NULL; }
     return buf;
 }
 
 int chdir(const char *path) {
-    (void)path;
-    return 0; /* single-root VFS, always "/" */
+    /* Этап 3: настоящая смена cwd; ядро проверяет существование каталога. */
+    if (!path) { errno = 14 /* EFAULT */; return -1; }
+    int rc = sys_chdir(path);
+    if (rc < 0) { errno = 2 /* ENOENT */; return -1; }
+    return 0;
 }
 
 pid_t getpid(void) {
-    /* Return a stable fake PID — good enough for most libs */
-    return 2;
+    /* Этап 1: настоящий pid из ядра (раньше возвращался фейк = 2). */
+    return (pid_t)sys_getpid();
+}
+
+/* --- Этап 1: процессная модель (POSIX-обёртки) --------------------------- *
+ * fork():  0 в ребёнке, pid ребёнка в родителе, -1 при ошибке.
+ * waitpid(): ждёт ребёнка, кодирует код выхода в *status как (code << 8),
+ *            чтобы работали стандартные WIFEXITED/WEXITSTATUS. */
+pid_t fork(void) {
+    return (pid_t)sys_fork();
+}
+
+pid_t waitpid(pid_t pid, int *status, int options) {
+    (void)options; /* WNOHANG пока не поддержан — всегда блокирующий */
+    int code = 0;
+    int64_t r = sys_waitpid((int64_t)pid, &code);
+    if (r >= 0 && status) {
+        /* Упаковываем как нормальный wait-status: младший байт = 0 (нет
+         * сигнала), следующий байт = код выхода. */
+        *status = (code & 0xFF) << 8;
+    }
+    return (pid_t)r;
+}
+
+pid_t wait(int *status) {
+    return waitpid(0, status, 0);
 }
 
 pid_t getppid(void) {
     return 1;
+}
+
+/* --- Этап 1b: execve и обёртки -------------------------------------------- *
+ * execve() заменяет образ текущего процесса. При успехе НЕ возвращается;
+ * при ошибке возвращает -1 (errno не выставляем — отдельной таблицы пока нет).
+ * execv()  — то же с текущим окружением (environ).
+ * execvp() — пробует имя как есть, затем с префиксом "bin/". */
+int execve(const char *path, char *const argv[], char *const envp[]) {
+    return (int)sys_execve(path, argv, envp);
+}
+
+int execv(const char *path, char *const argv[]) {
+    /* Этап 3: наследуем текущее окружение процесса. */
+    return (int)sys_execve(path, argv, (char *const *)environ);
+}
+
+int execvp(const char *file, char *const argv[]) {
+    char *const *envp = (char *const *)environ;
+    /* 1) как передано */
+    sys_execve(file, argv, envp);
+    /* 2) не нашлось -> пробуем bin/<file> */
+    char buf[256];
+    int i = 0;
+    const char *pfx = "bin/";
+    for (; pfx[i]; i++) buf[i] = pfx[i];
+    int j = 0;
+    for (; file[j] && (i + j) < 255; j++) buf[i + j] = file[j];
+    buf[i + j] = 0;
+    return (int)sys_execve(buf, argv, envp);
 }
 
 /* stat() — fills st_size from SYS_STAT_PATH, st_mode as regular file */
