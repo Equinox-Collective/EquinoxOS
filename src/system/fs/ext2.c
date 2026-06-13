@@ -27,6 +27,8 @@ void ext2_save_bgd(void);
 
 static ext2_superblock_t* sb = NULL;
 static ext2_group_desc_t* bgd_table = NULL;
+static vfs_inode_ops_t ext2_inode_ops;
+static vfs_file_ops_t ext2_file_ops;
 static uint32_t block_size = 1024;
 static uint32_t groups_count = 0;
 
@@ -156,6 +158,9 @@ static vfs_node_t *ext2_finddir_one(vfs_node_t *node, const char *name) {
                     fn->flags = (file_inode.mode & EXT2_S_IFDIR) ? VFS_FLAG_DIR : VFS_FLAG_FILE;
                     fn->read  = ext2_vfs_read;
                     fn->write = ext2_vfs_write;
+
+                    fn->inode_ops = &ext2_inode_ops;
+                    fn->file_ops  = &ext2_file_ops;
 
                     kfree(buffer);
                     return fn;

@@ -104,6 +104,21 @@ static vfs_dentry_t *vfs_resolve_path_parent(const char *raw_path, char *last_co
     const char *p = path;
     while (*p == '/') p++;
     
+    /* FLAT FALLBACK CHECK:
+     * Наш образ диска ПЛОСКИЙ (WINDOWS_ext2.py кладет файлы вида "bin/sysgui.elf" в корень).
+     * Если путь p целиком существует как плоский файл в корневом dentry ФС, 
+     * возвращаем корень в качестве родителя, а весь относительный путь p — как имя файла. */
+    if (*p != '\0' && vfs_root_dentry && vfs_root_dentry->node) {
+        if (vfs_root_dentry->node->inode_ops && vfs_root_dentry->node->inode_ops->lookup) {
+            vfs_node_t *new_node = NULL;
+            if (vfs_root_dentry->node->inode_ops->lookup(vfs_root_dentry->node, p, &new_node) == 0 && new_node) {
+                vfs_unref_node(new_node); // Нам нужно было только проверить существование
+                if (last_comp) strcpy(last_comp, p);
+                return vfs_root_dentry;
+            }
+        }
+    }
+    
     vfs_dentry_t *current = vfs_root_dentry;
     if (!current) return NULL;
     
