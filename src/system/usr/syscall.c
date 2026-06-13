@@ -169,44 +169,30 @@ void syscall_handler(syscall_regs_t *regs)
     break;
   }
   case 3:
-  { // SYS_WRITE_FILE (Теперь через VFS!)
+  { // SYS_WRITE_FILE (через vfs_write_file)
     const char *filename = (const char *)regs->rdi;
     const uint8_t *data = (const uint8_t *)regs->rsi;
     uint32_t size = (uint32_t)regs->rdx;
 
-    // Ищем устройство с поддержкой записи (первое попавшееся, обычно EXT2 или
-    // FAT32)
-    vfs_node_t *dev = vfs_root->next;
-    while (dev)
-    {
-      if (dev->write)
-      {
-        vfs_node_t file_node;
-        memset(&file_node, 0, sizeof(vfs_node_t));
-        // Безопасное копирование имени из юзерспейса. Раньше использовался
-        // strcpy, который при подаче длинной строки переполнял
-        // file_node.name (фикс. 128 байт) → порча стека ядра.
-        stac();
-        size_t i = 0;
-        for (; i < sizeof(file_node.name) - 1 && filename[i] != '\0'; i++)
-        {
-          file_node.name[i] = filename[i];
-        }
-        file_node.name[i] = '\0';
-        clac();
-        dev->write(&file_node, 0, size, (uint8_t *)data);
-        regs->rax = size;
-        break;
-      }
-      dev = dev->next;
+    char kpath[256];
+    stac();
+    size_t _i = 0;
+    while (_i < sizeof(kpath) - 1 && filename[_i] != '\0') {
+      kpath[_i] = filename[_i]; _i++;
     }
+    clac();
+    kpath[_i] = '\0';
+
+    stac();
+    int _wrc = vfs_write_file(kpath, data, size);
+    clac();
+    regs->rax = (_wrc >= 0) ? (uint64_t)size : 0;
     break;
   }
   case 4:
   { // SYS_READ_DIR
     int idx = (int)regs->rdi;
 
-    // Временная структура для безопасной записи в память пользователя
     struct
     {
       char name[128];
@@ -214,39 +200,38 @@ void syscall_handler(syscall_regs_t *regs)
       char dev[32];
     } *out = (void *)regs->rsi;
 
+    /*
+     * Новая реализация: обходим все смонтированные ФС через legacy-список
+     * vfs_root->next, но используем readdir каждого устройства.
+     * Глобальный индекс idx сохраняет поведение, ожидаемое sysgui.
+     */
     int current_idx = 0;
     vfs_node_t *dev = vfs_root->next;
     bool found = false;
 
-    while (dev)
-    {
-      if (dev->readdir)
-      {
-        for (int i = 0; i < 32; i++)
-        {
+    while (dev) {
+      if (dev->readdir) {
+        for (int i = 0; i < 512; i++) {
           vfs_dirent_t *de = dev->readdir(dev, i);
-          if (!de)
-            break;
+          if (!de) break;
 
-          if (current_idx == idx)
-          {
-            stac(); // Разрешаем доступ к памяти Ring 3
+          if (current_idx == idx) {
+            stac();
             strcpy(out->name, de->name);
             out->size = de->size;
             strcpy(out->dev, dev->name);
-            clac(); // Закрываем доступ
+            clac();
             found = true;
             break;
           }
           current_idx++;
         }
       }
-      if (found)
-        break;
+      if (found) break;
       dev = dev->next;
     }
 
-    regs->rax = found ? 1 : 0; // Возвращаем 1, если файл найден, иначе 0
+    regs->rax = found ? 1 : 0;
     break;
   }
   case 5: // SYS_DRAW_BUFFER

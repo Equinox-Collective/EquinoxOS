@@ -249,42 +249,30 @@ void emergency_kill_all_and_shell(void) {
 }
 
 void exec_from_disk(const char *filename) {
-  vfs_node_t *dev = vfs_root->next;
-  while (dev) {
-    if (!dev->readdir || !dev->read) {
-      dev = dev->next;
-      continue;
-    }
+  /* Сначала пробуем абсолютный путь через новый VFS */
+  uint32_t size = 0;
+  uint8_t *elf_data = vfs_read_file(filename, &size);
 
-    for (int i = 0; i < 64; i++) {
-      vfs_dirent_t *de = dev->readdir(dev, i);
-      if (!de)
-        break;
-
-      if (strcmp(de->name, filename) == 0) {
-        term_print("EXEC: Found ");
-        term_print(filename);
-        term_print(" on ");
-        term_print(dev->name);
-        term_print("\n");
-
-        uint8_t *elf_data = kmalloc(de->size);
-        vfs_node_t file_node;
-        memset(&file_node, 0, sizeof(vfs_node_t));
-        file_node.inode = de->inode;
-        strcpy(file_node.name, de->name);
-
-        if (dev->read(&file_node, 0, de->size, elf_data) > 0) {
-          run_elf_named(elf_data, filename);
-          kfree(elf_data);
-          return;
-        }
-        kfree(elf_data);
-      }
-    }
-    dev = dev->next;
+  /* Если не нашли и путь не абсолютный — пробуем /bin/<name> */
+  if (!elf_data && filename[0] != '/') {
+    char binpath[256];
+    sprintf(binpath, "/bin/%s", filename);
+    elf_data = vfs_read_file(binpath, &size);
   }
-  term_print("EXEC: File not found on any VFS device!\n");
+
+  if (!elf_data) {
+    term_print("EXEC: File not found: ");
+    term_print(filename);
+    term_print("\n");
+    return;
+  }
+
+  term_print("EXEC: Found ");
+  term_print(filename);
+  term_print("\n");
+
+  run_elf_named(elf_data, filename);
+  kfree(elf_data);
 }
 
 // Инициализация «тяжёлого» железа, не нужного для первого кадра GUI:
@@ -404,12 +392,33 @@ void kmain(void) {
   serial_puts(COM1, "Task system initialized\n");
   vfs_init();
   serial_puts(COM1, "VFS initialized\n");
-  fat32_init();
-  serial_puts(COM1, "FAT32 initialized\n");
+
+  /* devfs: /dev/null, /dev/zero, /dev/tty — монтируем первым */
+  vfs_mount("/dev", devfs_create_root());
+  serial_puts(COM1, "devfs mounted at /dev\n");
+
+  /* EXT2 — основная ФС, монтируем как "/" */
   ext2_init();
-  vfs_register_device(ext2_get_root_node());
-  vfs_register_device(fat32_get_root_node());
-  serial_puts(COM1, "EXT2 initialized\n");
+  {
+    vfs_node_t *_ext2_root = ext2_get_root_node();
+    if (_ext2_root) {
+      vfs_mount("/", _ext2_root);
+      /* legacy: старый код ищет файлы через vfs_root->next */
+      vfs_register_device(_ext2_root);
+    }
+  }
+  serial_puts(COM1, "EXT2 mounted at /\n");
+
+  /* FAT32 — вторичная ФС, монтируем как /fat */
+  fat32_init();
+  {
+    vfs_node_t *_fat_root = fat32_get_root_node();
+    if (_fat_root) {
+      vfs_mount("/fat", _fat_root);
+      vfs_register_device(_fat_root);
+    }
+  }
+  serial_puts(COM1, "FAT32 mounted at /fat\n");
   klog_t("EXT2 ready (timing ref)");
 
   {

@@ -111,33 +111,33 @@ struct vfs_dirent* ext2_vfs_readdir(vfs_node_t* node, uint32_t index) {
     return &shared_dirent;
 }
 
-// O(n) поиск файла в каталоге за ОДИН проход по блокам каталога.
-// Раньше vfs_read_file звал ext2_vfs_readdir(index) для index=0..N, а каждый
-// такой вызов заново читал inode каталога и сканировал блоки С НАЧАЛА — итог
-// O(N^2) чтений ATA PIO на каждый открываемый файл. При большом числе файлов
-// в образе это давало десятки тысяч медленных PIO-чтений (~30 c на старте GUI).
-// finddir читает каталог один раз и сразу отдаёт узел с inode и размером.
+// O(n) поиск ONE компонента пути в каталоге за ОДИН проход по блокам.
+// Возвращает ноду для одного имени компонента (не полного пути).
 static vfs_node_t shared_find_node;
-struct vfs_node* ext2_vfs_finddir(vfs_node_t* node, char* name) {
+
+static vfs_node_t *ext2_finddir_one(vfs_node_t *node, const char *name) {
     ext2_inode_t dir_inode;
     ext2_read_inode(node->inode, &dir_inode);
 
     if (!(dir_inode.mode & EXT2_S_IFDIR)) return NULL;
 
-    uint8_t* buffer = kmalloc(block_size);
+    uint8_t *buffer = kmalloc(block_size);
+    uint32_t max_blocks = dir_inode.blocks / (block_size / 512);
+    if (max_blocks == 0) max_blocks = 1;
 
-    for (uint32_t i = 0; i < dir_inode.blocks; i++) {
+    for (uint32_t i = 0; i < max_blocks; i++) {
         uint32_t b = ext2_get_inode_block(&dir_inode, i);
         if (b == 0) break;
         ext2_read_block(b, buffer);
 
-        ext2_dir_entry_t* entry = (ext2_dir_entry_t*)buffer;
+        ext2_dir_entry_t *entry = (ext2_dir_entry_t *)buffer;
         uint32_t offset = 0;
 
         while (offset < block_size) {
+            if (entry->rec_len == 0) break;
             if (entry->inode != 0 && entry->name_len > 0 && entry->name_len < 128) {
                 char ename[128];
-                memcpy(ename, (uint8_t*)entry + sizeof(ext2_dir_entry_t), entry->name_len);
+                memcpy(ename, (uint8_t *)entry + sizeof(ext2_dir_entry_t), entry->name_len);
                 ename[entry->name_len] = '\0';
 
                 if (strcmp(ename, name) == 0) {
@@ -145,18 +145,31 @@ struct vfs_node* ext2_vfs_finddir(vfs_node_t* node, char* name) {
                     ext2_read_inode(entry->inode, &file_inode);
 
                     memset(&shared_find_node, 0, sizeof(shared_find_node));
-                    strcpy(shared_find_node.name, ename);
-                    shared_find_node.inode = entry->inode;
-                    shared_find_node.size  = file_inode.size;
-                    shared_find_node.read  = ext2_vfs_read;
+                    size_t nl = entry->name_len;
+                    if (nl >= sizeof(shared_find_node.name)) nl = sizeof(shared_find_node.name) - 1;
+                    memcpy(shared_find_node.name, ename, nl);
+                    shared_find_node.name[nl] = '\0';
+                    shared_find_node.inode    = entry->inode;
+                    shared_find_node.size     = file_inode.size;
+                    /* Директория или файл */
+                    if (file_inode.mode & EXT2_S_IFDIR) {
+                        shared_find_node.flags   = 0x01; /* VFS_FLAG_DIR */
+                        shared_find_node.read    = ext2_vfs_read;
+                        shared_find_node.readdir = ext2_vfs_readdir;
+                        shared_find_node.finddir = ext2_vfs_finddir;
+                        shared_find_node.write   = ext2_vfs_write;
+                    } else {
+                        shared_find_node.flags = 0x00; /* VFS_FLAG_FILE */
+                        shared_find_node.read  = ext2_vfs_read;
+                        shared_find_node.write = ext2_vfs_write;
+                    }
 
                     kfree(buffer);
                     return &shared_find_node;
                 }
             }
             offset += entry->rec_len;
-            if (entry->rec_len == 0) break;
-            entry = (ext2_dir_entry_t*)(buffer + offset);
+            entry = (ext2_dir_entry_t *)(buffer + offset);
         }
     }
 
@@ -164,17 +177,49 @@ struct vfs_node* ext2_vfs_finddir(vfs_node_t* node, char* name) {
     return NULL;
 }
 
+/*
+ * ext2_vfs_finddir — публичный VFS-хук.
+ * name может содержать единственный компонент пути ("bin") или
+ * полный подпуть ("bin/snake.elf"). VFS-слой сам режет на компоненты,
+ * но если старый код передаёт "bin/snake.elf" напрямую, мы тоже
+ * умеем его разрешить.
+ */
+struct vfs_node *ext2_vfs_finddir(vfs_node_t *node, char *name) {
+    if (!name || name[0] == '\0') return NULL;
+
+    /* Нет '/' в имени → одиночный компонент, быстрый путь */
+    if (!strchr(name, '/')) {
+        return ext2_finddir_one(node, name);
+    }
+
+    /* Есть '/' → разрезаем и спускаемся */
+    char buf[256];
+    size_t nl = strlen(name);
+    if (nl >= sizeof(buf)) nl = sizeof(buf) - 1;
+    memcpy(buf, name, nl);
+    buf[nl] = '\0';
+
+    vfs_node_t *cur = node;
+    char *token = strtok(buf, "/");
+    while (token) {
+        cur = ext2_finddir_one(cur, token);
+        if (!cur) return NULL;
+        token = strtok(NULL, "/");
+    }
+    return cur;
+}
+
 vfs_node_t* ext2_get_root_node() {
     if (!sb) return NULL;
     vfs_node_t* node = kmalloc(sizeof(vfs_node_t));
     memset(node, 0, sizeof(vfs_node_t));
-    strcpy(node->name, "EXT2_DISK");
-    node->inode = 2; // Root inode
-    node->flags = 0x01; // Directory
-    node->read = ext2_vfs_read;
+    strcpy(node->name, "ext2");
+    node->inode   = 2;    /* EXT2 root inode */
+    node->flags   = 0x01; /* VFS_FLAG_DIR */
+    node->read    = ext2_vfs_read;
     node->readdir = ext2_vfs_readdir;
     node->finddir = ext2_vfs_finddir;
-    node->write = ext2_vfs_write;
+    node->write   = ext2_vfs_write;
     return node;
 }
 

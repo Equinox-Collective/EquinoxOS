@@ -192,6 +192,13 @@ bool task_exec(char* full_command) {
     uint32_t elf_size = 0;
     uint8_t* elf_raw = vfs_read_file(argv[0], &elf_size);
 
+    /* Если не нашли — пробуем /bin/<name> */
+    if (!elf_raw && argv[0][0] != '/') {
+        char binpath[256];
+        sprintf(binpath, "/bin/%s", argv[0]);
+        elf_raw = vfs_read_file(binpath, &elf_size);
+    }
+
     if (!elf_raw) {
         term_print("EXEC: File not found on any disk: ");
         term_print(argv[0]);
