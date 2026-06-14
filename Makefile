@@ -328,7 +328,7 @@ APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_RO
 # Apps that link against libbearssl.a (phase 3b+). These get their own
 # explicit rules below because they need (a) BearSSL public headers in the
 # include path and (b) libbearssl.a appended at link time.
-APP_ELFS_MUSL   = $(ISO_ROOT)/bin/musltest.elf $(ISO_ROOT)/bin/stattest.elf $(ISO_ROOT)/bin/dirtest.elf $(ISO_ROOT)/bin/ltsig.elf $(ISO_ROOT)/bin/ltjob.elf $(ISO_ROOT)/bin/ltjob2.elf $(ISO_ROOT)/bin/bash.elf $(ISO_ROOT)/bin/busybox.elf
+APP_ELFS_MUSL   = $(ISO_ROOT)/bin/musltest.elf $(ISO_ROOT)/bin/stattest.elf $(ISO_ROOT)/bin/dirtest.elf $(ISO_ROOT)/bin/ltsig.elf $(ISO_ROOT)/bin/ltjob.elf $(ISO_ROOT)/bin/ltjob2.elf $(ISO_ROOT)/bin/bash.elf $(ISO_ROOT)/bin/busybox.elf $(ISO_ROOT)/bin/sh.elf
 APP_ELFS_TLS    = $(ISO_ROOT)/bin/tlsboot.elf $(ISO_ROOT)/bin/tlstest.elf $(ISO_ROOT)/bin/catest.elf $(ISO_ROOT)/bin/httpsget.elf $(ISO_ROOT)/bin/urlget.elf $(ISO_ROOT)/bin/browser.elf
 APP_ELFS_QJS    = $(ISO_ROOT)/bin/jstest.elf $(ISO_ROOT)/bin/domtest.elf $(ISO_ROOT)/bin/jsdomtest.elf $(ISO_ROOT)/bin/jsfetchtest.elf $(ISO_ROOT)/bin/jspagetest.elf
 
@@ -445,6 +445,20 @@ $(ISO_ROOT)/bin/bash.elf: third_party/bash/bash.o $(MUSL_LIB)/libc.a
 $(ISO_ROOT)/bin/busybox.elf: third_party/busybox/busybox.o $(MUSL_LIB)/libc.a
 	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 \
 	  $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o third_party/busybox/busybox.o \
+	  $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
+
+# sh.elf — Этап 10: системный шелл EquinoxOS. Тонкая обёртка над bash:
+# печатает баннер + /etc/motd, ставит окружение (PATH/HOME/SHELL/TERM/PS1),
+# зовёт execve("/bin/bash.elf", ...). Та же схема линковки, что у
+# musltest/bash — vendored-musl, статика, Ttext=0x1000000. Исходник лежит
+# в подкаталоге app/sh/, поэтому не попадает под шаблон app/%.o и имеет
+# собственное правило.
+app/sh/sh.o: app/sh/sh.c
+	$(CC) $(MUSL_CFLAGS) -c $< -o $@
+
+$(ISO_ROOT)/bin/sh.elf: app/sh/sh.o $(MUSL_LIB)/libc.a
+	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 \
+	  $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/sh/sh.o \
 	  $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
 
 app/%.o: app/%.c

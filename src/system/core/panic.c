@@ -66,13 +66,38 @@ static void user_crash_handler(interrupt_frame_t* frame, uint64_t cr2) {
 
 void panic_handler(interrupt_frame_t* frame) {
     /* Этап 9: исключение из ring 3 — убиваем процесс, а не всю ОС.
-     * CR2 читаем ДО всего остального, пока его не затёрло. */
+     * CR2 читаем ДО всего остального, пока его не затёрло.
+     *
+     * Этап 10 (sh.elf / bash): ядро во время сервиса сисколла иногда
+     * разыменовывает user-указатель напрямую (struct termios*, statbuf*,
+     * argv[], ...). Если юзер передал мусор (или bash дал биты неправильно),
+     * это даёт Page Fault при CPL=0 на user-half адресе — и до сих пор
+     * убивало всю ОС. В реальной Unix такое — «bad area / EFAULT» одного
+     * процесса, а не паника ядра. Делаем так же: kill процесса с SIGSEGV,
+     * планировщик продолжает работу. */
     {
         uint64_t ucr2;
         __asm__ volatile ("mov %%cr2, %0" : "=r"(ucr2));
         extern task_t* current_task;
+
+        /* 1) Прямой ring-3 краш — как было. */
         if ((frame->cs & 3) == 3 && current_task && current_task->id != 1)
             user_crash_handler(frame, ucr2); /* не возвращается */
+
+        /* 2) Page Fault из ring-0, но CR2 в нижней (user) половине AVA, и
+         *    мы обслуживаем пользовательскую задачу (не init). Это значит:
+         *    «kernel дотянулся до user-указателя, страница не замаплена».
+         *    Убиваем процесс с SIGSEGV — это не баг ядра, это баг юзера. */
+        if (frame->int_no == 14 &&
+            (frame->cs & 3) == 0 &&
+            ucr2 < 0x0000800000000000ULL &&
+            current_task && current_task->id != 1)
+        {
+            serial_puts(COM1,
+                "\n[KFAULT] user pointer deref in syscall — "
+                "killing process (no panic)\n");
+            user_crash_handler(frame, ucr2); /* не возвращается */
+        }
     }
 
     // 1. ЖЕСТКО ВЫКЛЮЧАЕМ ПРЕРЫВАНИЯ

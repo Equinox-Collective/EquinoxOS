@@ -1,10 +1,14 @@
 --- START OF FILE res/sysgui/terminal.lua ---
 local M = {}
 
+-- Этап 10: GUI terminal больше не делает вид, что он сам шелл. Системный
+-- шелл живёт в /bin/sh.elf (bash). Здесь — лёгкий «GUI debug terminal»,
+-- который понимает несколько GUI-локальных команд (для удобства из окна)
+-- и всё остальное молча скармливает в ring-0 shell через shellExec().
 local term_lines = {
-    "Equinox OS Ring 3 Interactive Shell [v3.0]",
-    "Modular Unix-like command subsystem loaded.",
-    "Type 'neofetch' or 'help' to begin.",
+    "EquinoxOS — GUI debug terminal",
+    "System shell: /bin/sh.elf (bash). Type 'sh' to launch it in console.",
+    "GUI-local: help, neofetch, ls, cat <f>, ps, kill <pid>, clear, doom, snake.",
     ""
 }
 
@@ -41,15 +45,17 @@ local function execute_cli_command(raw_input)
 
     -- Shell Utilities Implementation
     if verb == "help" then
-        term_append_multiline("Available commands:\n" ..
-                             "  neofetch      Display system information\n" ..
+        term_append_multiline("EquinoxOS — GUI terminal\n" ..
+                             "  sh            Launch /bin/sh.elf system shell (COM1 console)\n" ..
+                             "  neofetch      System info\n" ..
                              "  ls            List files on Root VFS\n" ..
                              "  cat <file>    Print file content\n" ..
                              "  rm <file>     Delete file from storage\n" ..
                              "  clear         Clear console log\n" ..
                              "  ps            List running processes\n" ..
                              "  kill <pid>    Terminate process\n" ..
-                             "  doom / snake  Launch system games\n")
+                             "  doom / snake  Launch system games\n" ..
+                             "  <anything>    Forwarded to kernel shell\n")
         return
     end
 
@@ -138,6 +144,14 @@ local function execute_cli_command(raw_input)
     elseif verb == "snake" then
         term_append_multiline("Launching snake.elf...")
         exec("bin/snake.elf")
+        return
+    elseif verb == "sh" then
+        -- Системный шелл — это ring-3 ELF, его I/O висит на COM1 (см. sh.elf
+        -- BUILD_NOTES). Сюда, в GUI-окно, его вывод не пойдёт — пользователь
+        -- увидит сессию через серийную консоль. Поэтому подсказываем, и
+        -- запускаем процесс через exec().
+        term_append_multiline("Launching /bin/sh.elf — session goes to COM1 serial console.")
+        exec("bin/sh.elf")
         return
     end
 

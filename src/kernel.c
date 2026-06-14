@@ -468,6 +468,32 @@ void kmain(void) {
   serial_puts(COM1, "enGUI spawned as Ring 3 init process\n");
   klog_t("enGUI spawned");
 
+  /* Этап 10: системный шелл /bin/sh.elf — обязательный компонент. Здесь мы
+   * НЕ запускаем его (его поднимает либо пользователь командой `sh`, либо
+   * autoexec, либо GUI-терминал в будущем), но проверяем, что он вообще
+   * есть на диске. Если файла нет — это сломанная сборка ОС, как Linux
+   * без /sbin/init. Шумим в COM1 баннером, чтобы это нельзя было
+   * пропустить. */
+  {
+    uint32_t sh_sz = 0;
+    uint8_t *sh_buf = vfs_read_file("bin/sh.elf", &sh_sz);
+    if (sh_buf && sh_sz > 0) {
+      char sb[80];
+      sprintf(sb, "[init] /bin/sh.elf present (%u bytes) — OK\n",
+              (unsigned)sh_sz);
+      serial_puts(COM1, sb);
+      kfree(sh_buf);
+    } else {
+      serial_puts(COM1,
+        "\n*****************************************************************\n"
+        "*** MISSING SYSTEM COMPONENT: /bin/sh.elf                       ***\n"
+        "*** This is the EquinoxOS system shell. Without it the only    ***\n"
+        "*** available command processor is the kernel rescue shell.    ***\n"
+        "*** Rebuild the image with `make apps` to include sh.elf.      ***\n"
+        "*****************************************************************\n\n");
+    }
+  }
+
 #if DEFER_HW_INIT
   // Рабочий стол уже запускается — поднимаем тяжёлое железо (PCI/USB/звук/
   // сеть/мышь) в фоновом потоке, чтобы не задерживать первый кадр GUI.

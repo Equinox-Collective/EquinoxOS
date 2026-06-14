@@ -225,6 +225,22 @@ static void cmd_clear_fn(const char *args) {
         sh_print("\n\n");
     }
 }
+// `sh` — Этап 10: запуск системного шелла /bin/sh.elf (bash + EquinoxOS
+// брендинг + env). По сути shortcut к `run bin/sh.elf`, но команда
+// официальная: про неё знает help и про неё знает emergency. В
+// emergency-режиме мы её всё равно режем (см. cmd_run_fn), иначе sh.elf
+// нарисует поверх emergency-фреймбуфера.
+static void cmd_sh_fn(const char *args) {
+    (void)args;
+    if (shell_emergency_active) {
+        sh_print("sh: disabled in emergency mode. Type 'exit' to reboot.\n");
+        return;
+    }
+    sh_print("Launching /bin/sh.elf — session attached to COM1 serial console.\n");
+    sh_print("(GUI terminal currently does not bind ring-3 pty; use serial.)\n");
+    task_exec((char *)"bin/sh.elf");
+}
+
 static void cmd_killall_fn(const char *args) {
     (void)args;
     sh_print("killall: terminating user processes...\n");
@@ -276,6 +292,7 @@ const shell_command_t SHELL_COMMANDS[] = {
     { "kill",    true,  cmd_kill_fn,    "kill <pid> — terminate process" },
     { "killall", false, cmd_killall_fn, "kill every user process + drop to emergency shell" },
     { "run",     true,  cmd_run_fn,     "run <file.elf> — exec ELF from VFS" },
+    { "sh",      false, cmd_sh_fn,      "launch system shell /bin/sh.elf (bash)" },
     { "reboot",  false, cmd_reboot_fn,  "reboot the machine (triple fault)" },
     { "gui",     false, cmd_gui_fn,     "(stub) start Equinox GUI" },
 };

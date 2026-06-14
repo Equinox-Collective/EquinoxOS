@@ -1,0 +1,11 @@
+Welcome to EquinoxOS.
+
+  This is the system shell (/bin/sh.elf), a thin wrapper around GNU bash
+  with EquinoxOS branding, default environment, and crash containment.
+  Coreutils are aliased to /bin/busybox.elf in /.bashrc.
+
+  Tips:
+    help            — bash builtins
+    ls / ps         — file / process listing via busybox
+    Ctrl-D / exit   — leave the shell
+
