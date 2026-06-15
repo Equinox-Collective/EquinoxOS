@@ -1721,6 +1721,9 @@ void linux_syscall_handler(syscall_regs_t *regs)
   case 80: regs->rax = 101; break;           /* chdir(path) -> SYS_CHDIR */
   case 15: regs->rax = 104; break;           /* rt_sigreturn -> SYS_SIGRETURN */
   case 318: regs->rax = 86; break;           /* getrandom(buf,len,flags) -> SYS_GETRANDOM */
+  /* Этап 11: shell.elf REPL дёргает ядерный shell_dispatch через Linux-шлюз.
+   * Linux 73 = fsync, занято; берём 1000 как "EquinoxOS extension". */
+  case 1000: regs->rax = 73; break;          /* SYS_SHELL_EXEC(line,outbuf,cap) */
 
   /* ---- требуют перетасовки аргументов, затем делегирование ------------- */
   case 234:                                  /* tgkill(tgid, tid, sig) -> SYS_KILL(tid,sig) */
