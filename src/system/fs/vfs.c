@@ -105,8 +105,8 @@ static vfs_dentry_t *alloc_dentry(const char *name, vfs_node_t *node, vfs_dentry
     /* DBG: лог о создании dentry — ищем как node-указатель становится user-VA */
     {
         char b[160];
-        sprintf(b, "[vfs_dbg] alloc_dentry name='%s' d=0x%lx node=0x%lx parent=0x%lx\n",
-                d->name, (unsigned long)d, (unsigned long)node, (unsigned long)parent);
+        sprintf(b, "[vfs_dbg] alloc_dentry name='%s' d=%p node=%p parent=%p\n",
+                d->name, d, node, parent);
         serial_puts(0x3F8, b);
     }
     return d;
@@ -205,11 +205,11 @@ static vfs_dentry_t *vfs_resolve_path(const char *raw_path) {
     /* DBG */
     {
         char b[256];
-        sprintf(b, "[vfs_dbg] resolve raw='%s' last='%s' parent=0x%lx parent->node=0x%lx\n",
+        sprintf(b, "[vfs_dbg] resolve raw='%s' last='%s' parent=%p parent->node=%p\n",
                 raw_path ? raw_path : "(null)",
                 last_comp,
-                (unsigned long)parent,
-                (unsigned long)(parent ? parent->node : (void*)0));
+                parent,
+                parent ? (void*)parent->node : (void*)0);
         serial_puts(0x3F8, b);
     }
     

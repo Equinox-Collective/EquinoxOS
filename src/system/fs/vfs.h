@@ -173,6 +173,15 @@ int vfs_write_file(const char *path, const uint8_t *data, uint32_t size);
  * Позволяет fd.c обходить устройства через next/readdir/finddir.
  * Новый код должен использовать vfs_mount вместо этого. */
 void vfs_register_device(vfs_node_t *node);
+
+/* devfs: создание корневой ноды псевдо-ФС /dev (null, zero, tty).
+ * ВАЖНО: без этого прототипа src/kernel.c видел implicit declaration,
+ * GCC по правилам K&R считал возврат как int (32-bit), реальный 64-bit
+ * pointer возвращаемый из kmalloc обрезался до 32 бит → корень /dev
+ * сохранялся как 0x0000_0000_00xx_xxxx → при первом обращении к /dev/tty
+ * page-fault на user-VA. Этап 10 баг #2 (после strcpy overflow). */
+vfs_node_t *devfs_create_root(void);
+
 /* Отладка */
 void vfs_dump_mounts(void);
 void vfs_ls(void);
