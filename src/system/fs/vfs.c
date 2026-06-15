@@ -14,6 +14,21 @@
 #include "../../syslibc/stdio.h"
 
 extern void term_print(const char *str);
+extern void serial_puts(uint16_t port, const char *str);
+
+/* === ВРЕМЕННАЯ ИНСТРУМЕНТАЦИЯ Этапа 10 (vfs corruption hunt) === */
+#define VFS_DBG 1
+#if VFS_DBG
+static void vfs_dbg(const char *msg) { serial_puts(0x3F8, msg); }
+static void vfs_dbg_hex(const char *label, unsigned long v) {
+    char b[64];
+    sprintf(b, "%s=0x%lx ", label, v);
+    serial_puts(0x3F8, b);
+}
+#else
+#define vfs_dbg(m) ((void)0)
+#define vfs_dbg_hex(l,v) ((void)0)
+#endif
 
 /* ================================================================== */
 /*  Глобальные                                                         */
@@ -77,6 +92,7 @@ static vfs_dentry_t *alloc_dentry(const char *name, vfs_node_t *node, vfs_dentry
     vfs_dentry_t *d = (vfs_dentry_t *)kmalloc(sizeof(vfs_dentry_t));
     memset(d, 0, sizeof(vfs_dentry_t));
     strncpy(d->name, name, sizeof(d->name) - 1);
+    d->name[sizeof(d->name)-1] = '\0';
     d->node = node;
     d->parent = parent;
     d->refcount = 1;
@@ -85,6 +101,13 @@ static vfs_dentry_t *alloc_dentry(const char *name, vfs_node_t *node, vfs_dentry
     if (parent) {
         d->sibling = parent->child;
         parent->child = d;
+    }
+    /* DBG: лог о создании dentry — ищем как node-указатель становится user-VA */
+    {
+        char b[160];
+        sprintf(b, "[vfs_dbg] alloc_dentry name='%s' d=0x%lx node=0x%lx parent=0x%lx\n",
+                d->name, (unsigned long)d, (unsigned long)node, (unsigned long)parent);
+        serial_puts(0x3F8, b);
     }
     return d;
 }
@@ -113,7 +136,19 @@ static vfs_dentry_t *vfs_resolve_path_parent(const char *raw_path, char *last_co
             vfs_node_t *new_node = NULL;
             if (vfs_root_dentry->node->inode_ops->lookup(vfs_root_dentry->node, p, &new_node) == 0 && new_node) {
                 vfs_unref_node(new_node); // Нам нужно было только проверить существование
-                if (last_comp) strcpy(last_comp, p);
+                /* last_comp у вызывающей стороны — char[128].
+                 * p — нормализованный путь до 256 байт. БЕЗ ограничения
+                 * strcpy эпично переполнял стек вызывающего vfs_resolve_path,
+                 * затирая локальную parent → page-fault при следующем разыменовании.
+                 * Это собственно и был «bash bug» Этапа 10 — bash в старте
+                 * проталкивал длинный путь, FLAT FALLBACK его находил, потом
+                 * мы наступали себе на стек. */
+                if (last_comp) {
+                    size_t n = strlen(p);
+                    if (n > 127) n = 127;
+                    memcpy(last_comp, p, n);
+                    last_comp[n] = '\0';
+                }
                 return vfs_root_dentry;
             }
         }
@@ -130,7 +165,15 @@ static vfs_dentry_t *vfs_resolve_path_parent(const char *raw_path, char *last_co
         while (*p == '/') p++;
         
         if (*p == '\0') {
-            if (last_comp) strcpy(last_comp, comp);
+            if (last_comp) {
+                /* comp ограничен 127 + NUL, last_comp у вызывающего тоже 128
+                 * — но дешевле всё равно ограничить, чтобы инвариант был
+                 * локальным. См. длинный комментарий в FLAT FALLBACK выше. */
+                size_t n = strlen(comp);
+                if (n > 127) n = 127;
+                memcpy(last_comp, comp, n);
+                last_comp[n] = '\0';
+            }
             return current;
         }
         
@@ -158,6 +201,17 @@ static vfs_dentry_t *vfs_resolve_path(const char *raw_path) {
     if (!parent) return NULL;
     
     if (last_comp[0] == '\0') return parent; 
+    
+    /* DBG */
+    {
+        char b[256];
+        sprintf(b, "[vfs_dbg] resolve raw='%s' last='%s' parent=0x%lx parent->node=0x%lx\n",
+                raw_path ? raw_path : "(null)",
+                last_comp,
+                (unsigned long)parent,
+                (unsigned long)(parent ? parent->node : (void*)0));
+        serial_puts(0x3F8, b);
+    }
     
     vfs_dentry_t *next = find_dentry(parent, last_comp);
     if (!next) {

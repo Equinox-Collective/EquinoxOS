@@ -240,26 +240,47 @@ endif
 ifneq ($(findstring bearssl,$(SKIP)),)
   SKIP_BEARSSL = 1
 endif
+ifneq ($(findstring quickjs,$(SKIP)),)
+  SKIP_QUICKJS = 1
+endif
+ifneq ($(findstring sdl2,$(SKIP)),)
+  SKIP_SDL2 = 1
+endif
 
-# Определение зависимостей на основе флагов пропуска
+# Определение зависимостей
 ifeq ($(SKIP_DOOM),1)
   DOOM_DEP =
 else
   DOOM_DEP = doom.elf
 endif
 
+# SDL2
+ifeq ($(SKIP_SDL2),1)
+  SDL_DEP =
+  SDL_APPS_DEP =
+else
+  SDL_DEP = $(SDL_LIB)
+  SDL_APPS_DEP = $(ISO_ROOT)/bin/sdltest.elf
+endif
+
+# BearSSL + QuickJS (связаны, так как JS-фетч требует TLS)
 ifeq ($(SKIP_BEARSSL),1)
   BEARSSL_DEP =
   TLS_APPS_DEP =
-  # The browser + JS-fetch apps need BearSSL, so the whole QuickJS app set
-  # rides on the same switch: SKIP=bearssl yields a minimal no-TLS build.
   QUICKJS_DEP =
   QJS_APPS_DEP =
 else
   BEARSSL_DEP = $(BEARSSL_LIB)
   TLS_APPS_DEP = $(APP_ELFS_TLS)
-  QUICKJS_DEP = $(QUICKJS_LIB)
-  QJS_APPS_DEP = $(APP_ELFS_QJS)
+  
+  # QuickJS может быть выключен отдельно, даже если BearSSL оставлен
+  ifeq ($(SKIP_QUICKJS),1)
+    QUICKJS_DEP =
+    QJS_APPS_DEP =
+  else
+    QUICKJS_DEP = $(QUICKJS_LIB)
+    QJS_APPS_DEP = $(APP_ELFS_QJS)
+  endif
 endif
 
 
@@ -323,7 +344,7 @@ doom.elf: setup $(SDK_OBJS) $(DOOM_OBJS)
 # --- APPS BUILD RULES --------------------------------------------------------
 APP_SRCS = $(wildcard app/*.c)
 APP_OBJS = $(patsubst app/%.c,app/%.o,$(APP_SRCS))
-APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_ROOT)/bin/htmlview.elf $(ISO_ROOT)/bin/niplay.elf $(ISO_ROOT)/bin/widget_demo.elf $(ISO_ROOT)/bin/ipc_test.elf $(ISO_ROOT)/bin/randtest.elf $(ISO_ROOT)/bin/socktest.elf $(ISO_ROOT)/bin/sdltest.elf $(ISO_ROOT)/bin/forktest.elf $(ISO_ROOT)/bin/exectest.elf $(ISO_ROOT)/bin/pipetest.elf $(ISO_ROOT)/bin/envtest.elf $(ISO_ROOT)/bin/sigtest.elf $(ISO_ROOT)/bin/ttytest.elf $(ISO_ROOT)/bin/lxtest.elf $(ISO_ROOT)/bin/stktest.elf $(ISO_ROOT)/bin/fstest.elf $(ISO_ROOT)/bin/mmfork.elf
+APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_ROOT)/bin/htmlview.elf $(ISO_ROOT)/bin/niplay.elf $(ISO_ROOT)/bin/widget_demo.elf $(ISO_ROOT)/bin/ipc_test.elf $(ISO_ROOT)/bin/randtest.elf $(ISO_ROOT)/bin/socktest.elf $(ISO_ROOT)/bin/forktest.elf $(ISO_ROOT)/bin/exectest.elf $(ISO_ROOT)/bin/pipetest.elf $(ISO_ROOT)/bin/envtest.elf $(ISO_ROOT)/bin/sigtest.elf $(ISO_ROOT)/bin/ttytest.elf $(ISO_ROOT)/bin/lxtest.elf $(ISO_ROOT)/bin/stktest.elf $(ISO_ROOT)/bin/fstest.elf $(ISO_ROOT)/bin/mmfork.elf
 
 # Apps that link against libbearssl.a (phase 3b+). These get their own
 # explicit rules below because they need (a) BearSSL public headers in the
@@ -351,7 +372,9 @@ $(KERNEL_OBJS) $(SDK_OBJS) $(APP_OBJS) $(DOOM_OBJS): | setup
 
 # BearSSL / TLS / QuickJS deps are dynamic (see SKIP= switch above) so a
 # `make SKIP=bearssl` minimal build drops them cleanly.
-apps: setup $(SDK_OBJS) $(BEARSSL_DEP) $(QUICKJS_DEP) $(SDL_LIB) $(APP_ELFS_SIMPLE) $(APP_ELFS_MUSL) $(TLS_APPS_DEP) $(QJS_APPS_DEP) sysgui_app
+apps: setup $(SDK_OBJS) $(BEARSSL_DEP) $(QUICKJS_DEP) $(SDL_DEP) \
+      $(APP_ELFS_SIMPLE) $(APP_ELFS_MUSL) $(TLS_APPS_DEP) $(QJS_APPS_DEP) $(SDL_APPS_DEP) \
+      $(if $(SKIP_SDL2),,sysgui_app)
 
 $(ISO_ROOT)/bin/%.elf: app/%.o $(SDK_OBJS)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< -o $@

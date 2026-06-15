@@ -138,15 +138,6 @@ int main(int argc, char **argv) {
            0);
     setenv("PWD",   "/",                                   0);
 
-    /* Проверим, что bash вообще существует, прежде чем звать execve — иначе
-     * пользователь увидит мутное «ENOENT» вместо человеческой ошибки. */
-    struct stat st;
-    if (stat("/bin/bash.elf", &st) != 0) {
-        out("\x1b[31m[sh.elf]\x1b[0m /bin/bash.elf not found.\n");
-        emergency_repl();
-        return 1;
-    }
-
     /* Передаём bash минимально-достаточный набор аргументов. argv[0]="bash"
      * (не "/bin/bash.elf") — bash смотрит basename для определения личности
      * (sh vs bash vs rbash). --rcfile фиксирует .bashrc на корне, потому что
@@ -159,10 +150,15 @@ int main(int argc, char **argv) {
         NULL
     };
 
+    /* VFS у нас плоский — bash.elf может лежать как "bin/bash.elf" так и
+     * "/bin/bash.elf" (resolver обрезает leading slash, но не все ядерные
+     * пути в одинаковой форме принимают). Пробуем оба, потом сдаёмся. */
     execve("/bin/bash.elf", bargv, environ);
+    execve("bin/bash.elf",  bargv, environ);
+    execve("bash.elf",      bargv, environ);  /* срабатывает bin/-fallback в task_load_image */
 
-    /* execve вернулся — это уже ошибка. Сообщаем и падаем в rescue. */
-    out("\x1b[31m[sh.elf]\x1b[0m execve(/bin/bash.elf) failed.\n");
+    out("\x1b[31m[sh.elf]\x1b[0m bash.elf not loadable (tried /bin, bin/, bare). "
+        "Check `ls bin/` in kernel shell and `make apps` output for bash.elf link errors.\n");
     emergency_repl();
     return 1;
 }
