@@ -3,6 +3,7 @@
 #include "../../../mem/pmm.h"
 #include "../../../mem/vmm.h"
 #include "../../../misc/timer.h"
+#include "../mouse/mouse.h"
 #include <stddef.h>
 #include <stdint.h>
 

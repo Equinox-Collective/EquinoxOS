@@ -1,0 +1,12 @@
+diff --git a/src/system/drivers/devices/usb/uhci.c b/src/system/drivers/devices/usb/uhci.c
+index c5cd90d..1dc19fa 100644
+--- a/src/system/drivers/devices/usb/uhci.c
++++ b/src/system/drivers/devices/usb/uhci.c
+@@ -3,6 +3,7 @@
+ #include "../../../mem/pmm.h"
+ #include "../../../mem/vmm.h"
+ #include "../../../misc/timer.h"
++#include "../mouse/mouse.h"
+ #include <stddef.h>
+ #include <stdint.h>
+ 

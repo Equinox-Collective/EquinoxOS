@@ -49,6 +49,8 @@ ISO_ROOT = iso_root
 
 # --- KERNEL FLAGS ---
 CFLAGS = -ffreestanding -O2 -Wall -Wextra -fno-exceptions -std=c11 \
+         -Werror=implicit-function-declaration -Werror=int-conversion \
+         -Wmissing-prototypes -Wstrict-prototypes \
          -Isrc -Isrc/system -Isrc/system/core -Isrc/syslibc -Isrc/boot/limine \
          -mcmodel=kernel -mno-red-zone -mno-mmx -mno-sse -mno-sse2 \
          -fno-stack-protector -fno-pic -g -MMD -MP
