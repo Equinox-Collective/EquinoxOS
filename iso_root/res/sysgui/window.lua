@@ -1,4 +1,3 @@
---- START OF FILE res/sysgui/window.lua ---
 local Window = {}
 Window.__index = Window
 
@@ -18,7 +17,7 @@ function Window.new(title, x, y, w, h, draw_cb, key_cb)
     self.fullscreen = false
     self.is_app_container = false
     self.minimized = false
-    self.snapped = false -- false, "left", "right", "top"
+    self.snapped = false -- false, "left", "right"
 
     if type(draw_cb) == "table" then
         self.draw_cb = draw_cb.draw
@@ -55,13 +54,13 @@ function Window:draw(mx, my, mdown, dt)
 
     if self.fullscreen then
         win_x, win_y = 0, 24
-        win_w, win_h = sw, sh - 56
+        win_w, win_h = sw, sh - 88
     elseif self.snapped == "left" then
         win_x, win_y = 0, 24
-        win_w, win_h = math.floor(sw / 2), sh - 56
+        win_w, win_h = math.floor(sw / 2), sh - 88
     elseif self.snapped == "right" then
         win_x, win_y = math.floor(sw / 2), 24
-        win_w, win_h = math.floor(sw / 2), sh - 56
+        win_w, win_h = math.floor(sw / 2), sh - 88
     end
 
     local active = (focused_window == self)
@@ -69,85 +68,82 @@ function Window:draw(mx, my, mdown, dt)
     if not self.borderless then
         local ty = win_y - 28
         
-        -- Software Drop Shadow Simulation
-        drawRect(win_x - 4, ty - 4, win_w + 8, win_h + 36, 0x050608)
-        drawRect(win_x - 2, ty - 2, win_w + 4, win_h + 32, 0x0E0F12)
-
-        -- Border & Selection Highlights
-        local border_color = active and 0x0078D7 or 0x3E4452
-        drawRect(win_x - 1, ty - 1, win_w + 2, win_h + 30, border_color)
-
-        -- Acrylic Style Title bar
+        -- macOS Liquid Glass: Накладываем Акриловое скругление с неоновой фаской НА ВСЁ ОКНО ЦЕЛИКОМ!
         if type(drawBlur) == "function" then
-            drawBlur(win_x, ty, win_w, 28, active and 0.50 or 0.40)
+            local tint = active and 0x1E222B or 0x14161D
+            drawBlur(win_x, ty, win_w, win_h + 28, 0.40, 12, tint)
         else
-            drawRect(win_x, ty, win_w, 28, active and 0x21252B or 0x1E2227)
+            -- Fallback
+            drawRect(win_x, ty, win_w, win_h + 28, active and 0x21252B or 0x1E2227)
         end
 
-        -- Active light-bar accent on title top
-        if active then
-            drawRect(win_x, ty, win_w, 1, 0x0078D7)
-        end
+        -- КОНТРОЛЛЕР СВЕТОФОРОВ (Traffic Lights) в левом углу
+        local r_cx, r_cy = win_x + 16, ty + 14
+        local y_cx, y_cy = win_x + 32, ty + 14
+        local g_cx, g_cy = win_x + 48, ty + 14
 
-        -- Window title text
-        drawText(self.title, win_x + 10, ty + 8, active and 0xFFFFFF or 0xABB2BF)
+        local mouse_on_lights = (mx >= win_x + 8 and mx < win_x + 56 and my >= ty + 6 and my < ty + 22)
 
-        -- Action buttons: Minimize [ - ], Maximize [ [] ], Close [ X ]
-        local bx = win_x + win_w - 76
-        
-        -- Minimize Button
-        if button("_", bx, ty + 4, 20, 20) then
-            self.minimized = true
-            _G.needs_redraw = true
-            return
-        end
-        
-        -- Maximize/Restore Button
-        if button("O", bx + 24, ty + 4, 20, 20) then
-            if self.fullscreen or self.snapped then
-                self.fullscreen = false
-                self.snapped = false
-                self.x, self.y, self.w, self.h = self.old_x, self.old_y, self.old_w, self.old_h
-            else
-                self.old_x, self.old_y, self.old_w, self.old_h = self.x, self.y, self.w, self.h
-                self.fullscreen = true
+        if type(drawCircle) == "function" then
+            drawCircle(r_cx, r_cy, 6, 0xFF5F56, true) -- Красный (Close)
+            drawCircle(y_cx, y_cy, 6, 0xFFBD2E, true) -- Желтый (Minimize)
+            drawCircle(g_cx, g_cy, 6, 0x27C93F, true) -- Зеленый (Maximize)
+
+            -- Символы x - + внутри кнопок при наведении
+            if mouse_on_lights then
+                drawText("x", r_cx - 4, r_cy - 7, 0x5C0000)
+                drawText("-", y_cx - 4, y_cy - 7, 0x5C4300)
+                drawText("+", g_cx - 4, g_cy - 7, 0x004700)
             end
-            _G.needs_redraw = true
+        else
+            -- Текстовый фаллбэк если круги не поддерживаются
+            drawText("x - +", win_x + 12, ty + 8, 0xFFFFFF)
         end
 
-        -- Close Button
-        if button("X", bx + 48, ty + 4, 20, 20) then
-            self.active = false
-            _G.needs_redraw = true
-
-            -- Если это контейнер внешнего приложения — завершаем процесс игры
-            if self.is_app_container then
-                if type(getTasks) == "function" and type(killTask) == "function" then
-                    local tasks = getTasks()
-                    for _, t in ipairs(tasks) do
-                        -- Безопасно убиваем только сторонние процессы, пропуская системные (1, 2, 3)
-                        if t.pid ~= 1 and t.pid ~= 2 and t.pid ~= 3 then
-                            killTask(t.pid)
+        -- Логика нажатий на Светофоры
+        if mdown and not last_mdown then
+            if mx >= r_cx - 6 and mx <= r_cx + 6 and my >= r_cy - 6 and my <= r_cy + 6 then
+                -- Закрыть
+                self.active = false
+                _G.needs_redraw = true
+                if self.is_app_container then
+                    if type(getTasks) == "function" and type(killTask) == "function" then
+                        local tasks = getTasks()
+                        for _, t in ipairs(tasks) do
+                            if t.pid ~= 1 and t.pid ~= 2 and t.pid ~= 3 then
+                                killTask(t.pid)
+                            end
                         end
                     end
                 end
+                return
+            elseif mx >= y_cx - 6 and mx <= y_cx + 6 and my >= y_cy - 6 and my <= y_cy + 6 then
+                -- Свернуть
+                self.minimized = true
+                _G.needs_redraw = true
+                return
+            elseif mx >= g_cx - 6 and mx <= g_cx + 6 and my >= g_cy - 6 and my <= g_cy + 6 then
+                -- На весь экран / Сбросить
+                if self.fullscreen or self.snapped then
+                    self.fullscreen = false
+                    self.snapped = false
+                    self.x, self.y, self.w, self.h = self.old_x, self.old_y, self.old_w, self.old_h
+                else
+                    self.old_x, self.old_y, self.old_w, self.old_h = self.x, self.y, self.w, self.h
+                    self.fullscreen = true
+                end
+                _G.needs_redraw = true
             end
-            return
         end
 
-        drawRect(win_x, win_y - 1, win_w, 1, active and 0x0078D7 or 0x3E4452)
+        -- Текст заголовка окна строго по центру (Стиль macOS)
+        local title_len = #self.title * 8
+        local tx = win_x + math.floor((win_w - title_len) / 2)
+        drawText(self.title, tx, ty + 8, active and 0xFFFFFF or 0xABB2BF)
     end
 
-    -- Window Body
+    -- Отрисовка тела окна
     if not self.is_app_container then
-        if not self.borderless then
-            if type(drawBlur) == "function" then
-                drawBlur(win_x, win_y, win_w, win_h, 0.70)
-            else
-                drawRect(win_x, win_y, win_w, win_h, 0x1E1E24)
-            end
-        end
-        
         if self.draw_cb then 
             local original_x, original_y = self.x, self.y
             local original_w, original_h = self.w, self.h
@@ -167,7 +163,7 @@ function Window:draw(mx, my, mdown, dt)
         end
     end
 
-    -- Resize Handle (Visible when fully opened)
+    -- Угловой Resize Handle
     if not self.borderless and not self.fullscreen and not self.snapped and scale >= 0.95 then
         local rx, ry = win_x + win_w - 10, win_y + win_h - 10
         drawRect(rx, ry, 10, 10, active and 0x0078D7 or 0x4E5666)
@@ -184,4 +180,3 @@ function Window:handle_key(key, char)
 end
 
 return Window
---- END OF FILE res/sysgui/window.lua ---
