@@ -22,7 +22,6 @@
 #include "system/mem/vmm.h"
 #include "system/hal/hal.h"
 #include "system/usr/ipc.h"
-#include "system/fs/fd.h"
 
 #include "system/drivers/devices/mouse/mouse.h"
 #include "system/drivers/hardware/net/rtl8139.h"
@@ -35,7 +34,9 @@
 #include "system/fs/ext2.h"
 #include "system/fs/vfs.h"
 #include "system/shell/shell.h"
-#include "system/shell/shellsyntx.h"  /* Этап 7: shell_execute_line для autoexec */
+#include "system/shell/shellsyntx.h"
+
+void term_print(const char *str);
 
 // --- ДИСПЕТЧЕР ВВОДА USB ---
 volatile int g_usb_mouse_found = 0;
@@ -43,11 +44,11 @@ volatile int g_usb_mouse_controller_type = 0; // 1 = UHCI, 2 = OHCI, 3 = EHCI, 4
 volatile uint32_t g_usb_mouse_io_base = 0;
 volatile uintptr_t g_usb_mouse_mmio = 0;
 
-// Импорт шагов опроса
 extern void uhci_poll_mouse_step(uint32_t io_base);
+extern void kprint_raw(const char *str); // Наша графическая консоль
 
 void usb_mouse_thread() {
-    serial_puts(COM1, "[USB] Mouse driver thread active.\n");
+    term_print("[USB] Mouse driver thread active.\n");
     while (1) {
         if (g_usb_mouse_controller_type == 1) {
             uhci_poll_mouse_step(g_usb_mouse_io_base);
@@ -57,7 +58,6 @@ void usb_mouse_thread() {
 }
 
 // --- EXTERNAL VARIABLES ---
-void term_print(const char *str);
 extern size_t used_memory;
 extern volatile uint32_t tick;
 extern char shell_buffer[64];
@@ -82,8 +82,10 @@ LIMINE_REQ static volatile struct limine_hhdm_request hhdm_request = {
     .revision = 3 
 };
 
+// term_print теперь выводит логи И в COM1, И на экран в реальном времени!
 void term_print(const char *str) {
   serial_puts(COM1, str); 
+  kprint_raw(str);
 }
 
 void *sys_get_file(const char *name, uint64_t *size) {
@@ -102,12 +104,10 @@ void *sys_get_file(const char *name, uint64_t *size) {
 char sys_get_key() { return 0; } 
 uint32_t sys_get_time_ms() { return tick; }
 
-// Лёгкая метка времени в COM1 для профилирования загрузки. tick == мс (PIT 1кГц).
-// Смотри зазоры между метками в логе `make run-log`, чтобы найти, что тормозит.
 void klog_t(const char *tag) {
   char b[96];
   sprintf(b, "[T=%ums] %s\n", (unsigned)tick, tag);
-  serial_puts(COM1, b);
+  term_print(b);
 }
 
 uint8_t sys_get_scancode() {
@@ -251,11 +251,9 @@ void emergency_kill_all_and_shell(void) {
 }
 
 void exec_from_disk(const char *filename) {
-  /* Сначала пробуем абсолютный путь через новый VFS */
   uint32_t size = 0;
   uint8_t *elf_data = vfs_read_file(filename, &size);
 
-  /* Если не нашли и путь не абсолютный — пробуем /bin/<name> */
   if (!elf_data && filename[0] != '/') {
     char binpath[256];
     sprintf(binpath, "/bin/%s", filename);
@@ -277,107 +275,91 @@ void exec_from_disk(const char *filename) {
   kfree(elf_data);
 }
 
-// Инициализация «тяжёлого» железа, не нужного для первого кадра GUI:
-// PCI-скан (включает USB-контроллеры), PC-спикер, диспетчер ввода (USB/PS2),
-// сетевой поток. Вызывается либо инлайн в kmain (DEFER_HW_INIT==0), либо как
-// фоновый поток ПОСЛЕ запуска sysgui (DEFER_HW_INIT==1), чтобы рабочий стол
-// появлялся раньше.
 void hw_init_sequence(void) {
   klog_t("hw_init: begin");
-  // 1. Инициализация PCI (обнаружит и включит USB контроллеры)
   pci_init();
   klog_t("hw_init: pci_init/USB done");
-  serial_puts(COM1, "PCI initialized\n");
+  term_print("PCI initialized\n");
   pcspeaker_init();
-  serial_puts(COM1, "PC Speaker initialized\n");
+  term_print("PC Speaker initialized\n");
 
-  // =========================================================================
-  //                  УМНЫЙ ДИСПЕТЧЕР ВВОДА (USB-First, PS/2 Fallback)
-  // =========================================================================
   if (g_usb_mouse_found) {
       char log_buf[128];
       const char* controller_names[] = { "", "UHCI", "OHCI", "EHCI", "xHCI" };
       sprintf(log_buf, "[INPUT] USB Mouse detected on %s controller. Bypassing PS/2.\n",
               controller_names[g_usb_mouse_controller_type]);
-      serial_puts(COM1, log_buf);
-
-      // Создаем фоновый поток ядра под опрос USB мыши
+      term_print(log_buf);
       task_create(usb_mouse_thread, 0, 0, 0);
   } else {
-      serial_puts(COM1, "[INPUT] No USB mouse detected. Trying PS/2 mouse fallback...\n");
+      term_print("[INPUT] No USB mouse detected. Trying PS/2 mouse fallback...\n");
       if (!init_mouse()) {
-          serial_puts(COM1, "[INPUT] No USB or PS/2 devices found, skipping.\n");
+          term_print("[INPUT] No USB or PS/2 devices found, skipping.\n");
       }
   }
 
   klog_t("hw_init: input done");
   task_create(network_thread, 0, 0, 0);
-  serial_puts(COM1, "Network thread started\n");
+  term_print("Network thread started\n");
   klog_t("hw_init: end");
 }
 
 #if DEFER_HW_INIT
-// Точка входа фонового потока инициализации железа. ВАЖНО: task_create НЕ кладёт
-// адрес возврата на стек потока, поэтому вход потока не должен делать `ret` —
-// иначе CPU прыгнет по мусору и словит #GP. hw_init_sequence() сама возвращается
-// (она рассчитана и на инлайн-вызов из kmain при DEFER_HW_INIT==0), поэтому здесь
-// после неё корректно завершаем поток через task_kill_self().
 static void hw_init_task_entry(void) {
   hw_init_sequence();
-  task_kill_self();   // помечает поток мёртвым и навсегда уходит в планировщик
-  for (;;) { yield(); } // подстраховка: сюда уже не вернёмся
+  task_kill_self();   
+  for (;;) { yield(); } 
 }
 #endif
 
 void kmain(void) {
   serial_init(COM1);
-  tty_init();                 /* Этап 5: дефолтные настройки termios консоли */
-  serial_puts(COM1, "\n=== EquinoxOS Kernel Starting ===\n");
+  tty_init();                 
+  term_print("\n=== EquinoxOS Kernel Starting ===\n");
 
   if (hhdm_request.response == NULL) {
-    serial_puts(COM1, "ERROR: Limine HHDM not available!\n");
+    term_print("ERROR: Limine HHDM not available!\n");
     draw_rect_direct(0, 0, 100, 100, 0xFF0000);
     while (1)
       __asm__("cli; hlt");
   }
   hhdm_offset = hhdm_request.response->offset;
-  serial_puts(COM1, "HHDM offset initialized\n");
+  term_print("HHDM offset initialized\n");
 
   init_gdt();
-  serial_puts(COM1, "GDT initialized\n");
+  term_print("GDT initialized\n");
   init_sse();
-  serial_puts(COM1, "SSE initialized\n");
+  term_print("SSE initialized\n");
   rdrand_init();
-  serial_puts(COM1, rdrand_supported()
+  term_print(rdrand_supported()
                         ? "RDRAND available\n"
                         : "RDRAND unavailable, using soft entropy fallback\n");
   pmm_init();
-  serial_puts(COM1, "PMM initialized\n");
+  term_print("PMM initialized\n");
   vmm_init();
-  serial_puts(COM1, "VMM initialized\n");
+  term_print("VMM initialized\n");
 
   init_heap((uint64_t)pmm_alloc_continuous(16384) + hhdm_offset,
             64 * 1024 * 1024);
-  serial_puts(COM1, "Heap initialized\n");
+  term_print("Heap initialized\n");
 
   struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
   init_vesa((uintptr_t)fb->address, fb->width, fb->height, fb->pitch);
-  serial_puts(COM1, "VESA initialized\n");
+  term_print("VESA initialized\n");
 
   __asm__("cli");
 
   init_idt(); 
-  serial_puts(COM1, "IDT initialized\n");
+  term_print("IDT initialized\n");
   pic_remap(); 
-  serial_puts(COM1, "PIC remapped\n");
+  term_print("PIC remapped\n");
   init_timer(1000);
-  serial_puts(COM1, "Timer initialized (1000Hz)\n");
+  term_print("Timer initialized (1000Hz)\n");
   tick = 0;
   extern void irq0_handler_asm();
   set_idt_gate(32, (uint64_t)irq0_handler_asm, 0x08);
 
   __asm__("sti"); 
-  serial_puts(COM1, "Interrupts enabled\n");
+  term_print("Interrupts enabled\n");
 
 #if !FAST_BOOT
   uint32_t start_tick = tick;
@@ -385,34 +367,30 @@ void kmain(void) {
     __asm__ volatile("hlt");
   }
 #endif
-  serial_puts(COM1, "Running kernel tests...\n");
+  term_print("Running kernel tests...\n");
   extern bool eqstart_perform_tests();
   if (!eqstart_perform_tests()) {
   }
-  serial_puts(COM1, "Kernel tests passed\n");
+  term_print("Kernel tests passed\n");
 
   task_init();
-  serial_puts(COM1, "Task system initialized\n");
+  term_print("Task system initialized\n");
   vfs_init();
-  serial_puts(COM1, "VFS initialized\n");
+  term_print("VFS initialized\n");
 
-  /* devfs: /dev/null, /dev/zero, /dev/tty — монтируем первым */
   vfs_mount("/dev", devfs_create_root());
-  serial_puts(COM1, "devfs mounted at /dev\n");
+  term_print("devfs mounted at /dev\n");
 
-  /* EXT2 — основная ФС, монтируем как "/" */
   ext2_init();
   {
     vfs_node_t *_ext2_root = ext2_get_root_node();
     if (_ext2_root) {
       vfs_mount("/", _ext2_root);
-      /* legacy: старый код ищет файлы через vfs_root->next */
       vfs_register_device(_ext2_root);
     }
   }
-  serial_puts(COM1, "EXT2 mounted at /\n");
+  term_print("EXT2 mounted at /\n");
 
-  /* FAT32 — вторичная ФС, монтируем как /fat */
   fat32_init();
   {
     vfs_node_t *_fat_root = fat32_get_root_node();
@@ -421,7 +399,7 @@ void kmain(void) {
       vfs_register_device(_fat_root);
     }
   }
-  serial_puts(COM1, "FAT32 mounted at /fat\n");
+  term_print("FAT32 mounted at /fat\n");
   klog_t("EXT2 ready (timing ref)");
 
   {
@@ -431,7 +409,7 @@ void kmain(void) {
       uint32_t saved = 0;
       if (ext2_read(bt_ino, 0, sizeof(saved), (uint8_t *)&saved) >= sizeof(saved)) {
         boot_eta_set(saved);
-        serial_puts(COM1, "Boot ETA loaded from /boottime\n");
+        term_print("Boot ETA loaded from /boottime\n");
       }
     }
   }
@@ -443,37 +421,28 @@ void kmain(void) {
 #endif
 
 #if !DEFER_HW_INIT
-  // Поднимаем PCI/USB/звук/сеть/мышь до GUI (классический порядок).
   hw_init_sequence();
 #endif
 
   shm_init();
-  serial_puts(COM1, "Shared memory initialized\n");
+  term_print("Shared memory initialized\n");
   ipc_init();
-  serial_puts(COM1, "IPC (pipes + mqueue) initialized\n");
-  /* Этап 2: глобальной fd-таблицы больше нет — у каждого процесса своя
-   * (task->fdt, создаётся в task_init/task_create/fork). */
-  serial_puts(COM1, "FD tables are now per-process\n");
+  term_print("IPC (pipes + mqueue) initialized\n");
+  term_print("FD tables are now per-process\n");
   hal_init();
-  serial_puts(COM1, "HAL initialized\n");
+  term_print("HAL initialized\n");
 
   uint64_t font_size = 0;
   void *font_ptr = sys_get_file("font.psf", &font_size);
   vesa_set_font(font_ptr);
   vesa_set_font_size(font_size); 
-  serial_puts(COM1, "=== EquinoxOS Ready ===\n");
+  term_print("=== EquinoxOS Ready ===\n");
   klog_t("exec sysgui begin");
 
   exec_from_disk("bin/sysgui.elf"); 
-  serial_puts(COM1, "enGUI spawned as Ring 3 init process\n");
+  term_print("enGUI spawned as Ring 3 init process\n");
   klog_t("enGUI spawned");
 
-  /* Этап 10: системный шелл /bin/sh.elf — обязательный компонент. Здесь мы
-   * НЕ запускаем его (его поднимает либо пользователь командой `sh`, либо
-   * autoexec, либо GUI-терминал в будущем), но проверяем, что он вообще
-   * есть на диске. Если файла нет — это сломанная сборка ОС, как Linux
-   * без /sbin/init. Шумим в COM1 баннером, чтобы это нельзя было
-   * пропустить. */
   {
     uint32_t sh_sz = 0;
     uint8_t *sh_buf = vfs_read_file("bin/sh.elf", &sh_sz);
@@ -481,10 +450,10 @@ void kmain(void) {
       char sb[80];
       sprintf(sb, "[init] /bin/sh.elf present (%u bytes) — OK\n",
               (unsigned)sh_sz);
-      serial_puts(COM1, sb);
+      term_print(sb);
       kfree(sh_buf);
     } else {
-      serial_puts(COM1,
+      term_print(
         "\n*****************************************************************\n"
         "*** MISSING SYSTEM COMPONENT: /bin/sh.elf                       ***\n"
         "*** This is the EquinoxOS system shell. Without it the only    ***\n"
@@ -495,10 +464,8 @@ void kmain(void) {
   }
 
 #if DEFER_HW_INIT
-  // Рабочий стол уже запускается — поднимаем тяжёлое железо (PCI/USB/звук/
-  // сеть/мышь) в фоновом потоке, чтобы не задерживать первый кадр GUI.
   task_create(hw_init_task_entry, 0, 0, 0);
-  serial_puts(COM1, "Deferred HW init thread started\n");
+  term_print("Deferred HW init thread started\n");
   klog_t("deferred hw thread created");
 #endif
 
@@ -510,14 +477,9 @@ void kmain(void) {
         boottime_saved = 1;
         uint32_t v = boot_measured_ms;
         ext2_overwrite("/boottime", (const char *)&v, sizeof(v));
-        char bb[80]; sprintf(bb, "Boot time (to first GUI frame) = %u ms\n", (unsigned)v); serial_puts(COM1, bb);
+        char bb[80]; sprintf(bb, "Boot time (to first GUI frame) = %u ms\n", (unsigned)v); term_print(bb);
       }
     }
-    /* Этап 7: autoexec — если на диске лежит файл `autoexec`, после первого
-     * кадра GUI его строки скармливаются шеллу (как будто их ввели в
-     * терминале). Нужен для headless-тестов по COM1 (QEMU/CI): кладём в
-     * iso_root/autoexec строку `run bin/bash.elf` — и тест-харнесс общается
-     * с процессом по серийному порту без GUI. В обычной сборке файла нет. */
     {
       extern volatile uint32_t boot_measured_ms;
       static int autoexec_done = 0;
@@ -526,7 +488,7 @@ void kmain(void) {
         uint32_t asz = 0;
         uint8_t *ax = vfs_read_file("autoexec", &asz);
         if (ax) {
-          serial_puts(COM1, "[autoexec] found, executing\n");
+          term_print("[autoexec] found, executing\n");
           char line[160];
           uint32_t li = 0;
           for (uint32_t i = 0; i <= asz; i++) {
@@ -535,9 +497,9 @@ void kmain(void) {
             if (c == '\n') {
               line[li] = '\0';
               if (li > 0 && line[0] != '#') {
-                serial_puts(COM1, "[autoexec] $ ");
-                serial_puts(COM1, line);
-                serial_puts(COM1, "\n");
+                term_print("[autoexec] $ ");
+                term_print(line);
+                term_print("\n");
                 shell_execute_line(line, term_print);
               }
               li = 0;
