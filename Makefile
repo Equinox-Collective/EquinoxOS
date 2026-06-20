@@ -3,51 +3,31 @@ LD = x86_64-elf-ld
 AR = x86_64-elf-ar
 ASM = nasm
 
-# Pin the default goal to 'all' so a bare `make` always does a full build.
-# Otherwise GNU Make picks the first concrete file target it sees, which after
-# the BearSSL block below is libbearssl.a — making `make clean && make` quietly
-# leave the build with no kernel.elf / no equos.iso.
 .DEFAULT_GOAL := all
 
+# --- КРОСС-ПЛАТФОРМЕННЫЙ СЕКЦИОННЫЙ ХЕЛПЕР ---
 ifeq ($(OS),Windows_NT)
-  # GitHub's Windows image adds MSYS2 to PATH for xorriso, which also exposes
-  # sh.exe. GNU Make will otherwise pick that POSIX shell and then fail on the
-  # cmd.exe-style Windows recipes below (`if not exist ...`). Force cmd.exe for
-  # Windows builds so local mingw/choco make and CI use the same recipe syntax.
   SHELL := cmd.exe
   .SHELLFLAGS := /C
-endif
-
-# --- HOST SHELL ABSTRACTION ----------------------------------------------------
-# Чтобы Makefile собирался И на Windows (cmd.exe, mingw32-make), И на Linux/CI,
-# обёртываем все file-ops в макросы и переключаем их по $(OS). Все pattern-rules
-# ниже общие — отличаются только setup/clean/iso/link recipe-ы.
-ifeq ($(OS),Windows_NT)
-  # cmd.exe ветка — поведение как было раньше.
   E := $(strip)
   bs := \$E
-  # to_win = заменить '/' на '\' (cmd.exe такого не любит)
   to_win = $(subst /,$(bs),$1)
   MKDIR_P  = if not exist "$(call to_win,$1)" mkdir "$(call to_win,$1)"
   RM_F     = if exist "$(call to_win,$1)" del /f /q "$(call to_win,$1)"
   RM_RF    = if exist "$(call to_win,$1)" rmdir /s /q "$(call to_win,$1)"
   CP_F     = copy /Y "$(call to_win,$1)" "$(call to_win,$2)"
-  NULL_OUT = 2>nul
 else
-  # POSIX (Linux CI, macOS).
   MKDIR_P  = mkdir -p "$1"
   RM_F     = rm -f "$1"
   RM_RF    = rm -rf "$1"
   CP_F     = cp -f "$1" "$2"
-  NULL_OUT = 2>/dev/null || true
 endif
 
-# --- PATHS ---
-OBJ_DIR = obj
+# --- НАСТРОЙКИ ПУТЕЙ И ФЛАГОВ ---
+OBJ_DIR     = obj
 SDK_LIB_DIR = sdk/lib
-ISO_ROOT = iso_root
+ISO_ROOT    = iso_root
 
-# --- KERNEL FLAGS ---
 CFLAGS = -ffreestanding -O2 -Wall -Wextra -fno-exceptions -std=c11 \
          -Werror=implicit-function-declaration -Werror=int-conversion \
          -Wmissing-prototypes -Wstrict-prototypes \
@@ -55,209 +35,115 @@ CFLAGS = -ffreestanding -O2 -Wall -Wextra -fno-exceptions -std=c11 \
          -mcmodel=kernel -mno-red-zone -mno-mmx -mno-sse -mno-sse2 \
          -fno-stack-protector -fno-pic -g -MMD -MP
 
-LDFLAGS = -nostdlib -T src/linker.ld -z max-page-size=0x1000
+LDFLAGS  = -nostdlib -T src/linker.ld -z max-page-size=0x1000
 ASMFLAGS = -f elf64
 
-# --- SDK FLAGS (APPS) ---
-SDK_INC = -I./sdk/include
+SDK_INC     = -I./sdk/include
 USER_CFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -g \
               -fno-omit-frame-pointer $(SDK_INC) -MMD -MP -DSDL_DYNAMIC_API=0
 
-# --- KERNEL SOURCES ---
-SRC_DIRS = src src/boot src/syslibc \
-           src/system/core \
-           src/system/drivers/devices/audio \
-           src/system/drivers/devices/keyboard \
-           src/system/drivers/devices/mouse \
-           src/system/drivers/devices/pci \
-           src/system/drivers/devices/pcspeaker \
-		   src/system/drivers/devices/usb \
-           src/system/drivers/hardware/disk \
-           src/system/drivers/hardware/net \
-           src/system/drivers/hardware/serial \
-           src/system/drivers/vesa \
-           src/system/fs \
-           src/system/mem \
-           src/system/misc \
-           src/system/shell \
-           src/system/usr \
-           src/system/hal
+# --- СИСТЕМНЫЕ ИСТОЧНИКИ (ЯДРО) ---
+SRC_DIRS = src src/boot src/syslibc src/system/core \
+           src/system/drivers/devices/audio src/system/drivers/devices/keyboard \
+           src/system/drivers/devices/mouse src/system/drivers/devices/pci \
+           src/system/drivers/devices/pcspeaker src/system/drivers/devices/usb \
+           src/system/drivers/hardware/disk src/system/drivers/hardware/net \
+           src/system/drivers/hardware/serial src/system/drivers/vesa \
+           src/system/fs src/system/mem src/system/misc \
+           src/system/shell src/system/usr src/system/hal
 
-KERNEL_C_SRCS = $(foreach dir,$(SRC_DIRS),$(wildcard $(dir)/*.c))
+KERNEL_C_SRCS   = $(foreach dir,$(SRC_DIRS),$(wildcard $(dir)/*.c))
 KERNEL_ASM_SRCS = $(wildcard src/system/core/*.asm)
-
-KERNEL_OBJS = $(patsubst src/%.c,$(OBJ_DIR)/%.o,$(filter %.c,$(KERNEL_C_SRCS))) \
-              $(patsubst src/%.asm,$(OBJ_DIR)/%.o,$(KERNEL_ASM_SRCS))
-
-# Все obj-подкаталоги, которые надо создать в setup (после $(OBJ_DIR)/...).
-# Берём src-каталоги, отрезаем "src/" префикс, кладём под $(OBJ_DIR)/.
+KERNEL_OBJS     = $(patsubst src/%.c,$(OBJ_DIR)/%.o,$(filter %.c,$(KERNEL_C_SRCS))) \
+                  $(patsubst src/%.asm,$(OBJ_DIR)/%.o,$(KERNEL_ASM_SRCS))
 KERNEL_OBJ_SUBDIRS = $(OBJ_DIR) $(addprefix $(OBJ_DIR)/,$(patsubst src/%,%,$(filter-out src,$(SRC_DIRS))))
 
 # --- SDK OBJECTS ---
-SDK_C_SRCS = $(wildcard $(SDK_LIB_DIR)/*.c)
+SDK_C_SRCS   = $(wildcard $(SDK_LIB_DIR)/*.c)
 SDK_ASM_SRCS = $(wildcard $(SDK_LIB_DIR)/*.asm)
-SDK_OBJS = $(patsubst $(SDK_LIB_DIR)/%.c,$(SDK_LIB_DIR)/%.o,$(SDK_C_SRCS)) \
-           $(patsubst $(SDK_LIB_DIR)/%.asm,$(SDK_LIB_DIR)/%.o,$(SDK_ASM_SRCS))
+SDK_OBJS     = $(patsubst $(SDK_LIB_DIR)/%.c,$(SDK_LIB_DIR)/%.o,$(SDK_C_SRCS)) \
+               $(patsubst $(SDK_LIB_DIR)/%.asm,$(SDK_LIB_DIR)/%.o,$(SDK_ASM_SRCS))
 
-# --- BEARSSL (vendored under third_party/bearssl) -----------------------------
-# Built once as a static library; userspace apps link against it for TLS.
-# Sources are NEVER patched — all platform tweaks happen via -D flags below
-# and via sdk/include/limits.h. See third_party/bearssl/README.equos.md.
-BEARSSL_DIR     := third_party/bearssl
-BEARSSL_INC     := -I./$(BEARSSL_DIR)/inc -I./$(BEARSSL_DIR)/src
-BEARSSL_SRC_DIRS := \
-    $(BEARSSL_DIR)/src \
-    $(BEARSSL_DIR)/src/aead \
-    $(BEARSSL_DIR)/src/codec \
-    $(BEARSSL_DIR)/src/ec \
-    $(BEARSSL_DIR)/src/hash \
-    $(BEARSSL_DIR)/src/int \
-    $(BEARSSL_DIR)/src/kdf \
-    $(BEARSSL_DIR)/src/mac \
-    $(BEARSSL_DIR)/src/rand \
-    $(BEARSSL_DIR)/src/rsa \
-    $(BEARSSL_DIR)/src/ssl \
-    $(BEARSSL_DIR)/src/symcipher \
-    $(BEARSSL_DIR)/src/x509
-BEARSSL_C_SRCS  := $(foreach d,$(BEARSSL_SRC_DIRS),$(wildcard $(d)/*.c))
-BEARSSL_OBJS    := $(BEARSSL_C_SRCS:.c=.o)
-BEARSSL_LIB     := $(BEARSSL_DIR)/libbearssl.a
+# --- ПАРСИНГ ФЛАГОВ SKIP (Изящный сплит через пробелы) ---
+comma := ,
+space := $(subst ,, )
+SKIP_WORDS   := $(subst $(comma),$(space),$(SKIP))
 
-# BR_USE_URANDOM / BR_USE_WIN32_RAND : disable platform-specific seeders;
-#   we seed BearSSL ourselves from sys_getrandom() (phase 3b shim).
-# BR_64                              : force the 64-bit codepath (we're x86_64).
-BEARSSL_CFLAGS  := $(USER_CFLAGS) $(BEARSSL_INC) \
-                   -DBR_USE_URANDOM=0 -DBR_USE_WIN32_RAND=0 -DBR_64=1 \
-                   -W -Wall -Os
+SKIP_DOOM    := $(filter doom,$(SKIP_WORDS))
+SKIP_BEARSSL := $(filter bearssl,$(SKIP_WORDS))
+SKIP_QUICKJS := $(filter quickjs,$(SKIP_WORDS))
+SKIP_SDL2    := $(filter sdl2,$(SKIP_WORDS))
 
+# --- СТОРОННИЕ БИБЛИОТЕКИ (ВЫНЕСЕНЫ В ОТДЕЛЬНЫЕ БЛОКИ) ---
+
+# BearSSL
+BEARSSL_DIR       := third_party/bearssl
+BEARSSL_SRC_DIRS  := $(BEARSSL_DIR)/src $(foreach d,aead codec ec hash int kdf mac rand rsa ssl symcipher x509,$(BEARSSL_DIR)/src/$(d))
+BEARSSL_C_SRCS    := $(foreach d,$(BEARSSL_SRC_DIRS),$(wildcard $(d)/*.c))
+BEARSSL_OBJS      := $(BEARSSL_C_SRCS:.c=.o)
+BEARSSL_LIB       := $(BEARSSL_DIR)/libbearssl.a
+BEARSSL_CFLAGS    := $(USER_CFLAGS) -I./$(BEARSSL_DIR)/inc -I./$(BEARSSL_DIR)/src -DBR_USE_URANDOM=0 -DBR_USE_WIN32_RAND=0 -DBR_64=1 -Os
+
+# QuickJS
+QUICKJS_DIR       := third_party/quickjs
+QUICKJS_C_SRCS    := $(addprefix $(QUICKJS_DIR)/,quickjs.c dtoa.c libregexp.c libunicode.c)
+QUICKJS_OBJS      := $(QUICKJS_C_SRCS:.c=.o)
+QUICKJS_LIB       := $(QUICKJS_DIR)/libquickjs.a
+QUICKJS_CFLAGS    := $(USER_CFLAGS) -I./$(QUICKJS_DIR) -DNO_TM_GMTOFF -D_GNU_SOURCE -Os \
+                     -Wno-unused -Wno-sign-compare -Wno-pointer-sign -Wno-implicit-fallthrough \
+                     -Wno-unused-parameter -Wno-format -Wno-format-extra-args -Wno-cast-function-type
+
+# SDL2
+SDL_DIR           := third_party/sdl2
+SDL_SRCS          := $(SDL_DIR)/SDL.c $(SDL_DIR)/SDL_assert.c $(SDL_DIR)/SDL_dataqueue.c \
+                     $(SDL_DIR)/SDL_error.c $(SDL_DIR)/SDL_guid.c $(SDL_DIR)/SDL_hints.c \
+                     $(SDL_DIR)/SDL_log.c $(SDL_DIR)/SDL_utils.c $(SDL_DIR)/SDL_list.c \
+                     $(SDL_DIR)/file/SDL_rwops.c $(SDL_DIR)/thread/SDL_thread.c \
+                     $(SDL_DIR)/render/SDL_render.c $(SDL_DIR)/render/SDL_yuv_sw.c \
+                     $(SDL_DIR)/timer/SDL_timer.c $(SDL_DIR)/timer/dummy/SDL_systimer.c \
+                     $(wildcard $(SDL_DIR)/stdlib/*.c) $(wildcard $(SDL_DIR)/cpuinfo/*.c) \
+                     $(wildcard $(SDL_DIR)/events/*.c) $(wildcard $(SDL_DIR)/video/*.c) \
+                     $(wildcard $(SDL_DIR)/video/equinox/*.c) $(wildcard $(SDL_DIR)/video/yuv2rgb/*.c) \
+                     $(wildcard $(SDL_DIR)/atomic/*.c) $(wildcard $(SDL_DIR)/thread/generic/*.c) \
+                     $(wildcard $(SDL_DIR)/libm/*.c) $(wildcard $(SDL_DIR)/render/software/*.c)
+SDL_OBJS          := $(SDL_SRCS:.c=.o)
+SDL_LIB           := $(SDL_DIR)/libSDL2.a
+SDL_CFLAGS        := $(USER_CFLAGS) -I./$(SDL_DIR) -I./$(SDL_DIR)/include -Os -DHAVE_FLOOR -DHAVE_CEIL -fno-strict-aliasing
+
+# --- ПРАВИЛА СБОРКИ СТОРОННИХ БИБЛИОТЕК ---
 $(BEARSSL_DIR)/src/%.o: $(BEARSSL_DIR)/src/%.c
 	$(CC) $(BEARSSL_CFLAGS) -c $< -o $@
 
 $(BEARSSL_LIB): $(BEARSSL_OBJS)
-	@echo === Building libbearssl.a ===
 	$(AR) -rcs $@ $(BEARSSL_OBJS)
-
-libbearssl: $(BEARSSL_LIB)
-
-# --- QUICKJS (vendored under third_party/quickjs) -----------------------------
-# Built once as a static library; userspace apps link against it to execute
-# JavaScript. Sources are NEVER patched — all EquinoxOS adaptation happens
-# through SDK headers (sdk/include/pthread.h, alloca.h, sys/time.h),
-# sdk/lib/qjs_time.c (gettimeofday + clock_gettime + gmtime_r), and the
-# -D defines below. See third_party/quickjs/README.equos.md.
-QUICKJS_DIR     := third_party/quickjs
-QUICKJS_INC     := -I./$(QUICKJS_DIR)
-QUICKJS_C_SRCS  := $(QUICKJS_DIR)/quickjs.c \
-                   $(QUICKJS_DIR)/dtoa.c \
-                   $(QUICKJS_DIR)/libregexp.c \
-                   $(QUICKJS_DIR)/libunicode.c
-QUICKJS_OBJS    := $(QUICKJS_C_SRCS:.c=.o)
-QUICKJS_LIB     := $(QUICKJS_DIR)/libquickjs.a
-
-# NO_TM_GMTOFF      : our struct tm has no tm_gmtoff field — fall back to
-#                     the mktime(gmtime_r) - mktime(localtime_r) path
-#                     (both return UTC on EquinoxOS, so offset = 0).
-# _GNU_SOURCE       : enables a few GNU-isms QuickJS' cutils.h expects.
-# -Wno-*            : QuickJS upstream is warning-clean on its own
-#                     toolchain but not against -Wall -Wextra of our
-#                     freestanding cross; silence the noise without
-#                     patching sources.
-QUICKJS_CFLAGS  := $(USER_CFLAGS) $(QUICKJS_INC) \
-                   -DNO_TM_GMTOFF -D_GNU_SOURCE \
-                   -Wno-unused -Wno-sign-compare -Wno-pointer-sign \
-                   -Wno-implicit-fallthrough -Wno-unused-parameter \
-                   -Wno-format -Wno-format-extra-args -Wno-cast-function-type \
-                   -Os
 
 $(QUICKJS_DIR)/%.o: $(QUICKJS_DIR)/%.c
 	$(CC) $(QUICKJS_CFLAGS) -c $< -o $@
 
 $(QUICKJS_LIB): $(QUICKJS_OBJS)
-	@echo === Building libquickjs.a ===
 	$(AR) -rcs $@ $(QUICKJS_OBJS)
-
-libquickjs: $(QUICKJS_LIB)
-
-SDL_DIR := third_party/sdl2
-SDL_INC := -I./$(SDL_DIR) -I./$(SDL_DIR)/include
-SDL_SRCS := \
-    $(SDL_DIR)/SDL.c \
-    $(SDL_DIR)/SDL_assert.c \
-    $(SDL_DIR)/SDL_dataqueue.c \
-    $(SDL_DIR)/SDL_error.c \
-    $(SDL_DIR)/SDL_guid.c \
-    $(SDL_DIR)/SDL_hints.c \
-    $(SDL_DIR)/SDL_log.c \
-    $(SDL_DIR)/SDL_utils.c \
-    $(SDL_DIR)/SDL_list.c \
-    $(SDL_DIR)/file/SDL_rwops.c \
-    $(wildcard $(SDL_DIR)/stdlib/*.c) \
-    $(wildcard $(SDL_DIR)/cpuinfo/*.c) \
-    $(wildcard $(SDL_DIR)/events/*.c) \
-    $(wildcard $(SDL_DIR)/video/*.c) \
-    $(wildcard $(SDL_DIR)/video/equinox/*.c) \
-    $(wildcard $(SDL_DIR)/video/yuv2rgb/*.c) \
-    $(wildcard $(SDL_DIR)/atomic/*.c) \
-    $(SDL_DIR)/thread/SDL_thread.c \
-    $(wildcard $(SDL_DIR)/thread/generic/*.c) \
-    $(wildcard $(SDL_DIR)/libm/*.c) \
-    $(SDL_DIR)/render/SDL_render.c \
-    $(SDL_DIR)/render/SDL_yuv_sw.c \
-    $(wildcard $(SDL_DIR)/render/software/*.c) \
-    $(SDL_DIR)/timer/SDL_timer.c \
-    $(SDL_DIR)/timer/dummy/SDL_systimer.c
-
-SDL_OBJS    := $(SDL_SRCS:.c=.o)
-SDL_LIB     := $(SDL_DIR)/libSDL2.a
-# HAVE_FLOOR/HAVE_CEIL: маршрутизируем SDL_floor/SDL_ceil (и производные
-# SDL_floorf/ceilf/trunc/round/lround) на libc floor/ceil из sdk/lib/math.c
-# (рабочие, -O0). Встроенный SDL_uclibc_floor (libm/s_floor.c) под -Os
-# мискомпилировался в ring3 и возвращал 0 -> viewport=0 -> чёрный экран.
-# -fno-strict-aliasing страхует остальной libm SDL (sin/cos/atan2/sqrt),
-# использующий union type-punning в EXTRACT_WORDS/INSERT_WORDS.
-SDL_CFLAGS  := $(USER_CFLAGS) $(SDL_INC) -Os -DHAVE_FLOOR -DHAVE_CEIL -fno-strict-aliasing
 
 $(SDL_DIR)/%.o: $(SDL_DIR)/%.c
 	$(CC) $(SDL_CFLAGS) -c $< -o $@
 
 $(SDL_LIB): $(SDL_OBJS)
-	@echo === Building libSDL2.a ===
 	$(AR) -rcs $@ $(SDL_OBJS)
 
-libsdl2: $(SDL_LIB)
+# --- ПРИЛОЖЕНИЯ И ЗАВИСИМОСТИ ---
 
+# Doom
+DOOM_DIR  := app/doom
+DOOM_SRCS := $(wildcard $(DOOM_DIR)/*.c)
+DOOM_OBJS := $(patsubst $(DOOM_DIR)/%.c, $(OBJ_DIR)/doom/%.o, $(DOOM_SRCS))
 
-# --- DOOM ---
-DOOM_DIR = app/doom
-DOOM_SRCS = $(wildcard $(DOOM_DIR)/*.c)
-DOOM_OBJS = $(patsubst $(DOOM_DIR)/%.c, $(OBJ_DIR)/doom/%.o, $(DOOM_SRCS))
-
-
-# --- OPTIONAL COMPONENT SKIPS ---
-# Позволяет пропускать тяжелые компоненты при разработке (например, при cleanrun).
-# Поддерживает синтаксис SKIP=doom,bearssl или отдельные флаги SKIP_DOOM=1 / SKIP_BEARSSL=1.
-ifneq ($(findstring doom,$(SKIP)),)
-  SKIP_DOOM = 1
-endif
-ifneq ($(findstring bearssl,$(SKIP)),)
-  SKIP_BEARSSL = 1
-endif
-ifneq ($(findstring quickjs,$(SKIP)),)
-  SKIP_QUICKJS = 1
-endif
-ifneq ($(findstring sdl2,$(SKIP)),)
-  SKIP_SDL2 = 1
-endif
-
-# Определение зависимостей
-ifeq ($(SKIP_DOOM),1)
+ifeq ($(SKIP_DOOM),doom)
   DOOM_DEP =
 else
   DOOM_DEP = doom.elf
 endif
 
-# SDL2
-ifeq ($(SKIP_SDL2),1)
+# SDL2 Apps
+ifeq ($(SKIP_SDL2),sdl2)
   SDL_DEP =
   SDL_APPS_DEP =
 else
@@ -265,8 +151,8 @@ else
   SDL_APPS_DEP = $(ISO_ROOT)/bin/sdltest.elf
 endif
 
-# BearSSL + QuickJS (связаны, так как JS-фетч требует TLS)
-ifeq ($(SKIP_BEARSSL),1)
+# BearSSL & QuickJS
+ifeq ($(SKIP_BEARSSL),bearssl)
   BEARSSL_DEP =
   TLS_APPS_DEP =
   QUICKJS_DEP =
@@ -274,9 +160,7 @@ ifeq ($(SKIP_BEARSSL),1)
 else
   BEARSSL_DEP = $(BEARSSL_LIB)
   TLS_APPS_DEP = $(APP_ELFS_TLS)
-  
-  # QuickJS может быть выключен отдельно, даже если BearSSL оставлен
-  ifeq ($(SKIP_QUICKJS),1)
+  ifeq ($(SKIP_QUICKJS),quickjs)
     QUICKJS_DEP =
     QJS_APPS_DEP =
   else
@@ -285,41 +169,25 @@ else
   endif
 endif
 
-
-# --- MAIN RULES ---
-
-# Full local build: compile everything, generate hdd.img, then build the ISO.
-# Keep these targets behind explicit dependencies so `make -j` cannot run
-# `create_hdd` before the app binaries (notably bin/doom.elf) are ready.
+# --- ОСНОВНЫЕ ЦЕЛИ (all, ci, setup) ---
 all: create_hdd iso
-
-# CI variant: build the ISO artifacts without generating hdd.img.
 ci: iso
 
-# --- SETUP -------------------------------------------------------------------
-ifeq ($(OS),Windows_NT)
 setup:
-	@if not exist $(OBJ_DIR) mkdir $(OBJ_DIR)
-	@if not exist $(OBJ_DIR)\doom mkdir $(OBJ_DIR)\doom
-	@if not exist $(OBJ_DIR)\system mkdir $(OBJ_DIR)\system
-	@if not exist $(ISO_ROOT)\sys mkdir $(ISO_ROOT)\sys
-	@if not exist $(ISO_ROOT)\bin mkdir $(ISO_ROOT)\bin
-	@if not exist $(ISO_ROOT)\res mkdir $(ISO_ROOT)\res
-	@if not exist $(ISO_ROOT)\EFI\BOOT mkdir $(ISO_ROOT)\EFI\BOOT
-	@for %%d in ($(subst /,\\,$(SRC_DIRS))) do @if not exist $(OBJ_DIR)\%%d mkdir $(OBJ_DIR)\%%d 2>nul
-else
-setup:
-	@mkdir -p $(OBJ_DIR) $(OBJ_DIR)/doom $(OBJ_DIR)/system
-	@mkdir -p $(ISO_ROOT)/sys $(ISO_ROOT)/bin $(ISO_ROOT)/res $(ISO_ROOT)/EFI/BOOT
-	@mkdir -p $(KERNEL_OBJ_SUBDIRS)
-endif
+	@$(call MKDIR_P,$(OBJ_DIR))
+	@$(call MKDIR_P,$(OBJ_DIR)/doom)
+	@$(call MKDIR_P,$(OBJ_DIR)/system)
+	@$(call MKDIR_P,$(ISO_ROOT)/sys)
+	@$(call MKDIR_P,$(ISO_ROOT)/bin)
+	@$(call MKDIR_P,$(ISO_ROOT)/res)
+	@$(call MKDIR_P,$(ISO_ROOT)/EFI/BOOT)
+	$(foreach dir,$(KERNEL_OBJ_SUBDIRS),$(call MKDIR_P,$(dir)) &&) @echo Setup complete.
 
-# --- KERNEL LINK -------------------------------------------------------------
+# --- СБОРКА ЯДРА И СИСТЕМНЫХ ФАЙЛОВ ---
 kernel.elf: setup $(KERNEL_OBJS)
 	$(LD) $(LDFLAGS) $(KERNEL_OBJS) -o kernel.elf
 	@$(call CP_F,kernel.elf,$(ISO_ROOT)/sys/kernel.elf)
 
-# --- KERNEL BUILD RULES ------------------------------------------------------
 $(OBJ_DIR)/%.o: src/%.c
 	@$(call MKDIR_P,$(@D))
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -328,14 +196,14 @@ $(OBJ_DIR)/%.o: src/%.asm
 	@$(call MKDIR_P,$(@D))
 	$(ASM) $(ASMFLAGS) $< -o $@
 
-# --- SDK BUILD RULES ---------------------------------------------------------
+# --- СБОРКА ЮЗЕРСПЕЙС SDK ---
 $(SDK_LIB_DIR)/%.o: $(SDK_LIB_DIR)/%.c
 	$(CC) $(USER_CFLAGS) -c $< -o $@
 
 $(SDK_LIB_DIR)/%.o: $(SDK_LIB_DIR)/%.asm
 	$(ASM) -f elf64 $< -o $@
 
-# --- DOOM BUILD RULES --------------------------------------------------------
+# --- ПРАВИЛА СБОРКИ DOOM ---
 $(OBJ_DIR)/doom/%.o: $(DOOM_DIR)/%.c
 	@$(call MKDIR_P,$(OBJ_DIR)/doom)
 	$(CC) $(USER_CFLAGS) -DDOOMGENERIC_RESX=640 -DDOOMGENERIC_RESY=400 -DFEATURE_SOUND -c $< -o $@
@@ -343,214 +211,11 @@ $(OBJ_DIR)/doom/%.o: $(DOOM_DIR)/%.c
 doom.elf: setup $(SDK_OBJS) $(DOOM_OBJS)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $(DOOM_OBJS) -o $(ISO_ROOT)/bin/doom.elf
 
-# --- APPS BUILD RULES --------------------------------------------------------
-APP_SRCS = $(wildcard app/*.c)
-APP_OBJS = $(patsubst app/%.c,app/%.o,$(APP_SRCS))
-APP_ELFS_SIMPLE = $(ISO_ROOT)/bin/snake.elf $(ISO_ROOT)/bin/bmpview.elf $(ISO_ROOT)/bin/htmlview.elf $(ISO_ROOT)/bin/niplay.elf $(ISO_ROOT)/bin/widget_demo.elf $(ISO_ROOT)/bin/ipc_test.elf $(ISO_ROOT)/bin/randtest.elf $(ISO_ROOT)/bin/socktest.elf $(ISO_ROOT)/bin/forktest.elf $(ISO_ROOT)/bin/exectest.elf $(ISO_ROOT)/bin/pipetest.elf $(ISO_ROOT)/bin/envtest.elf $(ISO_ROOT)/bin/sigtest.elf $(ISO_ROOT)/bin/ttytest.elf $(ISO_ROOT)/bin/lxtest.elf $(ISO_ROOT)/bin/stktest.elf $(ISO_ROOT)/bin/fstest.elf $(ISO_ROOT)/bin/mmfork.elf
-
-# Apps that link against libbearssl.a (phase 3b+). These get their own
-# explicit rules below because they need (a) BearSSL public headers in the
-# include path and (b) libbearssl.a appended at link time.
-APP_ELFS_MUSL   = $(ISO_ROOT)/bin/musltest.elf $(ISO_ROOT)/bin/stattest.elf $(ISO_ROOT)/bin/dirtest.elf $(ISO_ROOT)/bin/ltsig.elf $(ISO_ROOT)/bin/ltjob.elf $(ISO_ROOT)/bin/ltjob2.elf $(ISO_ROOT)/bin/bash.elf $(ISO_ROOT)/bin/busybox.elf $(ISO_ROOT)/bin/sh.elf
-APP_ELFS_TLS    = $(ISO_ROOT)/bin/tlsboot.elf $(ISO_ROOT)/bin/tlstest.elf $(ISO_ROOT)/bin/catest.elf $(ISO_ROOT)/bin/httpsget.elf $(ISO_ROOT)/bin/urlget.elf $(ISO_ROOT)/bin/browser.elf
-APP_ELFS_QJS    = $(ISO_ROOT)/bin/jstest.elf $(ISO_ROOT)/bin/domtest.elf $(ISO_ROOT)/bin/jsdomtest.elf $(ISO_ROOT)/bin/jsfetchtest.elf $(ISO_ROOT)/bin/jspagetest.elf
-
-# DOM tree library — used by domtest, htmlview, browser, and (later) the
-# JS DOM bindings. Lives in its own directory so it isn't auto-folded
-# into $(SDK_OBJS); apps opt in by linking $(DOM_OBJ). Defined here
-# (above the htmlview/browser rules) so make can see it during rule
-# expansion.
-DOM_OBJ := sdk/lib_dom/dom.o
-
-# Phase 5: HTTP/HTTPS client library. Lives in its own directory so it
-# isn't auto-folded into $(SDK_OBJS) — apps that need it append
-# $(HTTP_CLIENT_OBJ) explicitly. Built with bearssl includes because
-# the .c #includes <bearssl.h> / <bearssl_io.h>.
+# --- ЮЗЕРСПЕЙС ПРИЛОЖЕНИЯ (ПРОСТЫЕ, MUSL, TLS, JS) ---
+APP_SRCS        := $(wildcard app/*.c)
+APP_OBJS        := $(patsubst app/%.c,app/%.o,$(APP_SRCS))
+DOM_OBJ         := sdk/lib_dom/dom.o
 HTTP_CLIENT_OBJ := sdk/lib_http/http_client.o
-
-# Object builds need the Windows directory tree from setup before they start;
-# this matters when users run `make -j`.
-$(KERNEL_OBJS) $(SDK_OBJS) $(APP_OBJS) $(DOOM_OBJS): | setup
-
-# BearSSL / TLS / QuickJS deps are dynamic (see SKIP= switch above) so a
-# `make SKIP=bearssl` minimal build drops them cleanly.
-apps: setup $(SDK_OBJS) $(BEARSSL_DEP) $(QUICKJS_DEP) $(SDL_DEP) \
-      $(APP_ELFS_SIMPLE) $(APP_ELFS_MUSL) $(TLS_APPS_DEP) $(QJS_APPS_DEP) $(SDL_APPS_DEP) \
-      $(if $(SKIP_SDL2),,sysgui_app)
-
-$(ISO_ROOT)/bin/%.elf: app/%.o $(SDK_OBJS)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< -o $@
-
-# stktest.elf — Этап 6b-1: тест SysV initial stack. Определяет СВОЙ _start
-# (читает argc/argv/envp/auxv прямо со стека, как musl), поэтому линкуется БЕЗ
-# SDK_OBJS — иначе конфликт символа _start с crt0.
-$(ISO_ROOT)/bin/stktest.elf: app/stktest.o
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start app/stktest.o -o $@
-
-# fstest.elf — Этап 6b: тест выживания FS_BASE (TLS) через переключения
-# контекста. Тоже свой _start, без SDK_OBJS.
-$(ISO_ROOT)/bin/fstest.elf: app/fstest.o
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start app/fstest.o -o $@
-
-# musltest.elf — Этап 6b-2: первый запуск НАСТОЯЩЕЙ musl libc.
-# Линкуется с предсобранной vendored-musl (third_party/musl) — собирать musl
-# на Windows НЕ нужно. _start/crt1 musl читает SysV-кадр (6b-1) и ставит TLS.
-#   * Компилируем БЕЗ SDK-инклудов: -nostdinc + только musl-заголовки.
-#   * Своё правило app/musltest.o перекрывает общий шаблон app/%.o.
-MUSL_DIR  = third_party/musl
-MUSL_LIB  = $(MUSL_DIR)/lib
-MUSL_CFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector \
-              -fno-pic -g -nostdinc -isystem $(MUSL_DIR)/include
-
-app/musltest.o: app/musltest.c
-	$(CC) $(MUSL_CFLAGS) -c $< -o $@
-
-$(ISO_ROOT)/bin/musltest.elf: app/musltest.o $(MUSL_LIB)/libc.a
-	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 \
-	  $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/musltest.o \
-	  $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
-
-# stattest.elf — Этап 6c-1: stdio-файлы musl + Linux struct stat. Та же схема
-# линковки с vendored-musl, что и у musltest.
-app/stattest.o: app/stattest.c
-	$(CC) $(MUSL_CFLAGS) -c $< -o $@
-
-$(ISO_ROOT)/bin/stattest.elf: app/stattest.o $(MUSL_LIB)/libc.a
-	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 \
-	  $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/stattest.o \
-	  $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
-
-# dirtest.elf — Этап 6c-2: каталоги через musl opendir/readdir (getdents64).
-# Та же схема линковки с vendored-musl, что и у stattest/musltest.
-app/dirtest.o: app/dirtest.c
-	$(CC) $(MUSL_CFLAGS) -c $< -o $@
-
-$(ISO_ROOT)/bin/dirtest.elf: app/dirtest.o $(MUSL_LIB)/libc.a
-	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 \
-	  $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/dirtest.o \
-	  $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
-
-# ltsig.elf — Этап 6d: настоящий rt_sigaction/rt_sigprocmask через vendored-musl.
-app/ltsig.o: app/ltsig.c
-	$(CC) $(MUSL_CFLAGS) -c $< -o $@
-
-$(ISO_ROOT)/bin/ltsig.elf: app/ltsig.o $(MUSL_LIB)/libc.a
-	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 \
-	  $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/ltsig.o \
-	  $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
-
-# ltjob.elf — Этап 6e-1: fork/wait4 (wait-status) + группы процессов (pgid).
-app/ltjob.o: app/ltjob.c
-	$(CC) $(MUSL_CFLAGS) -c $< -o $@
-
-$(ISO_ROOT)/bin/ltjob.elf: app/ltjob.o $(MUSL_LIB)/libc.a
-	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 \
-	  $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/ltjob.o \
-	  $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
-
-# ltjob2.elf — Этап 6e-2: tcsetpgrp/tcgetpgrp (ioctl) + WNOHANG в wait4.
-app/ltjob2.o: app/ltjob2.c
-	$(CC) $(MUSL_CFLAGS) -c $< -o $@
-
-$(ISO_ROOT)/bin/ltjob2.elf: app/ltjob2.o $(MUSL_LIB)/libc.a
-	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 \
-	  $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/ltjob2.o \
-	  $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
-
-# bash.elf — Этап 7: НАСТОЯЩИЙ GNU bash 5.2.37 поверх vendored-musl.
-# third_party/bash/bash.o — предсобранный relocatable-объект (ld -r всех
-# .o bash'а, без libc), собирать bash на Windows НЕ нужно. Как он сделан —
-# см. third_party/bash/BUILD_NOTES.md. Линкуется по той же схеме, что и
-# musltest: musl crt1 + libc.a, статически, Ttext=0x1000000.
-$(ISO_ROOT)/bin/bash.elf: third_party/bash/bash.o $(MUSL_LIB)/libc.a
-	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 \
-	  $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o third_party/bash/bash.o \
-	  $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
-
-$(ISO_ROOT)/bin/busybox.elf: third_party/busybox/busybox.o $(MUSL_LIB)/libc.a
-	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 \
-	  $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o third_party/busybox/busybox.o \
-	  $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
-
-# sh.elf — Этап 10: системный шелл EquinoxOS. Тонкая обёртка над bash:
-# печатает баннер + /etc/motd, ставит окружение (PATH/HOME/SHELL/TERM/PS1),
-# зовёт execve("/bin/bash.elf", ...). Та же схема линковки, что у
-# musltest/bash — vendored-musl, статика, Ttext=0x1000000. Исходник лежит
-# в подкаталоге app/sh/, поэтому не попадает под шаблон app/%.o и имеет
-# собственное правило.
-app/sh/sh.o: app/sh/sh.c
-	$(CC) $(MUSL_CFLAGS) -c $< -o $@
-
-$(ISO_ROOT)/bin/sh.elf: app/sh/sh.o $(MUSL_LIB)/libc.a
-	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 \
-	  $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/sh/sh.o \
-	  $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
-
-app/%.o: app/%.c
-	$(CC) $(USER_CFLAGS) -c $< -o $@
-
-# TLS apps: bearssl headers visible at compile, libbearssl.a appended at link.
-app/tlsboot.o: app/tlsboot.c
-	$(CC) $(USER_CFLAGS) -I./third_party/bearssl/inc -c $< -o $@
-
-$(ISO_ROOT)/bin/tlsboot.elf: app/tlsboot.o $(SDK_OBJS) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(BEARSSL_LIB) -o $@
-
-app/tlstest.o: app/tlstest.c app/ca_anchors.h
-	$(CC) $(USER_CFLAGS) -I./third_party/bearssl/inc -c $< -o $@
-
-$(ISO_ROOT)/bin/tlstest.elf: app/tlstest.o $(SDK_OBJS) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(BEARSSL_LIB) -o $@
-
-app/catest.o: app/catest.c third_party/ca_bundle/ca_bundle.h
-	$(CC) $(USER_CFLAGS) -I./third_party/bearssl/inc -c $< -o $@
-
-app/sdltest.o: app/sdltest.c
-	$(CC) $(USER_CFLAGS) -I./third_party/sdl2/include/ -c $< -o $@
-
-$(ISO_ROOT)/bin/sdltest.elf: app/sdltest.o $(SDK_OBJS) $(SDL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(SDL_LIB) -o $@
-
-$(ISO_ROOT)/bin/catest.elf: app/catest.o $(SDK_OBJS) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(BEARSSL_LIB) -o $@
-
-# httpsget — real-internet HTTPS smoke test (phase 4c). Same toolchain as
-# catest (needs the Mozilla TA bundle header) plus the bearssl public
-# headers; otherwise just a normal TLS-linked app.
-app/httpsget.o: app/httpsget.c third_party/ca_bundle/ca_bundle.h
-	$(CC) $(USER_CFLAGS) -I./third_party/bearssl/inc -c $< -o $@
-
-$(ISO_ROOT)/bin/httpsget.elf: app/httpsget.o $(SDK_OBJS) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(BEARSSL_LIB) -o $@
-
-# urlget — phase 5 wrapper around the new http_client library. Same link
-# soup as the other TLS apps + the dedicated http_client object.
-sdk/lib_http/http_client.o: sdk/lib_http/http_client.c sdk/include/http_client.h sdk/include/url.h
-	$(CC) $(USER_CFLAGS) -I./third_party/bearssl/inc -c $< -o $@
-
-app/urlget.o: app/urlget.c sdk/include/http_client.h sdk/include/url.h third_party/ca_bundle/ca_bundle.h
-	$(CC) $(USER_CFLAGS) -I./third_party/bearssl/inc -c $< -o $@
-
-$(ISO_ROOT)/bin/urlget.elf: app/urlget.o $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(HTTP_CLIENT_OBJ) $(BEARSSL_LIB) -o $@
-
-# browser.elf — phase 6 GUI browser. Compiles app/htmlview.c a SECOND time
-# with -DBROWSER_BUILD, which swaps its load_page() for the eq_http_get()
-# variant (full HTTP/HTTPS via the phase-5 client). htmlview.elf is built
-# from the same source without the define and keeps its original local-file
-# loading path, so both binaries coexist.
-app/htmlview_browser.o: app/htmlview.c sdk/include/http_client.h sdk/include/url.h sdk/include/dom.h third_party/ca_bundle/ca_bundle.h sdk/include/qjs_page.h
-	$(CC) $(USER_CFLAGS) -DBROWSER_BUILD -I./third_party/bearssl/inc -I./third_party/quickjs -c $< -o $@
-
-# browser.elf links the full QuickJS + DOM-bindings + fetch stack so
-# inline <script> on a loaded page runs through phase J6a / J7.
-#
-# NOTE: prerequisites use immediate variable expansion, so every
-# variable referenced in the browser.elf rule's deps list must be
-# defined ABOVE this point. QJS_HELPERS_OBJ / DOM_JS_OBJ / QJS_FETCH_OBJ
-# (further down) are forward-declared here so the rule below sees them;
-# their recipes still live next to the matching test-app rules to keep
-# the per-phase grouping readable.
 QJS_PAGE_OBJ    := sdk/lib_qjs/qjs_page.o
 QJS_WINDOW_OBJ  := sdk/lib_qjs/qjs_window.o
 QJS_HELPERS_OBJ := sdk/lib_qjs/qjs_helpers.o
@@ -558,108 +223,136 @@ DOM_JS_OBJ      := sdk/lib_qjs/dom_js.o
 QJS_FETCH_OBJ   := sdk/lib_qjs/qjs_fetch.o
 IMAGE_DECODE_OBJ := sdk/lib_image/image_decode.o
 
-sdk/lib_image/image_decode.o: sdk/lib_image/image_decode.c sdk/include/image_decode.h third_party/stb_image/stb_image.h
-	$(CC) $(USER_CFLAGS) -I./third_party/stb_image -Wno-unused-function -Wno-implicit-fallthrough -c $< -o $@
+APP_ELFS_SIMPLE := $(addprefix $(ISO_ROOT)/bin/,snake.elf bmpview.elf htmlview.elf niplay.elf widget_demo.elf ipc_test.elf randtest.elf socktest.elf forktest.elf exectest.elf pipetest.elf envtest.elf sigtest.elf ttytest.elf lxtest.elf stktest.elf fstest.elf mmfork.elf)
+APP_ELFS_MUSL   := $(addprefix $(ISO_ROOT)/bin/,musltest.elf stattest.elf dirtest.elf ltsig.elf ltjob.elf ltjob2.elf bash.elf busybox.elf sh.elf)
+APP_ELFS_TLS    := $(addprefix $(ISO_ROOT)/bin/,tlsboot.elf tlstest.elf catest.elf httpsget.elf urlget.elf browser.elf)
+APP_ELFS_QJS    := $(addprefix $(ISO_ROOT)/bin/,jstest.elf domtest.elf jsdomtest.elf jsfetchtest.elf jspagetest.elf)
 
-sdk/lib_qjs/qjs_page.o: sdk/lib_qjs/qjs_page.c sdk/include/qjs_page.h sdk/include/qjs_fetch.h sdk/include/qjs_helpers.h sdk/include/dom_js.h sdk/include/qjs_window.h sdk/include/dom.h
-	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -I./third_party/bearssl/inc -c $< -o $@
+$(KERNEL_OBJS) $(SDK_OBJS) $(APP_OBJS) $(DOOM_OBJS): | setup
 
-sdk/lib_qjs/qjs_window.o: sdk/lib_qjs/qjs_window.c sdk/include/qjs_window.h sdk/include/qjs_helpers.h
-	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
+# Цель сборки приложений гарантирует предварительную сборку SDK_OBJS
+apps: setup $(SDK_OBJS) $(BEARSSL_DEP) $(QUICKJS_DEP) $(SDL_DEP) \
+      $(APP_ELFS_SIMPLE) $(APP_ELFS_MUSL) $(TLS_APPS_DEP) $(QJS_APPS_DEP) $(SDL_APPS_DEP) \
+      $(if $(SKIP_SDL2),,sysgui_app)
 
+$(ISO_ROOT)/bin/%.elf: app/%.o $(SDK_OBJS)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< -o $@
+
+# --- СЛОЖНЫЕ ПРИЛОЖЕНИЯ И ШЕЛЬДЫ (BASH/BUSYBOX/MUSL) ---
+MUSL_DIR    := third_party/musl
+MUSL_LIB    := $(MUSL_DIR)/lib
+MUSL_CFLAGS := -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -g -nostdinc -isystem $(MUSL_DIR)/include
+
+app/musltest.o: app/musltest.c ; $(CC) $(MUSL_CFLAGS) -c $< -o $@
+$(ISO_ROOT)/bin/musltest.elf: app/musltest.o $(MUSL_LIB)/libc.a
+	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/musltest.o $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
+
+app/stattest.o: app/stattest.c ; $(CC) $(MUSL_CFLAGS) -c $< -o $@
+$(ISO_ROOT)/bin/stattest.elf: app/stattest.o $(MUSL_LIB)/libc.a
+	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/stattest.o $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
+
+app/dirtest.o: app/dirtest.c ; $(CC) $(MUSL_CFLAGS) -c $< -o $@
+$(ISO_ROOT)/bin/dirtest.elf: app/dirtest.o $(MUSL_LIB)/libc.a
+	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/dirtest.o $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
+
+app/ltsig.o: app/ltsig.c ; $(CC) $(MUSL_CFLAGS) -c $< -o $@
+$(ISO_ROOT)/bin/ltsig.elf: app/ltsig.o $(MUSL_LIB)/libc.a
+	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/ltsig.o $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
+
+app/ltjob.o: app/ltjob.c ; $(CC) $(MUSL_CFLAGS) -c $< -o $@
+$(ISO_ROOT)/bin/ltjob.elf: app/ltjob.o $(MUSL_LIB)/libc.a
+	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/ltjob.o $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
+
+app/ltjob2.o: app/ltjob2.c ; $(CC) $(MUSL_CFLAGS) -c $< -o $@
+$(ISO_ROOT)/bin/ltjob2.elf: app/ltjob2.o $(MUSL_LIB)/libc.a
+	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/ltjob2.o $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
+
+$(ISO_ROOT)/bin/bash.elf: third_party/bash/bash.o $(MUSL_LIB)/libc.a
+	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o third_party/bash/bash.o $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
+
+$(ISO_ROOT)/bin/busybox.elf: third_party/busybox/busybox.o $(MUSL_LIB)/libc.a
+	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o third_party/busybox/busybox.o $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
+
+app/sh/sh.o: app/sh/sh.c ; $(CC) $(MUSL_CFLAGS) -c $< -o $@
+$(ISO_ROOT)/bin/sh.elf: app/sh/sh.o $(MUSL_LIB)/libc.a
+	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/sh/sh.o $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
+
+$(ISO_ROOT)/bin/stktest.elf: app/stktest.o ; $(LD) -nostdlib -Ttext=0x1000000 -e _start app/stktest.o -o $@
+$(ISO_ROOT)/bin/fstest.elf: app/fstest.o   ; $(LD) -nostdlib -Ttext=0x1000000 -e _start app/fstest.o -o $@
+
+app/%.o: app/%.c ; $(CC) $(USER_CFLAGS) -c $< -o $@
+
+# --- TLS / BEARSSL / HTTP / QUICKJS ПРИЛОЖЕНИЯ ---
+app/tlsboot.o: app/tlsboot.c ; $(CC) $(USER_CFLAGS) -I./$(BEARSSL_DIR)/inc -c $< -o $@
+$(ISO_ROOT)/bin/tlsboot.elf: app/tlsboot.o $(SDK_OBJS) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(BEARSSL_LIB) -o $@
+
+app/tlstest.o: app/tlstest.c app/ca_anchors.h ; $(CC) $(USER_CFLAGS) -I./$(BEARSSL_DIR)/inc -c $< -o $@
+$(ISO_ROOT)/bin/tlstest.elf: app/tlstest.o $(SDK_OBJS) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(BEARSSL_LIB) -o $@
+
+app/catest.o: app/catest.c third_party/ca_bundle/ca_bundle.h ; $(CC) $(USER_CFLAGS) -I./$(BEARSSL_DIR)/inc -c $< -o $@
+$(ISO_ROOT)/bin/catest.elf: app/catest.o $(SDK_OBJS) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(BEARSSL_LIB) -o $@
+
+app/httpsget.o: app/httpsget.c third_party/ca_bundle/ca_bundle.h ; $(CC) $(USER_CFLAGS) -I./$(BEARSSL_DIR)/inc -c $< -o $@
+$(ISO_ROOT)/bin/httpsget.elf: app/httpsget.o $(SDK_OBJS) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(BEARSSL_LIB) -o $@
+
+sdk/lib_http/http_client.o: sdk/lib_http/http_client.c ; $(CC) $(USER_CFLAGS) -I./$(BEARSSL_DIR)/inc -c $< -o $@
+app/urlget.o: app/urlget.c ; $(CC) $(USER_CFLAGS) -I./$(BEARSSL_DIR)/inc -c $< -o $@
+$(ISO_ROOT)/bin/urlget.elf: app/urlget.o $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(HTTP_CLIENT_OBJ) $(BEARSSL_LIB) -o $@
+
+sdk/lib_image/image_decode.o: sdk/lib_image/image_decode.c ; $(CC) $(USER_CFLAGS) -I./third_party/stb_image -Wno-unused-function -Wno-implicit-fallthrough -c $< -o $@
+sdk/lib_qjs/qjs_page.o: sdk/lib_qjs/qjs_page.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -I./$(BEARSSL_DIR)/inc -c $< -o $@
+sdk/lib_qjs/qjs_window.o: sdk/lib_qjs/qjs_window.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
+app/htmlview_browser.o: app/htmlview.c ; $(CC) $(USER_CFLAGS) -DBROWSER_BUILD -I./$(BEARSSL_DIR)/inc -I./$(QUICKJS_DIR) -c $< -o $@
 $(ISO_ROOT)/bin/browser.elf: app/htmlview_browser.o $(HTTP_CLIENT_OBJ) $(DOM_OBJ) $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(IMAGE_DECODE_OBJ) $(SDK_OBJS) $(QUICKJS_LIB) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(HTTP_CLIENT_OBJ) $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(IMAGE_DECODE_OBJ) $(DOM_OBJ) $(QUICKJS_LIB) $(BEARSSL_LIB) -o $@
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $^ -o $@
 
-# htmlview.elf — explicit rule (overrides the generic %.elf one) so we
-# can link the DOM library. The compile rule for app/htmlview.o still
-# comes from the generic app/%.o pattern.
-app/htmlview.o: app/htmlview.c sdk/include/dom.h
-
+app/htmlview.o: app/htmlview.c
 $(ISO_ROOT)/bin/htmlview.elf: app/htmlview.o $(DOM_OBJ) $(SDK_OBJS)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(DOM_OBJ) -o $@
 
-# jstest — smoke test for the vendored QuickJS engine. Covers phases
-# J1 (bytecode + string allocator) and J2 (console.log + Math/Date/JSON).
-#
-# sdk/lib_qjs/qjs_helpers.c lives in its own directory so it isn't
-# auto-folded into $(SDK_OBJS) — apps that don't embed QuickJS shouldn't
-# pay for these helpers. Same pattern as sdk/lib_http/http_client.o.
-# QJS_HELPERS_OBJ is forward-declared near the browser.elf rule above.
-sdk/lib_qjs/qjs_helpers.o: sdk/lib_qjs/qjs_helpers.c sdk/include/qjs_helpers.h
-	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
-
-app/jstest.o: app/jstest.c sdk/include/qjs_helpers.h
-	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
-
+sdk/lib_qjs/qjs_helpers.o: sdk/lib_qjs/qjs_helpers.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
+app/jstest.o: app/jstest.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
 $(ISO_ROOT)/bin/jstest.elf: app/jstest.o $(QJS_HELPERS_OBJ) $(SDK_OBJS) $(QUICKJS_LIB)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(QJS_HELPERS_OBJ) $(QUICKJS_LIB) -o $@
 
-# jsdomtest — phase J4: DOM bindings over QuickJS. Pulls together the
-# DOM library, the QuickJS helpers, the DOM<->JS bridge, and QuickJS
-# itself. DOM_JS_OBJ is forward-declared near the browser.elf rule above.
-sdk/lib_qjs/dom_js.o: sdk/lib_qjs/dom_js.c sdk/include/dom_js.h sdk/include/dom.h sdk/include/qjs_helpers.h
-	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
-
-app/jsdomtest.o: app/jsdomtest.c sdk/include/qjs_helpers.h sdk/include/dom_js.h sdk/include/dom.h
-	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
-
+sdk/lib_qjs/dom_js.o: sdk/lib_qjs/dom_js.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
+app/jsdomtest.o: app/jsdomtest.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
 $(ISO_ROOT)/bin/jsdomtest.elf: app/jsdomtest.o $(QJS_HELPERS_OBJ) $(DOM_JS_OBJ) $(DOM_OBJ) $(SDK_OBJS) $(QUICKJS_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(QJS_HELPERS_OBJ) $(DOM_JS_OBJ) $(DOM_OBJ) $(QUICKJS_LIB) -o $@
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $^ -o $@
 
-# jsfetchtest — phase J5: fetch + Promise + microtask pump. Links
-# the http_client + BearSSL chain so the same `fetch` binding can be
-# reused later for real http(s). QJS_FETCH_OBJ is forward-declared near
-# the browser.elf rule above.
-sdk/lib_qjs/qjs_fetch.o: sdk/lib_qjs/qjs_fetch.c sdk/include/qjs_fetch.h sdk/include/http_client.h
-	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -I./third_party/bearssl/inc -c $< -o $@
-
-app/jsfetchtest.o: app/jsfetchtest.c sdk/include/qjs_helpers.h sdk/include/qjs_fetch.h
-	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
-
-# --- SDL2 (vendored under third_party/sdl2) -----------------------------------
-
+sdk/lib_qjs/qjs_fetch.o: sdk/lib_qjs/qjs_fetch.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -I./$(BEARSSL_DIR)/inc -c $< -o $@
+app/jsfetchtest.o: app/jsfetchtest.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
 $(ISO_ROOT)/bin/jsfetchtest.elf: app/jsfetchtest.o $(QJS_HELPERS_OBJ) $(QJS_FETCH_OBJ) $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(QUICKJS_LIB) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(QJS_HELPERS_OBJ) $(QJS_FETCH_OBJ) $(HTTP_CLIENT_OBJ) $(QUICKJS_LIB) $(BEARSSL_LIB) -o $@
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $^ -o $@
 
-# jspagetest — phase J6a: dom_parse → qjs_run_page_scripts pipeline,
-# without renderer or network. Loads res/jstest.html (an inline-
-# script-bearing page) so the on-load script path is testable offline.
-app/jspagetest.o: app/jspagetest.c sdk/include/qjs_page.h sdk/include/dom.h
-	$(CC) $(USER_CFLAGS) -I./third_party/quickjs -c $< -o $@
-
+app/jspagetest.o: app/jspagetest.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
 $(ISO_ROOT)/bin/jspagetest.elf: app/jspagetest.o $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(DOM_OBJ) $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(QUICKJS_LIB) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(DOM_OBJ) $(HTTP_CLIENT_OBJ) $(QUICKJS_LIB) $(BEARSSL_LIB) -o $@
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $^ -o $@
 
-sdk/lib_dom/dom.o: sdk/lib_dom/dom.c sdk/include/dom.h
-	$(CC) $(USER_CFLAGS) -c $< -o $@
-
-app/domtest.o: app/domtest.c sdk/include/dom.h
-	$(CC) $(USER_CFLAGS) -c $< -o $@
-
+sdk/lib_dom/dom.o: sdk/lib_dom/dom.c ; $(CC) $(USER_CFLAGS) -c $< -o $@
+app/domtest.o: app/domtest.c ; $(CC) $(USER_CFLAGS) -c $< -o $@
 $(ISO_ROOT)/bin/domtest.elf: app/domtest.o $(DOM_OBJ) $(SDK_OBJS)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(DOM_OBJ) -o $@
 
-# enGUI's app/sysgui/Makefile links sysgui.elf via `$(wildcard ../../sdk/lib/*.o)`,
-# so under parallel make (`make -j` on Linux CI) sysgui_app would race against the
-# SDK_OBJS pattern rule and link against an empty/partial set — failing with a wall
-# of `undefined reference to memcpy / floor / eid_*`. Windows CI runs serially so
-# it doesn't hit this. Declare the dependency explicitly so -j is safe.
+# --- SDL2 ПРИЛОЖЕНИЯ ---
+app/sdltest.o: app/sdltest.c ; $(CC) $(USER_CFLAGS) -I./$(SDL_DIR)/include/ -c $< -o $@
+$(ISO_ROOT)/bin/sdltest.elf: app/sdltest.o $(SDK_OBJS) $(SDL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(SDL_LIB) -o $@
+
+# --- СБОРКА SYSGUI (enGUI) ---
+# Теперь sysgui_app явно зависит от SDK_OBJS, гарантируя пересборку
 sysgui_app: $(SDK_OBJS)
 	@echo "=== Building sysgui (enGUI) ==="
 	$(MAKE) -C app/sysgui
-	@$(call CP_F,app/sysgui/sysgui.elf,iso_root/bin/sysgui.elf)
-	@$(call MKDIR_P,iso_root/res/sysgui)
-	@$(call CP_F,app/sysgui/scripts/init.lua,iso_root/res/sysgui/init.lua)
-	@$(call CP_F,app/sysgui/scripts/window.lua,iso_root/res/sysgui/window.lua)
-	@$(call CP_F,app/sysgui/scripts/monitor.lua,iso_root/res/sysgui/monitor.lua)
-	@$(call CP_F,app/sysgui/scripts/terminal.lua,iso_root/res/sysgui/terminal.lua)
-	@$(call CP_F,app/sysgui/scripts/paint.lua,iso_root/res/sysgui/paint.lua)
-	@$(call CP_F,app/sysgui/scripts/explorer.lua,iso_root/res/sysgui/explorer.lua)
-	@$(call CP_F,app/sysgui/scripts/notepad.lua,iso_root/res/sysgui/notepad.lua)
-	@$(call CP_F,app/sysgui/scripts/BOOTSOUND.wav,iso_root/res/sysgui/BOOTSOUND.wav)
-	@$(call CP_F,app/sysgui/scripts/bootvid.lua,iso_root/res/sysgui/bootvid.lua)
-
-# --- SYSTEM RULES ------------------------------------------------------------
+	@$(call CP_F,app/sysgui/sysgui.elf,$(ISO_ROOT)/bin/sysgui.elf)
+	@$(call MKDIR_P,$(ISO_ROOT)/res/sysgui)
+	$(foreach s,init.lua window.lua monitor.lua terminal.lua paint.lua explorer.lua notepad.lua BOOTSOUND.wav bootvid.lua,$(call CP_F,app/sysgui/scripts/$(s),$(ISO_ROOT)/res/sysgui/$(s)) &&) @echo Sysgui synced.
+# --- ОЧИСТКА ВСЕХ КОМПОНЕНТОВ (CLEAN) ---
 ifeq ($(OS),Windows_NT)
 clean:
 	@if exist $(OBJ_DIR) rmdir /s /q $(OBJ_DIR)
@@ -673,18 +366,15 @@ clean:
 	@if exist sdk\lib_http\*.d del /q sdk\lib_http\*.d
 	@if exist app\*.o del /q app\*.o
 	@if exist app\*.d del /q app\*.d
-	@if exist app\sysgui\*.d del /q app\sysgui\*.d
-	@if exist app\sysgui\*.o del /q app\sysgui\*.o
-	@if exist app\sysgui\lua\*.o del /q app\sysgui\lua\*.o
-	@if exist app\sysgui\lua\*.d del /q app\sysgui\lua\*.d
 	@if exist kernel.elf del /q kernel.elf
 	@if exist equos.iso del /q equos.iso
-	@if exist third_party\sdl2\*.o del /q /s third_party\sdl2\*.o
-	@if exist third_party\sdl2\*.d del /q /s third_party\sdl2\*.d
 	@if exist third_party\sdl2\libSDL2.a del /q third_party\sdl2\libSDL2.a
-	@if exist app\sysgui\sysgui.elf del /q app\sysgui\sysgui.elf
-	@for /R third_party\bearssl %%f in (*.o *.d) do @if exist "%%f" del /q "%%f"
+	@for /R third_party\sdl2 %%f in (*.o *.d) do @if exist "%%f" del /q "%%f"
 	@if exist third_party\bearssl\libbearssl.a del /q third_party\bearssl\libbearssl.a
+	@for /R third_party\bearssl %%f in (*.o *.d) do @if exist "%%f" del /q "%%f"
+	@if exist third_party\quickjs\libquickjs.a del /q third_party\quickjs\libquickjs.a
+	@for /R third_party\quickjs %%f in (*.o *.d) do @if exist "%%f" del /q "%%f"
+	$(MAKE) -C app/sysgui clean
 else
 clean:
 	@rm -rf $(OBJ_DIR)
@@ -694,81 +384,41 @@ clean:
 	@rm -f sdk/lib_http/*.o sdk/lib_http/*.d
 	@rm -f app/*.o app/*.d
 	@rm -f kernel.elf equos.iso
-	@rm -f app/sysgui/sysgui.elf
-	@find third_party/sdl2 -name '*.o' -delete -o -name '*.d' -delete
 	@rm -f third_party/sdl2/libSDL2.a
-	@find third_party/bearssl -name '*.o' -delete -o -name '*.d' -delete
+	@find third_party/sdl2 -name '*.o' -delete -o -name '*.d' -delete
 	@rm -f third_party/bearssl/libbearssl.a
+	@find third_party/bearssl -name '*.o' -delete -o -name '*.d' -delete
+	@rm -f third_party/quickjs/libquickjs.a
+	@find third_party/quickjs -name '*.o' -delete -o -name '*.d' -delete
+	$(MAKE) -C app/sysgui clean
 endif
 
-# Переменная DOOM_DEP подставляется динамически
+# --- УТИЛИТЫ ГЕНЕРАЦИИ ДИСКА И ЗАПУСКА ---
 create_hdd: kernel.elf apps $(DOOM_DEP)
 	@echo --- Generating EXT2 hdd.img ---
 	python WINDOWS_ext2.py
 
-# Переменная DOOM_DEP подставляется динамически
 iso: kernel.elf apps $(DOOM_DEP)
 	@$(call RM_F,equos.iso)
 	xorriso -as mkisofs -no-pad -b boot/limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table --efi-boot EFI/BOOT/limine-bios-cd.bin -efi-boot-part --efi-boot-image -o equos.iso $(ISO_ROOT)
 
-# --- QEMU ---
-#
-# Раньше run/cleanrun жёстко включали `-d int,guest_errors,mmu -D qemu.log`,
-# из-за чего QEMU писал КАЖДОЕ прерывание (включая каждый int $0x80 и каждый
-# тик таймера на 1 кГц) в файл — это легко режет производительность в 5-10
-# раз и визуально превращает рабочий стол в "10 FPS".
-#
-# Делим на два таргета:
-#   make run        — обычный запуск, никакого логирования, пытаемся включить
-#                     железное ускорение (whpx на Windows, kvm на Linux, hvf
-#                     на macOS) с откатом на TCG, если ничего не доступно.
-#   make run-debug  — диагностический запуск с записью всех прерываний/MMU
-#                     в qemu.log. Использовать только при отладке падений.
-
 QEMU       := qemu-system-x86_64
-# Базовый CPU = qemu64 (стабильно работает на WHPX), плюс явно
-# включаем RDRAND/RDSEED/AES-NI поверх. Чистый `-cpu max` с WHPX
-# валится с "Unexpected VP exit code 4" — гипервизор не умеет
-# часть фичей, которые max объявляет. qemu64+флаги — самый
-# совместимый способ дать ядру RDRAND под WHPX/KVM/HVF/TCG.
-QEMU_BASE  := -m 512M -boot d \
-              -cpu qemu64,+rdrand,+rdseed,+aes \
-              -drive file=hdd.img,format=raw,index=0,media=disk \
-              -cdrom equos.iso \
-              -netdev user,id=n0,hostfwd=tcp::2222-:22 \
-              -device rtl8139,netdev=n0 \
-			  -device pci-ohci,id=ohci \
-              -device usb-ehci,id=ehci \
-              -device qemu-xhci,id=xhci \
+QEMU_BASE  := -m 512M -boot d -cpu qemu64,+rdrand,+rdseed,+aes \
+              -drive file=hdd.img,format=raw,index=0,media=disk -cdrom equos.iso \
+              -netdev user,id=n0,hostfwd=tcp::2222-:22 -device rtl8139,netdev=n0 \
+              -device pci-ohci,id=ohci -device usb-ehci,id=ehci -device qemu-xhci,id=xhci \
               -device ac97,audiodev=snd0 -audiodev dsound,id=snd0
-# Перебор акселераторов: первый рабочий используется, иначе TCG.
 QEMU_ACCEL := -accel whpx,kernel-irqchip=off -accel kvm -accel hvf -accel tcg
 
-# Обычный запуск: БЕЗ USB-мыши, поэтому QEMU отдаёт указатель PS/2-мыши и
-# курсор в десктопе работает сразу (без `mouse_set` в мониторе). USB-мышь
-# смотри в run-usb.
 run:
 	$(QEMU) $(QEMU_BASE) -serial mon:stdio $(QEMU_ACCEL)
 
-# Загрузка С USB-мышью на UHCI: запускает загрузочный тест мыши
-# ("MOVE YOUR MOUSE" + dX/dY). ВАЖНО: пока гостевая ОС конфигурирует
-# USB-мышь, QEMU делает её активным указателем и шлёт движения ЕЙ, а не
-# PS/2 -> курсор в GUI после теста не двигается. Это ограничение QEMU,
-# гость не может вернуть фокус. Чтобы вернуть курсор: монитор Ctrl+Alt+2,
-# `info mice`, `mouse_set <номер PS/2-мыши>`, затем Ctrl+Alt+1.
-# Поэтому обычный `make run` идёт БЕЗ USB-мыши (рабочий курсор в десктопе),
-# а тест мыши смотри здесь.
 run-usb:
 	$(QEMU) $(QEMU_BASE) -serial mon:stdio -device usb-mouse,bus=uhci.0 $(QEMU_ACCEL)
 
-# Run with pure software emulation (no hypervisor). Slower but more
-# deterministic — useful when WHPX/KVM behave oddly with network I/O.
 run-tcg:
 	$(QEMU) $(QEMU_BASE) -serial mon:stdio -accel tcg
 
-# Запуск с записью COM1 в файл boot_serial.log — для профилирования загрузки.
-# После выхода открой boot_serial.log и смотри строки [T=...ms]:
-# зазоры между ними показывают, что тормозит старт.
 run-log:
 	$(QEMU) $(QEMU_BASE) -serial file:boot_serial.log $(QEMU_ACCEL)
 
@@ -777,7 +427,7 @@ run-debug:
 
 cleanrun: clean all run
 
-# Include dependency files
+# Депенденси-трекинг
 -include $(KERNEL_OBJS:.o=.d)
 -include $(SDK_OBJS:.o=.d)
 -include $(APP_SRCS:.c=.d)
