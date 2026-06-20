@@ -243,7 +243,7 @@ $(KERNEL_OBJS) $(SDK_OBJS) $(APP_OBJS) $(DOOM_OBJS): | setup
 # Цель сборки приложений гарантирует предварительную сборку SDK_OBJS
 apps: setup $(SDK_OBJS) $(BEARSSL_DEP) $(QUICKJS_DEP) $(SDL_DEP) \
       $(APP_ELFS_SIMPLE) $(APP_ELFS_MUSL) $(TLS_APPS_DEP) $(QJS_APPS_DEP) $(SDL_APPS_DEP) \
-      $(if $(SKIP_SDL2),,sysgui_app)
+      sysgui_app
 
 $(ISO_ROOT)/bin/%.elf: app/%.o $(SDK_OBJS)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< -o $@
@@ -373,7 +373,7 @@ sysgui_app: $(SDK_OBJS)
 	$(MAKE) -C app/sysgui
 	@$(call CP_F,app/sysgui/sysgui.elf,$(ISO_ROOT)/bin/sysgui.elf)
 	@$(call MKDIR_P,$(ISO_ROOT)/res/sysgui)
-	@$(call CP_F,app/sysgui/scripts/BOOTSOUND.wav,$(ISO_ROOT)/res/sysgui/BOOTSOUND.wav)
+	@$(call CP_F,app/sysgui/gui/BOOTSOUND.wav,$(ISO_ROOT)/res/sysgui/BOOTSOUND.wav)
 	@echo Sysgui synced.
 # --- ОЧИСТКА ВСЕХ КОМПОНЕНТОВ (CLEAN) ---
 ifeq ($(OS),Windows_NT)
