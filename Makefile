@@ -319,8 +319,10 @@ sdk/lib_image/image_decode.o: sdk/lib_image/image_decode.c ; $(CC) $(USER_CFLAGS
 sdk/lib_qjs/qjs_page.o: sdk/lib_qjs/qjs_page.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -I./$(BEARSSL_DIR)/inc -c $< -o $@
 sdk/lib_qjs/qjs_window.o: sdk/lib_qjs/qjs_window.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
 app/htmlview_browser.o: app/htmlview.c ; $(CC) $(USER_CFLAGS) -DBROWSER_BUILD -I./$(BEARSSL_DIR)/inc -I./$(QUICKJS_DIR) -c $< -o $@
+
+# ИСПРАВЛЕНО: убран дубликат $(SDK_OBJS), так как он автоматически разворачивается через $^
 $(ISO_ROOT)/bin/browser.elf: app/htmlview_browser.o $(HTTP_CLIENT_OBJ) $(DOM_OBJ) $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(IMAGE_DECODE_OBJ) $(SDK_OBJS) $(QUICKJS_LIB) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $^ -o $@
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $^ -o $@
 
 app/htmlview.o: app/htmlview.c
 $(ISO_ROOT)/bin/htmlview.elf: app/htmlview.o $(DOM_OBJ) $(SDK_OBJS)
@@ -331,19 +333,28 @@ app/jstest.o: app/jstest.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
 $(ISO_ROOT)/bin/jstest.elf: app/jstest.o $(QJS_HELPERS_OBJ) $(SDK_OBJS) $(QUICKJS_LIB)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(QJS_HELPERS_OBJ) $(QUICKJS_LIB) -o $@
 
-sdk/lib_qjs/dom_js.o: sdk/lib_qjs/dom_js.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
-app/jsdomtest.o: app/jsdomtest.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
+# ИСПРАВЛЕНО: убран дубликат $(SDK_OBJS), так как он автоматически разворачивается через $^
 $(ISO_ROOT)/bin/jsdomtest.elf: app/jsdomtest.o $(QJS_HELPERS_OBJ) $(DOM_JS_OBJ) $(DOM_OBJ) $(SDK_OBJS) $(QUICKJS_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $^ -o $@
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $^ -o $@
 
 sdk/lib_qjs/qjs_fetch.o: sdk/lib_qjs/qjs_fetch.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -I./$(BEARSSL_DIR)/inc -c $< -o $@
 app/jsfetchtest.o: app/jsfetchtest.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
+
+# ИСПРАВЛЕНО: убран дубликат $(SDK_OBJS), так как он автоматически разворачивается через $^
 $(ISO_ROOT)/bin/jsfetchtest.elf: app/jsfetchtest.o $(QJS_HELPERS_OBJ) $(QJS_FETCH_OBJ) $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(QUICKJS_LIB) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $^ -o $@
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $^ -o $@
 
 app/jspagetest.o: app/jspagetest.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
+
+# ИСПРАВЛЕНО: убран дубликат $(SDK_OBJS), так как он автоматически разворачивается через $^
 $(ISO_ROOT)/bin/jspagetest.elf: app/jspagetest.o $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(DOM_OBJ) $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(QUICKJS_LIB) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $^ -o $@
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $^ -o $@
+
+sdk/lib_qjs/dom_js.o: sdk/lib_qjs/dom_js.c
+	$(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
+
+app/jsdomtest.o: app/jsdomtest.c
+	$(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
 
 sdk/lib_dom/dom.o: sdk/lib_dom/dom.c ; $(CC) $(USER_CFLAGS) -c $< -o $@
 app/domtest.o: app/domtest.c ; $(CC) $(USER_CFLAGS) -c $< -o $@
@@ -362,7 +373,8 @@ sysgui_app: $(SDK_OBJS)
 	$(MAKE) -C app/sysgui
 	@$(call CP_F,app/sysgui/sysgui.elf,$(ISO_ROOT)/bin/sysgui.elf)
 	@$(call MKDIR_P,$(ISO_ROOT)/res/sysgui)
-	$(foreach s,init.lua window.lua monitor.lua terminal.lua paint.lua explorer.lua notepad.lua BOOTSOUND.wav bootvid.lua,$(call CP_F,app/sysgui/scripts/$(s),$(ISO_ROOT)/res/sysgui/$(s)) &&) @echo Sysgui synced.
+	@$(call CP_F,app/sysgui/scripts/BOOTSOUND.wav,$(ISO_ROOT)/res/sysgui/BOOTSOUND.wav)
+	@echo Sysgui synced.
 # --- ОЧИСТКА ВСЕХ КОМПОНЕНТОВ (CLEAN) ---
 ifeq ($(OS),Windows_NT)
 clean:
