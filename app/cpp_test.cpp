@@ -1,9 +1,13 @@
 #include <equos.h>
 
-// Импортируем Си-функции из SDK
+// Объявляем Си-функции из SDK
 extern "C" {
     int sprintf(char* buf, const char* fmt, ...);
-    void term_print(const char* str);
+}
+
+// Обертка для вывода в терминал из юзерспейса через системный вызов
+extern "C" void term_print(const char* str) {
+    _syscall(SYS_PRINT, (uint64_t)str, 0, 0, 0, 0);
 }
 
 // Тестовый класс для проверки глобальных конструкторов
