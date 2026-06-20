@@ -1,4 +1,5 @@
 CC = x86_64-elf-gcc
+CXX = x86_64-elf-g++
 LD = x86_64-elf-ld
 AR = x86_64-elf-ar
 ASM = nasm
@@ -42,6 +43,10 @@ SDK_INC     = -I./sdk/include
 USER_CFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -g \
               -fno-omit-frame-pointer $(SDK_INC) -MMD -MP -DSDL_DYNAMIC_API=0
 
+# Настройки для компиляции C++ (без RTTI и без исключений)
+USER_CXXFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -g \
+                -fno-omit-frame-pointer -fno-exceptions -fno-rtti -std=c++17 $(SDK_INC) -MMD -MP
+
 # --- СИСТЕМНЫЕ ИСТОЧНИКИ (ЯДРО) ---
 SRC_DIRS = src src/boot src/syslibc src/system/core \
            src/system/drivers/devices/audio src/system/drivers/devices/keyboard \
@@ -61,9 +66,11 @@ KERNEL_OBJ_SUBDIRS = $(OBJ_DIR) $(addprefix $(OBJ_DIR)/,$(patsubst src/%,%,$(fil
 # --- SDK OBJECTS ---
 SDK_C_SRCS   = $(wildcard $(SDK_LIB_DIR)/*.c)
 SDK_ASM_SRCS = $(wildcard $(SDK_LIB_DIR)/*.asm)
-SDK_OBJS     = $(patsubst $(SDK_LIB_DIR)/%.c,$(SDK_LIB_DIR)/%.o,$(SDK_C_SRCS)) \
-               $(patsubst $(SDK_LIB_DIR)/%.asm,$(SDK_LIB_DIR)/%.o,$(SDK_ASM_SRCS))
+SDK_CPP_SRCS = $(wildcard $(SDK_LIB_DIR)/*.cpp)  # Добавлено
 
+SDK_OBJS     = $(patsubst $(SDK_LIB_DIR)/%.c,$(SDK_LIB_DIR)/%.o,$(SDK_C_SRCS)) \
+               $(patsubst $(SDK_LIB_DIR)/%.asm,$(SDK_LIB_DIR)/%.o,$(SDK_ASM_SRCS)) \
+               $(patsubst $(SDK_LIB_DIR)/%.cpp,$(SDK_LIB_DIR)/%.o,$(SDK_CPP_SRCS))
 # --- ПАРСИНГ ФЛАГОВ SKIP (Изящный сплит через пробелы) ---
 comma := ,
 space := $(subst ,, )
@@ -203,6 +210,9 @@ $(SDK_LIB_DIR)/%.o: $(SDK_LIB_DIR)/%.c
 $(SDK_LIB_DIR)/%.o: $(SDK_LIB_DIR)/%.asm
 	$(ASM) -f elf64 $< -o $@
 
+$(SDK_LIB_DIR)/%.o: $(SDK_LIB_DIR)/%.cpp
+	$(CXX) $(USER_CXXFLAGS) -c $< -o $@
+
 # --- ПРАВИЛА СБОРКИ DOOM ---
 $(OBJ_DIR)/doom/%.o: $(DOOM_DIR)/%.c
 	@$(call MKDIR_P,$(OBJ_DIR)/doom)
@@ -223,7 +233,7 @@ DOM_JS_OBJ      := sdk/lib_qjs/dom_js.o
 QJS_FETCH_OBJ   := sdk/lib_qjs/qjs_fetch.o
 IMAGE_DECODE_OBJ := sdk/lib_image/image_decode.o
 
-APP_ELFS_SIMPLE := $(addprefix $(ISO_ROOT)/bin/,snake.elf bmpview.elf htmlview.elf niplay.elf widget_demo.elf ipc_test.elf randtest.elf socktest.elf forktest.elf exectest.elf pipetest.elf envtest.elf sigtest.elf ttytest.elf lxtest.elf stktest.elf fstest.elf mmfork.elf)
+APP_ELFS_SIMPLE := $(addprefix $(ISO_ROOT)/bin/,snake.elf bmpview.elf htmlview.elf niplay.elf widget_demo.elf ipc_test.elf randtest.elf socktest.elf forktest.elf exectest.elf pipetest.elf envtest.elf sigtest.elf ttytest.elf lxtest.elf stktest.elf fstest.elf mmfork.elf cpp_test.elf)
 APP_ELFS_MUSL   := $(addprefix $(ISO_ROOT)/bin/,musltest.elf stattest.elf dirtest.elf ltsig.elf ltjob.elf ltjob2.elf bash.elf busybox.elf sh.elf)
 APP_ELFS_TLS    := $(addprefix $(ISO_ROOT)/bin/,tlsboot.elf tlstest.elf catest.elf httpsget.elf urlget.elf browser.elf)
 APP_ELFS_QJS    := $(addprefix $(ISO_ROOT)/bin/,jstest.elf domtest.elf jsdomtest.elf jsfetchtest.elf jspagetest.elf)
@@ -281,6 +291,7 @@ $(ISO_ROOT)/bin/stktest.elf: app/stktest.o ; $(LD) -nostdlib -Ttext=0x1000000 -e
 $(ISO_ROOT)/bin/fstest.elf: app/fstest.o   ; $(LD) -nostdlib -Ttext=0x1000000 -e _start app/fstest.o -o $@
 
 app/%.o: app/%.c ; $(CC) $(USER_CFLAGS) -c $< -o $@
+app/%.o: app/%.cpp ; $(CXX) $(USER_CXXFLAGS) -c $< -o $@
 
 # --- TLS / BEARSSL / HTTP / QUICKJS ПРИЛОЖЕНИЯ ---
 app/tlsboot.o: app/tlsboot.c ; $(CC) $(USER_CFLAGS) -I./$(BEARSSL_DIR)/inc -c $< -o $@
