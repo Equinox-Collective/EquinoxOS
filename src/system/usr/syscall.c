@@ -558,7 +558,6 @@ void syscall_handler(syscall_regs_t *regs)
 
     if (requested_brk > current_task->brk)
     {
-      // Округляем текущий brk вниз до страницы, а новый - вверх
       uint64_t start_map = (current_task->brk + 4095) & ~4095;
       uint64_t end_map = (requested_brk + 4095) & ~4095;
 
@@ -566,15 +565,24 @@ void syscall_handler(syscall_regs_t *regs)
       __asm__ volatile("mov %%cr3, %0" : "=r"(cr3_val));
       page_table_t *pml4 = (page_table_t *)VIRT(cr3_val);
 
+      bool oom = false;
+
       for (uint64_t addr = start_map; addr < end_map; addr += 4096)
       {
         void *phys = pmm_alloc();
-        if (phys)
-        {
-          vmm_map(pml4, addr, (uintptr_t)phys,
-                  PTE_PRESENT | PTE_USER | PTE_WRITABLE);
-          memset((void *)VIRT(phys), 0, 4096);
+        if (!phys) {
+          oom = true;
+          break; // Прерываем выделение, если кончилась физическая память
         }
+        vmm_map(pml4, addr, (uintptr_t)phys,
+                PTE_PRESENT | PTE_USER | PTE_WRITABLE);
+        memset((void *)VIRT(phys), 0, 4096);
+      }
+
+      if (oom) {
+        // Честно возвращаем ошибку (-1), не сдвигая границу brk процесса
+        regs->rax = (uint64_t)-1;
+        break;
       }
     }
     current_task->brk = requested_brk;
@@ -712,21 +720,29 @@ void syscall_handler(syscall_regs_t *regs)
     break;
   }
 
-  case 32:
-  {                                // SYS_GET_VESA_INFO
-    extern uintptr_t fb_base_addr; // Виртуальный адрес от Limine (0xFFFF...)
+  case 32: // SYS_GET_VESA_INFO (RDI=&phys, RSI=&w, RDX=&h, RCX=&pitch)
+{
+    extern uintptr_t fb_base_addr;
     extern uint32_t screen_width, screen_height, screen_pitch;
     extern uint64_t hhdm_offset;
 
-    // ПОЛУЧАЕМ ЧИСТЫЙ ФИЗИЧЕСКИЙ АДРЕС (например, 0xFD000000)
     uint64_t phys_fb = (uint64_t)fb_base_addr - hhdm_offset;
 
-    regs->rax = phys_fb;
-    regs->rbx = screen_width;
-    regs->rcx = screen_height;
-    regs->rdx = screen_pitch;
+    // Читаем указатели из регистров, которые передал пользователь
+    uint64_t* user_phys  = (uint64_t*)regs->rdi;
+    uint32_t* user_w     = (uint32_t*)regs->rsi;
+    uint32_t* user_h     = (uint32_t*)regs->rdx;
+    uint32_t* user_pitch = (uint32_t*)regs->rcx;
+
+    // Прямая запись в память процесса (user-space)
+    if (user_phys)  *user_phys  = phys_fb;
+    if (user_w)     *user_w     = screen_width;
+    if (user_h)     *user_h     = screen_height;
+    if (user_pitch) *user_pitch = screen_pitch;
+
+    regs->rax = 0; // Успех
     break;
-  }
+}
   case 33:
   { // SYS_GET_WINDOW_POS
     regs->rax = (uint64_t)k_app_win_x;
