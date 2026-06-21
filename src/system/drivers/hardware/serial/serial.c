@@ -21,6 +21,19 @@
 #define SERIAL_LS_TRANSMIT_IDLE     0x40
 #define SERIAL_LS_FIFO_ERROR        0x80
 
+// Простой спинлок для синхронизации вывода между ядрами/потоками
+static volatile int serial_lock = 0;
+
+static inline void serial_acquire_lock(void) {
+    while (__sync_lock_test_and_set(&serial_lock, 1)) {
+        __asm__ volatile("pause");
+    }
+}
+
+static inline void serial_release_lock(void) {
+    __sync_lock_release(&serial_lock);
+}
+
 void serial_init(uint16_t port) {
     // Disable interrupts
     outb(port + SERIAL_INT_ENABLE, 0x00);
@@ -67,9 +80,11 @@ void serial_putchar(uint16_t port, char c) {
 }
 
 void serial_puts(uint16_t port, const char *str) {
+    serial_acquire_lock();
     while (*str) {
         serial_putchar(port, *str++);
     }
+    serial_release_lock();
 }
 
 int serial_received(uint16_t port) {
