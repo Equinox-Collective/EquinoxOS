@@ -10,6 +10,7 @@
 #include "../fs/fd.h"
 #include "../misc/random.h"   /* Этап 6b: rdrand_bytes для AT_RANDOM */
 #include "signal.h"
+#include "sched.h"
 #include <stdint.h>
 
 extern void term_print(const char *str);
@@ -279,49 +280,7 @@ void task_create(void (*entry)(), uint64_t arg1, uint64_t arg2, uint64_t cr3) {
 
 // task.c
 uint64_t schedule(uint64_t current_rsp) {
-    if (!current_task) return current_rsp;
-
-    current_task->rsp = current_rsp;
-
-    task_t* start = current_task;
-    int hops = 0;
-    do {
-        task_t* next = current_task->next;
-        if (!next) {
-            current_task = task_list ? task_list : start;
-        } else {
-            current_task = next;
-        }
-
-        // Если время сна вышло, сбрасываем таймер сна
-        if (current_task->sleep_until != 0 && tick >= current_task->sleep_until) {
-            current_task->sleep_until = 0;
-        }
-
-        if (++hops > 4096) {
-            current_task = (task_list && task_list->running) ? task_list : start;
-            break;
-        }
-    // Крутимся в цикле, если задача не готова к работе ИЛИ всё ещё спит
-    } while (!current_task->running || current_task->sleep_until != 0);
-
-    /* Этап 9: переключение FPU/SSE-контекста. Без этого XMM/x87-регистры
-     * «протекали» между задачами (см. комментарий к fpu_state в task.h). */
-    if (current_task != start) {
-        __asm__ volatile("fxsave64 (%0)"  :: "r"(task_fpu_area(start))        : "memory");
-        __asm__ volatile("fxrstor64 (%0)" :: "r"(task_fpu_area(current_task)) : "memory");
-    }
-
-    uint64_t new_cr3 = (current_task->cr3 == 0) ? kernel_cr3 : current_task->cr3;
-    __asm__ volatile("mov %0, %%cr3" : : "r"(new_cr3) : "memory");
-
-    gdt_set_tss_stack(current_task->kstack_at_bottom);
-    
-    if (current_task->fs_base != 0) {
-        wrmsr(IA32_FS_BASE_MSR, current_task->fs_base);
-    }
-    
-    return current_task->rsp;
+    return sched_switch(current_rsp);
 }
 
 void yield(void) {

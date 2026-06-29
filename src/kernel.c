@@ -22,6 +22,7 @@
 #include "system/mem/vmm.h"
 #include "system/hal/hal.h"
 #include "system/usr/ipc.h"
+#include "system/usr/sched.h"
 
 #include "system/drivers/devices/mouse/mouse.h"
 #include "system/drivers/hardware/net/rtl8139.h"
@@ -373,7 +374,8 @@ void kmain(void) {
   }
   term_print("Kernel tests passed\n");
 
-  task_init();
+  // task_init();
+  sched_init(current_task);
   term_print("Task system initialized\n");
   vfs_init();
   term_print("VFS initialized\n");
