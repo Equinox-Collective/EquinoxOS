@@ -46,6 +46,8 @@ typedef struct task {
 
     uint64_t sleep_until;       // Таймер сна потока
     uint8_t fpu_state[512] __attribute__((aligned(16)));
+    bool waiting;        // Флаг ожидания завершения дочернего процесса
+    uint64_t wait_for;
 
     // Сигналы (доставляются конкретному потоку)
     uint64_t sig_pending;
