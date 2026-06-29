@@ -673,6 +673,7 @@ uint64_t task_fork(stack_frame_t* parent_frame) {
     
     child_proc->pid        = next_pid++;
     child_proc->parent_pid = parent->process->pid;
+    child_proc->pgid       = parent->process->pgid;
     child_proc->cr3        = PHYS(child_pml4);
     child_proc->brk        = parent->process->brk;
     child_proc->zombie     = false;

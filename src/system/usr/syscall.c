@@ -2306,12 +2306,12 @@ void linux_syscall_handler(syscall_regs_t *regs)
     if (t != current_task && t->process->parent_pid != current_task->process->pid) {
       regs->rax = LERR(L_EPERM); signal_deliver(regs); return;
     }
-    t->pgid = pgid ? pgid : t->id;
+    t->process->pgid = pgid ? pgid : t->process->pid;
     regs->rax = 0; signal_deliver(regs); return;
   }
 
   case 112:   /* setsid(): новая сессия/группа — текущий становится лидером */
-    current_task->pgid = current_task->id;
+    current_task->process->pgid = current_task->process->pid;
     regs->rax = current_task->id;
     signal_deliver(regs); return;
 
