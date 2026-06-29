@@ -81,7 +81,12 @@ bool wq_wake_one(waitqueue_t *q) {
     if (!q->head) q->tail = (waitnode_t *)0;
     spin_unlock(&q->lock);
 
-    n->task->running = true;
+    // Возвращаем задачу в очередь активных
+    task_t *task = n->task;
+    task->state = TASK_STATE_RUNNABLE;
+    task->running = true;
+    sched_enqueue(task); 
+    
     kfree(n);
     return true;
 }
