@@ -23,6 +23,7 @@
 #include "task.h"
 #include "../core/cpu.h"
 #include "../../syslibc/string.h"
+#include "sched.h"
 
 extern void term_print(const char *str);
 
@@ -85,16 +86,16 @@ int signal_send(uint64_t pid, int sig) {
     if (pid == 0) pid = current_task ? current_task->id : 0;
 
     task_t *t = find_task(pid);
-    if (!t) return -1;           /* ESRCH */
-    if (sig == 0) return 0;      /* только проба существования */
+    if (!t) return -1;
+    if (sig == 0) return 0;
 
     t->sig_pending |= SIGBIT(sig);
 
-    /* Если цель заблокирована в прерываемом ожидании (waitpid) и сигнал не
-     * заблокирован — разбудим её, чтобы ожидание прервалось и сигнал
-     * доставился при возврате из сисколла. */
-    if (t->waiting && !(t->sig_blocked & SIGBIT(sig)) && !t->running) {
+    // Если поток заблокирован и сигнал не замаскирован — возвращаем его в строй
+    if (t->waiting && !(t->sig_blocked & SIGBIT(sig)) && t->state == TASK_STATE_BLOCKED) {
+        t->state = TASK_STATE_RUNNABLE;
         t->running = true;
+        sched_enqueue(t);
     }
     return 0;
 }
