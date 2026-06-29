@@ -335,7 +335,7 @@ void syscall_handler(syscall_regs_t *regs)
     /* Транслируем syscall_regs_t -> stack_frame_t (кадр, который умеет
      * восстанавливать планировщик в irq0_handler_asm). Ребёнок "вернётся"
      * из int 0x80 с rax = 0; родителю возвращаем pid ребёнка. */
-    stack_frame_t pf;
+    struct stack_frame pf;
     pf.rax = 0;
     pf.rbx = regs->rbx;
     pf.rcx = regs->rcx;
@@ -991,7 +991,7 @@ void syscall_handler(syscall_regs_t *regs)
       uint32_t running;
       uint32_t _pad;
     } *uout = (void *)regs->rsi;
-    task_snapshot_t snap;
+    struct task_snapshot snap;
     if (uout && task_snapshot_at(idx, &snap))
     {
       stac();
