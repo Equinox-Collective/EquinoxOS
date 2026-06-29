@@ -29,8 +29,10 @@ void sched_init(task_t *initial_task) {
     
     initial_task->state = TASK_STATE_RUNNABLE;
     initial_task->running = true;
-    initial_task->next = NULL;
-    initial_task->prev = NULL;
+    
+    // Инициализируем ТОЛЬКО очереди планировщика!
+    initial_task->sched_next = NULL;
+    initial_task->sched_prev = NULL;
     
     run_queue_head = initial_task;
     run_queue_tail = initial_task;
