@@ -67,7 +67,7 @@ uint64_t sys_shm_get(uint32_t key, uint32_t size) {
       SHM_START_VADDR +
       (slot * 0x1000000); // Даем по 16МБ зазора между сегментами
 
-  page_table_t *pml4 = (page_table_t *)VIRT(current_task->cr3);
+  page_table_t *pml4 = (page_table_t *)VIRT(current_task->process->cr3);
   for (uint32_t p = 0; p < shm_table[slot].page_count; p++) {
     vmm_map(pml4, virt_addr + (p * 4096),
             shm_table[slot].phys_addr + (p * 4096),
