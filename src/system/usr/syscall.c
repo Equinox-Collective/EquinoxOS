@@ -235,7 +235,7 @@ void syscall_handler(syscall_regs_t *regs)
     {
       extern volatile uint64_t fg_app_pid;
       if (current_task) {
-        fg_app_pid = current_task->id;
+        fg_app_pid = current_task->process->pid;
       }
     }
     stac();
@@ -1013,7 +1013,7 @@ void syscall_handler(syscall_regs_t *regs)
     uint64_t pid = regs->rdi;
     
     // ЗАЩИТА ОТ САМОУБИЙСТВА: Процесс не может завершить сам себя через этот вызов!
-    if (current_task && pid == current_task->id) {
+    if (current_task && current_task->process && pid == current_task->process->pid) {
       regs->rax = 0;
       break;
     }
@@ -2320,7 +2320,7 @@ void linux_syscall_handler(syscall_regs_t *regs)
      * bash/новые порты видны сразу, а не как «тихий» сбой юзерспейса. */
     char eb[64];
     sprintf(eb, "[lx] ENOSYS syscall %u (pid %u)\n",
-            (unsigned)n, (unsigned)(current_task ? current_task->id : 0));
+            (unsigned)n, (unsigned)(current_task && current_task->process ? current_task->process->pid : 0));
     serial_puts(COM1, eb);
     regs->rax = LERR(L_ENOSYS);
     signal_deliver(regs);
