@@ -2,6 +2,7 @@
 #include "task.h"
 #include "../mem/memory.h"
 #include "../../syslibc/string.h"
+#include "sched.h"
 
 extern void term_print(const char *str);
 
@@ -49,7 +50,6 @@ void wq_init(waitqueue_t *q) {
 }
 
 void wq_sleep(waitqueue_t *q) {
-    /* Allocate node BEFORE locking — kmalloc may want IRQs on inside. */
     waitnode_t *node = (waitnode_t *)kmalloc(sizeof(*node));
     if (!node) {
         term_print("[SYNC] wq_sleep: OOM, spinning instead\n");
@@ -62,12 +62,15 @@ void wq_sleep(waitqueue_t *q) {
     if (q->tail) q->tail->next = node;
     else         q->head       = node;
     q->tail = node;
+    
+    // Переводим задачу в заблокированное состояние и изымаем из планирования
+    current_task->state = TASK_STATE_BLOCKED;
     current_task->running = false;
+    sched_dequeue(current_task); 
+    
     spin_unlock(&q->lock);
 
-    /* Drop into the scheduler — `running = false` means we won't be picked
-     * until someone toggles it back on. */
-    yield();
+    yield(); // Планировщик больше нас не увидит, пока нас не разбудят
 }
 
 bool wq_wake_one(waitqueue_t *q) {
