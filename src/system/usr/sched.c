@@ -45,11 +45,11 @@ void sched_enqueue(task_t *task) {
     
     task->state = TASK_STATE_RUNNABLE;
     task->running = true;
-    task->next = NULL;
-    task->prev = run_queue_tail;
+    task->sched_next = NULL;
+    task->sched_prev = run_queue_tail;
     
     if (run_queue_tail) {
-        run_queue_tail->next = task;
+        run_queue_tail->sched_next = task;
     } else {
         run_queue_head = task;
     }
@@ -60,20 +60,20 @@ void sched_enqueue(task_t *task) {
 void sched_dequeue(task_t *task) {
     if (!task) return;
     
-    if (task->prev) {
-        task->prev->next = task->next;
+    if (task->sched_prev) {
+        task->sched_prev->sched_next = task->sched_next;
     } else {
-        run_queue_head = task->next;
+        run_queue_head = task->sched_next;
     }
     
-    if (task->next) {
-        task->next->prev = task->prev;
+    if (task->sched_next) {
+        task->sched_next->sched_prev = task->sched_prev;
     } else {
-        run_queue_tail = task->prev;
+        run_queue_tail = task->sched_prev;
     }
     
-    task->next = NULL;
-    task->prev = NULL;
+    task->sched_next = NULL;
+    task->sched_prev = NULL;
 }
 
 // Вставка в Sleep Queue по возрастанию времени пробуждения (O(N) при вставке, но O(1) при пробуждении)
@@ -85,8 +85,8 @@ void sched_make_sleep(task_t *task, uint64_t sleep_until) {
     task->state = TASK_STATE_SLEEPING;
     task->running = false;
     task->sleep_until = sleep_until;
-    task->next = NULL;
-    task->prev = NULL;
+    task->sched_next = NULL;
+    task->sched_prev = NULL;
     
     if (!sleep_queue_head) {
         sleep_queue_head = task;
@@ -95,23 +95,23 @@ void sched_make_sleep(task_t *task, uint64_t sleep_until) {
     
     // Вставка со связанной сортировкой
     task_t *curr = sleep_queue_head;
-    task_t *prev = NULL;
+    task_t *prev_node = NULL;
     
     while (curr && curr->sleep_until <= sleep_until) {
-        prev = curr;
-        curr = curr->next;
+        prev_node = curr;
+        curr = curr->sched_next;
     }
     
-    if (!prev) { // Вставка в самое начало
-        task->next = sleep_queue_head;
-        sleep_queue_head->prev = task;
+    if (!prev_node) { // Вставка в самое начало
+        task->sched_next = sleep_queue_head;
+        sleep_queue_head->sched_prev = task;
         sleep_queue_head = task;
     } else {
-        task->next = curr;
-        task->prev = prev;
-        prev->next = task;
+        task->sched_next = curr;
+        task->sched_prev = prev_node;
+        prev_node->sched_next = task;
         if (curr) {
-            curr->prev = task;
+            curr->sched_prev = task;
         }
     }
 }
@@ -122,9 +122,9 @@ void sched_timer_tick(uint32_t current_tick) {
         task_t *task = sleep_queue_head;
         
         // Извлекаем из головы Sleep Queue
-        sleep_queue_head = task->next;
+        sleep_queue_head = task->sched_next;
         if (sleep_queue_head) {
-            sleep_queue_head->prev = NULL;
+            sleep_queue_head->sched_prev = NULL;
         }
         
         task->sleep_until = 0;
