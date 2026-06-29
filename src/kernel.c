@@ -374,7 +374,7 @@ void kmain(void) {
   }
   term_print("Kernel tests passed\n");
 
-  // task_init();
+  task_init();
   sched_init(current_task);
   term_print("Task system initialized\n");
   vfs_init();

@@ -156,8 +156,8 @@ uint64_t sched_switch(uint64_t current_rsp) {
     
     // Легковесное сохранение/восстановление FPU/SSE-контекста
     if (current_task != prev_task) {
-        __asm__ volatile("fxsave64 (%0)"  :: "r"(prev_task->fpu_state)        : "memory");
-        __asm__ volatile("fxrstor64 (%0)" :: "r"(current_task->fpu_state) : "memory");
+        __asm__ volatile("fxsave64 (%0)"  :: "r"(task_fpu_area(prev_task))    : "memory");
+        __asm__ volatile("fxrstor64 (%0)" :: "r"(task_fpu_area(current_task)) : "memory");
     }
     
     // Смена виртуального адресного пространства (CR3)

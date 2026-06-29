@@ -6,6 +6,8 @@
 #include "../../mem/vmm.h"
 #include <stdint.h>
 
+#define TILE_SIZE 32
+
 // --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ЭКРАНА ---
 uintptr_t fb_base_addr;
 uint32_t screen_width;
@@ -15,6 +17,10 @@ uint32_t *backbuffer;
 static uint32_t *cached_bg = NULL;
 psf1_t *current_font = NULL;
 dirty_rect_t screen_dirty = {0, 0, 0, 0, false};
+extern uint32_t tile_cols;
+extern uint32_t tile_rows;
+extern uint8_t *tile_grid;  // Карта грязных тайлов (1 - изменен, 0 - чист)
+extern bool grid_modified;  // Были ли изменения вообще
 
 void *vesa_get_font() { return current_font; }
 
