@@ -23,52 +23,36 @@ typedef enum {
 
 typedef struct task {
     uint64_t rsp;
-    uint64_t kstack_at_bottom;
     uint64_t cr3;
-    uint64_t fs_base;
-    struct task* next;
     uint64_t id;
-    bool running;
+    uint64_t parent_id;
+    uint64_t pgid;
+    
+    task_state_t state;     // Явное состояние потока
+    bool running;           // Для совместимости со старым кодом
+    bool zombie;            // Для совместимости
+    bool waiting;
+    uint64_t wait_for;
+    int exit_code;
     uint64_t sleep_until;
+    uint64_t fs_base;
     uint64_t brk;
-    /* --- Этап 1: процессная модель (fork / exit-status / waitpid) --------- *
-     * Минимальная POSIX-семантика родитель/ребёнок поверх кольцевого
-     * планировщика. fd-таблица пока глобальная (см. fs/fd.c) — её разнос
-     * по процессам будет в следующем этапе. */
-    uint64_t parent_id;   /* pid родителя (0 = нет родителя / init) */
-    uint64_t pgid;        /* Этап 6e: группа процессов (0 == группа == own id). Наследуется при fork; setpgid меняет. */
-    bool     zombie;      /* процесс вызвал exit(), но ещё не reaped через waitpid */
-    int      exit_code;   /* код возврата из SYS_EXIT — отдаётся в waitpid */
-    bool     waiting;     /* родитель спит внутри waitpid()                */
-    uint64_t wait_for;    /* pid ожидаемого ребёнка (0 = любой ребёнок)    */
-    /* --- Этап 2: процессная таблица дескрипторов (см. fs/fd.c) ---------- *
-     * Указатель непрозрачный (struct fd_table определён в fd.h), чтобы не
-     * тянуть fd.h в task.h. fork клонирует таблицу, execve сохраняет,
-     * exit освобождает. */
-    struct fd_table *fdt;
-    /* --- Этап 3: рабочая директория процесса (логический абсолютный путь,
-     * напр. "/" или "/bin"). Наследуется при fork, сохраняется при execve. */
     char cwd[256];
-    /* --- Этап 4: сигналы (POSIX-подмножество, см. usr/signal.c) ---------- *
-     * sig_pending — битовая маска ожидающих сигналов (бит N = сигнал N).
-     * sig_blocked — маска заблокированных (sigprocmask + auto-block в обработчике).
-     * sig_handlers[N] — пользовательский обработчик: 0=SIG_DFL, 1=SIG_IGN,
-     * иначе адрес функции в ring3. sig_restorer — адрес трамплина sigreturn
-     * (libc __sigreturn_trampoline), общий для всех обработчиков. */
+    struct fd_table *fdt;
+    uint64_t kstack_at_bottom;
+    
+    // FPU/SSE-контекст
+    uint8_t fpu_state[512] __attribute__((aligned(16)));
+    
+    // Сигналы
     uint64_t sig_pending;
     uint64_t sig_blocked;
     uint64_t sig_handlers[32];
     uint64_t sig_restorer;
-    /* --- Этап 9: FPU/SSE-контекст задачи -------------------------------- *
-     * fxsave64-область (512 байт). До этого этапа ядро НЕ сохраняло
-     * XMM/x87-регистры при переключении задач: пока работал один юзер-
-     * процесс, это сходило с рук, но фоновые задачи bash (`cmd &`) гоняют
-     * несколько SSE-активных процессов параллельно, и регистры «протекали»
-     * между ними (классический симптом — мусорный указатель в metadata
-     * mallocng и page fault с маленьким CR2). task_t выделяется kmalloc'ом
-     * без гарантии выравнивания, а fxsave требует 16 байт — поэтому буфер
-     * на 15 байт больше, рабочий адрес считает task_fpu_area(). */
-    uint8_t fpu_state[512 + 15];
+
+    // Указатели для очередей планировщика (двусвязный список)
+    struct task *next;
+    struct task *prev;
 } task_t;
 
 static inline void* task_fpu_area(task_t* t) {
