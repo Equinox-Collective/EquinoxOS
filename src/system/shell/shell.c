@@ -166,7 +166,7 @@ static void cmd_ps(void) {
         const char *state = curr->running ? "RUNNING" : "STOPPED";
         sprintf(buf, " %d     %s     %x   %x\n",
                 (uint32_t)curr->id, state,
-                (uint32_t)curr->cr3, (uint32_t)curr->brk);
+                (uint32_t)(curr->process ? curr->process->cr3 : 0), (uint32_t)(curr->process ? curr->process->brk : 0));
         sh_print(buf);
         curr = curr->next;
     } while (curr && curr != start);
