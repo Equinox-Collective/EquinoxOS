@@ -161,7 +161,9 @@ uint64_t sched_switch(uint64_t current_rsp) {
     }
     
     // Смена виртуального адресного пространства (CR3)
-    uint64_t new_cr3 = (current_task->cr3 == 0) ? kernel_cr3 : current_task->cr3;
+    uint64_t new_cr3 = (current_task->process && current_task->process->cr3 != 0) 
+                       ? current_task->process->cr3 
+                       : kernel_cr3;
     __asm__ volatile("mov %0, %%cr3" : : "r"(new_cr3) : "memory");
     
     gdt_set_tss_stack(current_task->kstack_at_bottom);

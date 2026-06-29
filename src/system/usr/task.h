@@ -21,36 +21,39 @@ typedef enum {
     TASK_STATE_ZOMBIE     // Мертв, ожидает waitpid (вне планировщика)
 } task_state_t;
 
+typedef struct process {
+    uint64_t pid;               // Идентификатор процесса
+    uint64_t parent_pid;        // PID родительского процесса
+    uint64_t cr3;               // Страничная таблица процесса (общее адресное пространство)
+    uint64_t brk;               // Граница кучи процесса (общее выделение памяти)
+    char cwd[256];              // Общий рабочий каталог процессов
+    struct fd_table *fdt;       // Общая таблица файловых дескрипторов
+    int exit_code;              // Код завершения процесса
+    bool zombie;                // Флаг зомби-состояния
+} process_t;
+
+// === Поток исполнения (Thread Control Block) ===
 typedef struct task {
-    uint64_t rsp;
-    uint64_t cr3;
-    uint64_t id;
-    uint64_t parent_id;
-    uint64_t pgid;
-    
-    task_state_t state;     // Явное состояние потока
-    bool running;           // Для совместимости со старым кодом
-    bool zombie;            // Для совместимости
-    bool waiting;
-    uint64_t wait_for;
-    int exit_code;
-    uint64_t sleep_until;
-    uint64_t fs_base;
-    uint64_t brk;
-    char cwd[256];
-    struct fd_table *fdt;
-    uint64_t kstack_at_bottom;
-    
-    // FPU/SSE-контекст
+    uint64_t rsp;               // Сохраненный указатель стека потока
+    uint64_t id;                // Идентификатор потока (TID)
+    task_state_t state;         // Текущее состояние потока
+    bool running;               // Совместимость
+    uint64_t kstack_at_bottom;  // Ядерный стек этого потока (для прерываний)
+    uint64_t fs_base;           // Базовый адрес TLS этого потока
+
+    // Ссылка на родительский процесс (где лежат общие ресурсы)
+    process_t *process;
+
+    uint64_t sleep_until;       // Таймер сна потока
     uint8_t fpu_state[512] __attribute__((aligned(16)));
-    
-    // Сигналы
+
+    // Сигналы (доставляются конкретному потоку)
     uint64_t sig_pending;
     uint64_t sig_blocked;
     uint64_t sig_handlers[32];
     uint64_t sig_restorer;
 
-    // Указатели для очередей планировщика (двусвязный список)
+    // Ссылки очереди планировщика
     struct task *next;
     struct task *prev;
 } task_t;
