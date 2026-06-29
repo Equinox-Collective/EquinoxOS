@@ -899,8 +899,8 @@ void task_list_all() {
     sprintf(buf, " %d     %s     %x   %x\n", 
             (uint32_t)(curr->process ? curr->process->pid : curr->id), 
             state,
-            (uint32_t)(curr->process ? curr->process->cr3 : curr->cr3), 
-            (uint32_t)(curr->process ? curr->process->brk : curr->brk));
+            (uint32_t)(curr->process ? curr->process->cr3 : 0), 
+            (uint32_t)(curr->process ? curr->process->brk : 0));
     term_print(buf);
     curr = curr->next;
   } while (curr != start);
@@ -970,8 +970,8 @@ bool task_snapshot_at(int idx, task_snapshot_t *out) {
   do {
     if (i == idx) {
       out->pid = curr->process ? curr->process->pid : curr->id;
-      out->cr3 = curr->process ? curr->process->cr3 : curr->cr3;
-      out->brk = curr->process ? curr->process->brk : curr->brk;
+      out->cr3 = curr->process ? curr->process->cr3 : 0;
+      out->brk = curr->process ? curr->process->brk : 0;
       out->running = curr->running;
       return true;
     }
