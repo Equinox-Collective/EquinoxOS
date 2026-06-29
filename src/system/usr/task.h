@@ -14,6 +14,13 @@ typedef struct {
 
 #define MAX_FD 32
 
+typedef enum {
+    TASK_STATE_RUNNABLE,  // Готов к выполнению (находится в Run Queue)
+    TASK_STATE_SLEEPING,  // Спит по таймеру (находится в Sleep Queue)
+    TASK_STATE_BLOCKED,   // Заблокирован на мьютексе/семафоре/ожидании ввода (вне планировщика)
+    TASK_STATE_ZOMBIE     // Мертв, ожидает waitpid (вне планировщика)
+} task_state_t;
+
 typedef struct task {
     uint64_t rsp;
     uint64_t kstack_at_bottom;
