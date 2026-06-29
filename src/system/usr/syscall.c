@@ -295,7 +295,7 @@ void syscall_handler(syscall_regs_t *regs)
      * нужный TCB и игнорируются (CLOSE_WAIT/TIME_WAIT) без спама. */
     {
       extern int sock_close_owned_by(uint64_t pid);
-      int n = sock_close_owned_by(current_task->id);
+      int n = sock_close_owned_by(current_task->process->pid);
       if (n > 0)
       {
         char mb[64];
@@ -313,7 +313,7 @@ void syscall_handler(syscall_regs_t *regs)
     // Если выходит foreground-app — отдаём фокус ввода обратно sysgui.
     {
       extern volatile uint64_t fg_app_pid;
-      if (fg_app_pid == current_task->id)
+      if (fg_app_pid == current_task->process->pid)
       {
         fg_app_pid = 0;
       }
@@ -375,7 +375,7 @@ void syscall_handler(syscall_regs_t *regs)
     break;
   }
   case 53: // SYS_GETPID -> реальный pid текущего процесса
-    regs->rax = current_task->id;
+    regs->rax = current_task->process->pid;
     break;
   case 54: // SYS_EXECVE (const char* path, char* const argv[], char* const envp[])
   {
@@ -446,11 +446,11 @@ void syscall_handler(syscall_regs_t *regs)
     /* Атомарная замена: переключаем cr3 на новое пространство (ядро отображено
      * в обеих половинах, kstack в HHDM — безопасно), обновляем поля задачи,
      * затем освобождаем старое адресное пространство. */
-    uint64_t oldcr3 = current_task->cr3;
+    uint64_t oldcr3 = current_task->process->cr3;
     __asm__ volatile("mov %0, %%cr3" : : "r"(ncr3) : "memory");
-    current_task->cr3     = ncr3;
+    current_task->process->cr3     = ncr3;
     current_task->fs_base = nfs;
-    current_task->brk     = 0x40000000;
+    current_task->process->brk     = 0x40000000;
     /* Этап 4: при exec перехватываемые обработчики -> SIG_DFL (POSIX). */
     task_signal_exec(current_task);
     task_set_fs_base(nfs);
@@ -546,19 +546,19 @@ void syscall_handler(syscall_regs_t *regs)
   }
   case 15:
   { // SYS_BRK
-    if (current_task->brk == 0)
-      current_task->brk = 0x40000000;
+    if (current_task->process->brk == 0)
+      current_task->process->brk = 0x40000000;
 
     uint64_t requested_brk = regs->rdi;
     if (requested_brk == 0)
     {
-      regs->rax = current_task->brk;
+      regs->rax = current_task->process->brk;
       break;
     }
 
-    if (requested_brk > current_task->brk)
+    if (requested_brk > current_task->process->brk)
     {
-      uint64_t start_map = (current_task->brk + 4095) & ~4095;
+      uint64_t start_map = (current_task->process->brk + 4095) & ~4095;
       uint64_t end_map = (requested_brk + 4095) & ~4095;
 
       uint64_t cr3_val;
@@ -585,8 +585,8 @@ void syscall_handler(syscall_regs_t *regs)
         break;
       }
     }
-    current_task->brk = requested_brk;
-    regs->rax = current_task->brk;
+    current_task->process->brk = requested_brk;
+    regs->rax = current_task->process->brk;
     break;
   }
   case 16:
@@ -703,7 +703,7 @@ void syscall_handler(syscall_regs_t *regs)
 
     uint64_t virt = 0x20000000000; // Фиксированный адрес для видеопамяти
 
-    page_table_t *pml4 = (page_table_t *)VIRT(current_task->cr3);
+    page_table_t *pml4 = (page_table_t *)VIRT(current_task->process->cr3);
     for (uint32_t i = 0; i < pages; i++)
     {
       // Добавляем флаги PCD и PWT для активации Write-Combining (Index 3 в PAT)
@@ -1476,7 +1476,7 @@ void syscall_handler(syscall_regs_t *regs)
     case K_TIOCGPGRP: {  /* tcgetpgrp(fd): foreground-группа терминала */
       if (!arg) { regs->rax = (uint64_t)(int64_t)-1; break; }
       uint64_t fg = g_tty_fg_pgrp ? g_tty_fg_pgrp
-                  : (current_task->pgid ? current_task->pgid : current_task->id);
+                  : (current_task->process->pgid ? current_task->process->pgid : current_task->process->pid);
       stac(); *(int *)arg = (int)fg; clac();
       regs->rax = 0;
       break;
@@ -2282,19 +2282,19 @@ void linux_syscall_handler(syscall_regs_t *regs)
   }
 
   case 111:   /* getpgrp() -> группа текущего процесса */
-    regs->rax = current_task->pgid ? current_task->pgid : current_task->id;
+    regs->rax = current_task->process->pgid ? current_task->process->pgid : current_task->process->pid;
     signal_deliver(regs); return;
 
   case 121: { /* getpgid(pid) -> группа процесса pid (0 == текущий) */
     uint64_t pid = regs->rdi;
     task_t *t = pid ? task_by_id(pid) : current_task;
     if (!t) { regs->rax = LERR(L_ESRCH); signal_deliver(regs); return; }
-    regs->rax = t->pgid ? t->pgid : t->id;
+    regs->rax = t->process->pgid ? t->process->pgid : t->process->pid;
     signal_deliver(regs); return;
   }
 
   case 124:   /* getsid(pid) — сессий не различаем, отдаём группу как прокси */
-    regs->rax = current_task->pgid ? current_task->pgid : current_task->id;
+    regs->rax = current_task->process->pgid ? current_task->process->pgid : current_task->process->pid;
     signal_deliver(regs); return;
 
   case 109: { /* setpgid(pid, pgid): pid 0=текущий, pgid 0=сделать pid лидером */
@@ -2303,7 +2303,7 @@ void linux_syscall_handler(syscall_regs_t *regs)
     task_t *t = (pid == current_task->id) ? current_task : task_by_id(pid);
     if (!t) { regs->rax = LERR(L_ESRCH); signal_deliver(regs); return; }
     /* Менять можно только себя или своего ребёнка (POSIX). */
-    if (t != current_task && t->parent_id != current_task->id) {
+    if (t != current_task && t->process->parent_pid != current_task->process->pid) {
       regs->rax = LERR(L_EPERM); signal_deliver(regs); return;
     }
     t->pgid = pgid ? pgid : t->id;
