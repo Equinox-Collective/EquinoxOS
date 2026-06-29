@@ -6,8 +6,6 @@
 #include "../../mem/vmm.h"
 #include <stdint.h>
 
-#define TILE_SIZE 32
-
 // --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ЭКРАНА ---
 uintptr_t fb_base_addr;
 uint32_t screen_width;
@@ -17,12 +15,13 @@ uint32_t *backbuffer;
 static uint32_t *cached_bg = NULL;
 psf1_t *current_font = NULL;
 dirty_rect_t screen_dirty = {0, 0, 0, 0, false};
-extern uint32_t tile_cols;
-extern uint32_t tile_rows;
-extern uint8_t *tile_grid;  // Карта грязных тайлов (1 - изменен, 0 - чист)
-extern bool grid_modified;  // Были ли изменения вообще
 
 void *vesa_get_font() { return current_font; }
+
+uint32_t tile_cols = 0;
+uint32_t tile_rows = 0;
+uint8_t *tile_grid = NULL;
+bool grid_modified = false;
 
 void init_vesa(uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch) {
   fb_base_addr = (uintptr_t)addr;
@@ -30,19 +29,24 @@ void init_vesa(uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch) {
   screen_height = height;
   screen_pitch = pitch;
 
+  // Выделяем память под бэкбуфер ядра
   backbuffer = (uint32_t *)vmm_alloc_large_buffer(width * height * 4);
   if (!backbuffer) {
     backbuffer = (uint32_t *)kmalloc(width * height * 4);
   }
-  
   memset(backbuffer, 0, width * height * 4);
-  vesa_mark_dirty(0, 0, screen_width, screen_height);
-  screen_dirty.x1 = 0;
-  screen_dirty.y1 = 0;
-  screen_dirty.x2 = width;
-  screen_dirty.y2 = height;
-  screen_dirty.modified = true;
+
+  // Инициализируем сетку тайлов
+  tile_cols = (width + TILE_SIZE - 1) / TILE_SIZE;
+  tile_rows = (height + TILE_SIZE - 1) / TILE_SIZE;
+  
+  tile_grid = (uint8_t *)kmalloc(tile_cols * tile_rows);
+  if (tile_grid) {
+    memset(tile_grid, 1, tile_cols * tile_rows); // При старте все тайлы грязные
+  }
+  grid_modified = true;
 }
+
 
 void put_pixel(int x, int y, uint32_t color) {
   if (x < 0 || x >= (int)screen_width || y < 0 || y >= (int)screen_height)
@@ -185,27 +189,44 @@ void vesa_draw_buffer(int x, int y, int w, int h, uint32_t *buffer) {
 }
 
 void vesa_update() {
-    if (!screen_dirty.modified) return;
+  if (!grid_modified || !tile_grid) return;
 
-    int x1 = (screen_dirty.x1 < 0) ? 0 : screen_dirty.x1;
-    int y1 = (screen_dirty.y1 < 0) ? 0 : screen_dirty.y1;
-    int x2 = (screen_dirty.x2 > (int)screen_width) ? (int)screen_width : screen_dirty.x2;
-    int y2 = (screen_dirty.y2 > (int)screen_height) ? (int)screen_height : screen_dirty.y2;
+  for (uint32_t r = 0; r < tile_rows; r++) {
+    uint32_t y_start = r * TILE_SIZE;
+    uint32_t y_end = y_start + TILE_SIZE;
+    if (y_end > screen_height) y_end = screen_height;
+    uint32_t tile_h = y_end - y_start;
 
-    int copy_w = x2 - x1;
-    if (copy_w <= 0 || y1 >= y2) {
-        screen_dirty.modified = false;
-        return;
+    uint32_t c = 0;
+    while (c < tile_cols) {
+      // Ищем непрерывную последовательность измененных тайлов в одной строке
+      if (tile_grid[r * tile_cols + c]) {
+        uint32_t c_start = c;
+        while (c < tile_cols && tile_grid[r * tile_cols + c]) {
+          tile_grid[r * tile_cols + c] = 0; // Сразу снимаем флаг грязи
+          c++;
+        }
+        uint32_t c_end = c; // Индекс за границей грязного отрезка
+
+        uint32_t x_start = c_start * TILE_SIZE;
+        uint32_t x_end = c_end * TILE_SIZE;
+        if (x_end > screen_width) x_end = screen_width;
+        uint32_t copy_w = x_end - x_start;
+
+        // Копируем склеенный горизонтальный блок для всех строк текущего ряда тайлов
+        for (uint32_t i = 0; i < tile_h; i++) {
+          uint32_t current_y = y_start + i;
+          uint8_t* fb_line = (uint8_t*)fb_base_addr + (current_y * screen_pitch);
+          uint32_t* dst = (uint32_t*)(fb_line + (x_start * 4));
+          uint32_t* src = &backbuffer[current_y * screen_width + x_start];
+          vesa_copy_buffer_fast(dst, src, copy_w);
+        }
+      } else {
+        c++;
+      }
     }
-
-    for (int i = y1; i < y2; i++) {
-        uint8_t* fb_line = (uint8_t*)fb_base_addr + (i * screen_pitch);
-        uint32_t* dst = (uint32_t*)(fb_line + (x1 * 4));
-        uint32_t* src = &backbuffer[i * screen_width + x1];
-        vesa_copy_buffer_fast(dst, src, (uint32_t)copy_w);
-    }
-    
-    screen_dirty.modified = false;
+  }
+  grid_modified = false;
 }
 
 void vesa_draw_psf_char(psf_t *font, char c, int x, int y, uint32_t fg) {
@@ -305,27 +326,35 @@ void vesa_copy_buffer_fast(uint32_t* dest, uint32_t* src, uint32_t count) {
 }
 
 void vesa_mark_dirty(int x, int y, int w, int h) {
-    if (x + w < 0 || y + h < 0 || x >= (int)screen_width || y >= (int)screen_height) return;
+  if (!tile_grid) return;
+  // Защита от выхода за границы экрана
+  if (x + w < 0 || y + h < 0 || x >= (int)screen_width || y >= (int)screen_height) return;
 
-    int nx1 = (x < 0) ? 0 : x;
-    int ny1 = (y < 0) ? 0 : y;
-    int nx2 = (x + w > (int)screen_width) ? (int)screen_width : x + w;
-    int ny2 = (y + h > (int)screen_height) ? (int)screen_height : y + h;
+  int nx1 = (x < 0) ? 0 : x;
+  int ny1 = (y < 0) ? 0 : y;
+  int nx2 = (x + w > (int)screen_width) ? (int)screen_width : x + w;
+  int ny2 = (y + h > (int)screen_height) ? (int)screen_height : y + h;
 
-    if (!screen_dirty.modified) {
-        screen_dirty.x1 = nx1; screen_dirty.y1 = ny1;
-        screen_dirty.x2 = nx2; screen_dirty.y2 = ny2;
-        screen_dirty.modified = true;
-    } else {
-        if (nx1 < screen_dirty.x1) screen_dirty.x1 = nx1;
-        if (ny1 < screen_dirty.y1) screen_dirty.y1 = ny1;
-        if (nx2 > screen_dirty.x2) screen_dirty.x2 = nx2;
-        if (ny2 > screen_dirty.y2) screen_dirty.y2 = ny2;
+  // Переводим пиксельные координаты в индексы тайлов
+  int start_col = nx1 / TILE_SIZE;
+  int end_col = (nx2 - 1) / TILE_SIZE;
+  int start_row = ny1 / TILE_SIZE;
+  int end_row = (ny2 - 1) / TILE_SIZE;
+
+  // Помечаем изменившиеся тайлы в сетке
+  for (int r = start_row; r <= end_row; r++) {
+    for (int c = start_col; c <= end_col; c++) {
+      tile_grid[r * tile_cols + c] = 1;
     }
+  }
+  grid_modified = true;
 }
 
 void vesa_clear_dirty() {
-    screen_dirty.modified = false;
+  if (tile_grid) {
+    memset(tile_grid, 0, tile_cols * tile_rows);
+  }
+  grid_modified = false;
 }
 
 void put_pixel_direct(int x, int y, uint32_t color) {

@@ -6,6 +6,12 @@
 
 // Теперь эти значения будут устанавливаться динамически из Limine
 // В vesa.h
+#define TILE_SIZE 32
+
+extern uint32_t tile_cols;
+extern uint32_t tile_rows;
+extern uint8_t *tile_grid;  // Карта грязных тайлов (1 - изменен, 0 - чист)
+extern bool grid_modified;  // Были ли изменения вообще
 extern uint32_t* backbuffer;
 extern uintptr_t fb_base_addr;
 extern uint32_t screen_width;
