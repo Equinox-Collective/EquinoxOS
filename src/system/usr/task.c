@@ -132,6 +132,7 @@ task_t* task_create_full(void (*entry)(), uint64_t arg1, uint64_t arg2,
   void *top_stack_phys = 0; /* Этап 6b: phys верхней страницы user-стека */
   new_task->brk = 0x40000000;
   new_task->id = next_pid++;
+  new_task->state = TASK_STATE_RUNNABLE;
   new_task->running = true;
   new_task->cr3 = cr3;
   /* Этап 2: своя таблица дескрипторов (0/1/2 = консоль). */
@@ -260,16 +261,9 @@ task_t* task_create_full(void (*entry)(), uint64_t arg1, uint64_t arg2,
   }
 
   new_task->rsp = (uint64_t)frame;
-  // Защита от поломанного ring-а: если task_list ещё не проинициализирован
-  // (теоретически не должно случаться, т.к. task_init выполняется первым),
-  // делаем новую задачу самоссылочной — так schedule() не уйдёт в NULL-deref.
-  if (!task_list) {
-    new_task->next = new_task;
-    task_list = new_task;
-  } else {
-    new_task->next = task_list->next ? task_list->next : task_list;
-    task_list->next = new_task;
-  }
+
+  // Теперь, когда задача ПОЛНОСТЬЮ готова к работе (стек размечен, регистры на месте):
+  sched_enqueue(new_task);
   return new_task;
 }
 
