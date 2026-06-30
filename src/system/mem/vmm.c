@@ -3,9 +3,12 @@
 #include "../../syslibc/string.h"
 #include "../mem/pmm.h"
 #include "../core/cpu.h"
+#include "../../syslibc/stdio.h"
 
 static page_table_t *kernel_pml4;
 uint64_t kernel_cr3;
+
+extern void term_print(const char *str);
 
 static void vmm_panic(const char *msg) {
   draw_rect_direct(0, 0, screen_width, screen_height, 0x880000);
@@ -76,16 +79,30 @@ extern uint64_t hhdm_offset;
 void vmm_remap_fb_wc(void) {
   if (!fb_base_addr) return;
   
-  uint64_t phys_fb = (uint64_t)fb_base_addr - hhdm_offset;
+  // 1. Вместо вычитания hhdm_offset, спрашиваем у MMU точный физический адрес фреймбуфера
+  uint64_t phys_fb = vmm_get_phys(kernel_pml4, (uint64_t)fb_base_addr);
+  
+  // Выведем отладочную информацию в COM1, чтобы убедиться в правильности адресов
+  char debug_buf[128];
+  sprintf(debug_buf, "[VMM] Framebuffer physical base found: %x (original virt: %x)\n", 
+          phys_fb, (uint64_t)fb_base_addr);
+  term_print(debug_buf);
+
+  // Резервный фоллбек на случай непредвиденных обстоятельств
+  if (!phys_fb) {
+    phys_fb = (uint64_t)fb_base_addr - hhdm_offset;
+  }
+  
   uint32_t size = screen_height * screen_pitch;
   uint32_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
 
   // Виртуальный адрес в верхней половине, гарантированно свободный от коллизий
   uint64_t wc_virt = 0xFFFFD00000000000;
 
+  // 2. Мапим страницы с флагами PAT (PCD | PWT) и пользовательским доступом (PTE_USER)
   for (uint32_t i = 0; i < pages; i++) {
     vmm_map(kernel_pml4, wc_virt + (i * PAGE_SIZE), phys_fb + (i * PAGE_SIZE),
-            PTE_PRESENT | PTE_WRITABLE | PTE_PCD | PTE_PWT);
+            PTE_PRESENT | PTE_WRITABLE | PTE_USER | PTE_PCD | PTE_PWT);
   }
   
   // Переключаем фреймбуфер ядра на быстрый Write-Combining адрес

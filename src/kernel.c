@@ -132,7 +132,6 @@ void sys_draw_app_buffer(int x, int y, int w, int h, uint32_t *buffer) {
     fg_app_pid = current_task->id;
   }
 
-  // Обрезка границ
   if (x < 0) x = 0;
   if (y < 0) y = 0;
   if (x >= (int)screen_width || y >= (int)screen_height) return;
@@ -140,16 +139,12 @@ void sys_draw_app_buffer(int x, int y, int w, int h, uint32_t *buffer) {
   if (y + h > (int)screen_height) h = (int)screen_height - y;
   if (w <= 0 || h <= 0) return;
 
-  // 1. Копируем данные в бэкбуфер ядра (очень быстрая операция RAM -> RAM)
+  // Копируем в бэкбуфер и обновляем через быстрый тайловый механизм
   vesa_draw_buffer(x, y, w, h, buffer);
-
-  // 2. Помечаем измененную область грязной в сетке тайлов
   vesa_mark_dirty(x, y, w, h);
-
-  // 3. Вызываем обновление экрана. 
-  // vesa_update сама скопирует только грязные тайлы быстрыми QWORD-пакетами.
   vesa_update();
 }
+
 
 void network_thread() {
   extern volatile int nyan_boot_active;
