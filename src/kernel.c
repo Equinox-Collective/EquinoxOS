@@ -345,7 +345,13 @@ void kmain(void) {
 
   struct limine_framebuffer *fb = framebuffer_request.response->framebuffers[0];
   init_vesa((uintptr_t)fb->address, fb->width, fb->height, fb->pitch);
-  term_print("VESA initialized\n");
+  
+  // Теперь, когда fb_base_addr и параметры экрана известны,
+  // применяем маппинг Write-Combining!
+  extern void vmm_remap_fb_wc(void);
+  vmm_remap_fb_wc();
+
+  term_print("VESA initialized (Write-Combining active)\n");
 
   __asm__("cli");
 
