@@ -214,14 +214,27 @@ uint64_t vmm_get_phys(page_table_t *pml4, uint64_t virt) {
 
   if (!(pdpt[pdpt_idx] & PTE_PRESENT))
     return 0;
+
+  // Проверяем бит 7 (PS - Page Size) на уровне PDPT (Огромная страница 1 ГБ)
+  if (pdpt[pdpt_idx] & (1ULL << 7)) {
+    return (pdpt[pdpt_idx] & ~0x3FFFFFFFULL) + (virt & 0x3FFFFFFFULL);
+  }
+
   page_table_t *pd = (page_table_t *)VIRT(pdpt[pdpt_idx] & ~0xFFFULL);
 
   if (!(pd[pd_idx] & PTE_PRESENT))
     return 0;
+
+  // Проверяем бит 7 (PS - Page Size) на уровне PD (Огромная страница 2 МБ)
+  if (pd[pd_idx] & (1ULL << 7)) {
+    return (pd[pd_idx] & ~0x1FFFFFULL) + (virt & 0x1FFFFFULL);
+  }
+
   page_table_t *pt = (page_table_t *)VIRT(pd[pd_idx] & ~0xFFFULL);
 
   if (!(pt[pt_idx] & PTE_PRESENT))
     return 0;
+
   return (pt[pt_idx] & ~0xFFFULL) + (virt & 0xFFF);
 }
 
