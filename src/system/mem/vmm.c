@@ -121,7 +121,7 @@ void vmm_init() {
   pat_init();
 
   // Применяем WC к видеопамяти ядра
-  vmm_remap_fb_wc();
+  // vmm_remap_fb_wc();
 }
 
 page_table_t *vmm_create_address_space() {
