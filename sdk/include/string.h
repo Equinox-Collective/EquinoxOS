@@ -1,5 +1,8 @@
 #ifndef LIBC_STRING_H
 #define LIBC_STRING_H
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #include <stddef.h>
 #include <stdint.h>
@@ -31,4 +34,7 @@ size_t strcspn(const char *s, const char *reject);
 char *strpbrk(const char *s, const char *accept);
 int strcoll(const char *s1, const char *s2);
 
+#ifdef __cplusplus
+}
+#endif
 #endif

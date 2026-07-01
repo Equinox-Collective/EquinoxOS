@@ -2,6 +2,9 @@
 #define _STDLIB_H
 #include <stddef.h>
 #include <stdint.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 void* malloc(size_t size);
 void free(void* ptr);
@@ -33,4 +36,8 @@ void abort(void);
 
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
+
+#ifdef __cplusplus
+}
+#endif
 #endif

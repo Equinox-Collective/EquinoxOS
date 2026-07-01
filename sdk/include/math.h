@@ -1,6 +1,10 @@
 #ifndef _MATH_H
 #define _MATH_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Константы
 #define HUGE_VAL (__builtin_huge_val())
 #define INFINITY (__builtin_inff())
@@ -78,5 +82,9 @@ double acosh(double x);
 double atanh(double x);
 double fmin(double x, double y);
 double fmax(double x, double y);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
