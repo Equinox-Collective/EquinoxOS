@@ -8,8 +8,8 @@
 #include "../drivers/hardware/net/socket.h"
 #include "../drivers/hardware/net/tcp.h"
 #include "../drivers/vesa/vesa.h"
-#include "../fs/vfs.h"
 #include "../fs/fd.h"
+#include "../fs/vfs.h"
 #include "../mem/memory.h"
 #include "../mem/pmm.h"
 #include "../mem/shm.h"
@@ -21,6 +21,7 @@
 #include "../usr/task.h"
 #include "ipc.h"
 #include <stdint.h>
+
 
 extern volatile uint32_t tick;
 extern void sys_draw_app_buffer(int x, int y, int w, int h, uint32_t *buffer);
@@ -36,16 +37,16 @@ static volatile bool k_app_win_active = false;
 /* syscall_regs_t вынесен в uregs.h, чтобы доставка сигналов (signal.c) могла
  * использовать тот же кадр. Поля/смещения по-прежнему обязаны совпадать с
  * порядком push в syscall_interrupt_asm (interrupt.asm). */
-#include "uregs.h"
+#include "../drivers/hardware/serial/serial.h" /* Этап 7: FIONREAD + лог ENOSYS */
 #include "signal.h"
 #include "tty.h"
-#include "../drivers/hardware/serial/serial.h"  /* Этап 7: FIONREAD + лог ENOSYS */
+#include "uregs.h"
+
 
 extern int mouse_x, mouse_y;
 extern bool mouse_left_button;
 
-uint64_t copy_to_user(void *kernel_buf, uint64_t size)
-{
+uint64_t copy_to_user(void *kernel_buf, uint64_t size) {
   if (!kernel_buf || size == 0)
     return 0;
 
@@ -58,8 +59,7 @@ uint64_t copy_to_user(void *kernel_buf, uint64_t size)
   __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
   page_table_t *pml4 = (page_table_t *)VIRT(cr3);
 
-  for (uint64_t i = 0; i < pages; i++)
-  {
+  for (uint64_t i = 0; i < pages; i++) {
     // Берем ЛЮБУЮ свободную страницу, не обязательно подряд!
     void *phys = pmm_alloc();
     if (!phys)
@@ -85,19 +85,16 @@ uint64_t copy_to_user(void *kernel_buf, uint64_t size)
  * плане» по умолчанию). tcsetpgrp задаёт явно. */
 static uint64_t g_tty_fg_pgrp = 0;
 
-void syscall_handler(syscall_regs_t *regs)
-{
+void syscall_handler(syscall_regs_t *regs) {
   uint64_t num = regs->rax;
 
-  switch (num)
-  {
+  switch (num) {
   case 1: // SYS_PRINT
     stac();
     term_print((const char *)regs->rdi);
     clac();
     break;
-  case 2:
-  { // SYS_READ_FILE (Now VFS-agnostic)
+  case 2: { // SYS_READ_FILE (Now VFS-agnostic)
     const char *filename = (const char *)regs->rdi;
     uint32_t *out_size_ptr = (uint32_t *)regs->rsi;
 
@@ -105,7 +102,11 @@ void syscall_handler(syscall_regs_t *regs)
     extern volatile uint32_t tick;
     char _fn[64];
     stac();
-    int _k = 0; while (_k < 63 && filename[_k]) { _fn[_k] = filename[_k]; _k++; }
+    int _k = 0;
+    while (_k < 63 && filename[_k]) {
+      _fn[_k] = filename[_k];
+      _k++;
+    }
     _fn[_k] = 0;
     clac();
     uint32_t _t0 = tick;
@@ -116,13 +117,12 @@ void syscall_handler(syscall_regs_t *regs)
     {
       extern void serial_puts(uint16_t port, const char *str);
       char _b[160];
-      sprintf(_b, "[T=%ums] READ_FILE '%s' size=%u dt=%ums\n",
-              (unsigned)tick, _fn, (unsigned)size, (unsigned)(tick - _t0));
+      sprintf(_b, "[T=%ums] READ_FILE '%s' size=%u dt=%ums\n", (unsigned)tick,
+              _fn, (unsigned)size, (unsigned)(tick - _t0));
       serial_puts(0x3F8 /*COM1*/, _b);
     }
 
-    if (!file_data)
-    {
+    if (!file_data) {
       regs->rax = 0;
       break;
     }
@@ -144,8 +144,7 @@ void syscall_handler(syscall_regs_t *regs)
     page_table_t *pml4 = (page_table_t *)VIRT(cr3);
 
     // Map and copy
-    for (uint32_t i = 0; i < pages_needed; i++)
-    {
+    for (uint32_t i = 0; i < pages_needed; i++) {
       uint64_t v = target_virt + (i * 4096);
       void *p = pmm_alloc();
       memset((void *)VIRT(p), 0, 4096);
@@ -162,8 +161,7 @@ void syscall_handler(syscall_regs_t *regs)
     regs->rax = target_virt;
     break;
   }
-  case 3:
-  { // SYS_WRITE_FILE (через vfs_write_file)
+  case 3: { // SYS_WRITE_FILE (через vfs_write_file)
     const char *filename = (const char *)regs->rdi;
     const uint8_t *data = (const uint8_t *)regs->rsi;
     uint32_t size = (uint32_t)regs->rdx;
@@ -172,7 +170,8 @@ void syscall_handler(syscall_regs_t *regs)
     stac();
     size_t _i = 0;
     while (_i < sizeof(kpath) - 1 && filename[_i] != '\0') {
-      kpath[_i] = filename[_i]; _i++;
+      kpath[_i] = filename[_i];
+      _i++;
     }
     clac();
     kpath[_i] = '\0';
@@ -183,12 +182,10 @@ void syscall_handler(syscall_regs_t *regs)
     regs->rax = (_wrc >= 0) ? (uint64_t)size : 0;
     break;
   }
-  case 4:
-  { // SYS_READ_DIR
+  case 4: { // SYS_READ_DIR
     int idx = (int)regs->rdi;
 
-    struct
-    {
+    struct {
       char name[128];
       uint32_t size;
       char dev[32];
@@ -207,7 +204,8 @@ void syscall_handler(syscall_regs_t *regs)
       if (dev->readdir) {
         for (int i = 0; i < 512; i++) {
           vfs_dirent_t *de = dev->readdir(dev, i);
-          if (!de) break;
+          if (!de)
+            break;
 
           if (current_idx == idx) {
             stac();
@@ -221,7 +219,8 @@ void syscall_handler(syscall_regs_t *regs)
           current_idx++;
         }
       }
-      if (found) break;
+      if (found)
+        break;
       dev = dev->next;
     }
 
@@ -248,8 +247,7 @@ void syscall_handler(syscall_regs_t *regs)
     // напрямую измеряется в мс с момента загрузки.
     regs->rax = tick;
     break;
-  case 7:
-  { // SYS_GET_MOUSE_FULL
+  case 7: { // SYS_GET_MOUSE_FULL
     extern int mouse_x, mouse_y;
     extern bool mouse_left_button, mouse_right_button;
 
@@ -268,12 +266,9 @@ void syscall_handler(syscall_regs_t *regs)
     // "съедал" тот, кто поллит чаще — обычно sysgui (16 ms цикл).
     // Теперь: пока есть foreground-app, sysgui получает 0; ввод идёт
     // только в активный процесс.
-    if (fg_app_pid != 0 && current_task && current_task->id != fg_app_pid)
-    {
+    if (fg_app_pid != 0 && current_task && current_task->id != fg_app_pid) {
       regs->rax = 0;
-    }
-    else
-    {
+    } else {
       regs->rax = keyboard_pop();
     }
     break;
@@ -296,8 +291,7 @@ void syscall_handler(syscall_regs_t *regs)
     {
       extern int sock_close_owned_by(uint64_t pid);
       int n = sock_close_owned_by(current_task->process->pid);
-      if (n > 0)
-      {
+      if (n > 0) {
         char mb[64];
         sprintf(mb, "[SYS] Reaped %d socket(s) on exit\n", n);
         term_print(mb);
@@ -313,8 +307,7 @@ void syscall_handler(syscall_regs_t *regs)
     // Если выходит foreground-app — отдаём фокус ввода обратно sysgui.
     {
       extern volatile uint64_t fg_app_pid;
-      if (fg_app_pid == current_task->process->pid)
-      {
+      if (fg_app_pid == current_task->process->pid) {
         fg_app_pid = 0;
       }
     }
@@ -365,8 +358,7 @@ void syscall_handler(syscall_regs_t *regs)
   {
     int st = 0;
     int64_t r = task_waitpid(regs->rdi, &st);
-    if (regs->rsi)
-    {
+    if (regs->rsi) {
       stac();
       *(int *)regs->rsi = st;
       clac();
@@ -377,14 +369,18 @@ void syscall_handler(syscall_regs_t *regs)
   case 53: // SYS_GETPID -> реальный pid текущего процесса
     regs->rax = current_task->process->pid;
     break;
-  case 54: // SYS_EXECVE (const char* path, char* const argv[], char* const envp[])
+  case 54: // SYS_EXECVE (const char* path, char* const argv[], char* const
+           // envp[])
   {
     /* Заменяет образ ТЕКУЩЕГО процесса (pid сохраняется). Этап 3: envp
      * копируется и передаётся новому образу (getenv/environ). */
     const char *upath = (const char *)regs->rdi;
     char *const *uargv = (char *const *)regs->rsi;
     char *const *uenvp = (char *const *)regs->rdx;
-    if (!upath) { regs->rax = (uint64_t)-1; break; }
+    if (!upath) {
+      regs->rax = (uint64_t)-1;
+      break;
+    }
 
     /* Копируем path/argv/envp из пользовательской памяти в ядро ДО любых
      * переключений адресного пространства (под stac/clac — SMAP). */
@@ -397,13 +393,15 @@ void syscall_handler(syscall_regs_t *regs)
 
     stac();
     int pi = 0;
-    for (; pi < 255 && upath[pi]; pi++) rawpath[pi] = upath[pi];
+    for (; pi < 255 && upath[pi]; pi++)
+      rawpath[pi] = upath[pi];
     rawpath[pi] = 0;
     if (uargv) {
       for (kargc = 0; kargc < 16 && uargv[kargc]; kargc++) {
         const char *s = uargv[kargc];
         int j = 0;
-        for (; j < 127 && s[j]; j++) argstore[kargc][j] = s[j];
+        for (; j < 127 && s[j]; j++)
+          argstore[kargc][j] = s[j];
         argstore[kargc][j] = 0;
         kargv[kargc] = argstore[kargc];
       }
@@ -412,7 +410,8 @@ void syscall_handler(syscall_regs_t *regs)
       for (kenvc = 0; kenvc < 20 && uenvp[kenvc]; kenvc++) {
         const char *s = uenvp[kenvc];
         int j = 0;
-        for (; j < 159 && s[j]; j++) envstore[kenvc][j] = s[j];
+        for (; j < 159 && s[j]; j++)
+          envstore[kenvc][j] = s[j];
         envstore[kenvc][j] = 0;
         kenvp[kenvc] = envstore[kenvc];
       }
@@ -424,12 +423,16 @@ void syscall_handler(syscall_regs_t *regs)
     char kpath[256];
     task_resolve_fs_path(rawpath, kpath, sizeof(kpath));
     if (kpath[0] == '\0') { /* "/" — без имени файла */
-      int j = 0; for (; j < 255 && rawpath[j]; j++) kpath[j] = rawpath[j]; kpath[j] = 0;
+      int j = 0;
+      for (; j < 255 && rawpath[j]; j++)
+        kpath[j] = rawpath[j];
+      kpath[j] = 0;
     }
 
     if (kargc == 0) { /* argv пуст -> argv[0] = путь (как передан) */
       int j = 0;
-      for (; j < 127 && rawpath[j]; j++) argstore[0][j] = rawpath[j];
+      for (; j < 127 && rawpath[j]; j++)
+        argstore[0][j] = rawpath[j];
       argstore[0][j] = 0;
       kargv[0] = argstore[0];
       kargc = 1;
@@ -437,8 +440,8 @@ void syscall_handler(syscall_regs_t *regs)
     kargv[kargc] = 0;
 
     uint64_t entry = 0, ursp = 0, uargvp = 0, uenvpp = 0, ncr3 = 0, nfs = 0;
-    if (!task_load_image(kpath, kargv, kargc, kenvp, kenvc,
-                         &entry, &ursp, &uargvp, &uenvpp, &ncr3, &nfs)) {
+    if (!task_load_image(kpath, kargv, kargc, kenvp, kenvc, &entry, &ursp,
+                         &uargvp, &uenvpp, &ncr3, &nfs)) {
       regs->rax = (uint64_t)-1; /* образ не тронут — старый процесс жив */
       break;
     }
@@ -448,9 +451,9 @@ void syscall_handler(syscall_regs_t *regs)
      * затем освобождаем старое адресное пространство. */
     uint64_t oldcr3 = current_task->process->cr3;
     __asm__ volatile("mov %0, %%cr3" : : "r"(ncr3) : "memory");
-    current_task->process->cr3     = ncr3;
+    current_task->process->cr3 = ncr3;
     current_task->fs_base = nfs;
-    current_task->process->brk     = 0x40000000;
+    current_task->process->brk = 0x40000000;
     /* Этап 4: при exec перехватываемые обработчики -> SIG_DFL (POSIX). */
     task_signal_exec(current_task);
     task_set_fs_base(nfs);
@@ -458,30 +461,29 @@ void syscall_handler(syscall_regs_t *regs)
       vmm_destroy_address_space(oldcr3);
 
     /* Перенаправляем возврат из int 0x80 в новый образ (syscall_regs_t
-     * содержит iretq-кадр: rip/cs/rflags/rsp/ss). crt0 ждёт rdi=argc, rsi=argv. */
-    regs->rip    = entry;
-    regs->rsp    = ursp;
-    regs->rdi    = (uint64_t)kargc;
-    regs->rsi    = uargvp;
-    regs->rdx    = uenvpp;   /* Этап 3: crt0 ждёт envp в rdx */
-    regs->cs     = 0x23;
-    regs->ss     = 0x1B;
+     * содержит iretq-кадр: rip/cs/rflags/rsp/ss). crt0 ждёт rdi=argc, rsi=argv.
+     */
+    regs->rip = entry;
+    regs->rsp = ursp;
+    regs->rdi = (uint64_t)kargc;
+    regs->rsi = uargvp;
+    regs->rdx = uenvpp; /* Этап 3: crt0 ждёт envp в rdx */
+    regs->cs = 0x23;
+    regs->ss = 0x1B;
     regs->rflags = 0x202;
-    regs->rax    = 0;
+    regs->rax = 0;
     break;
   }
   case 11:   // SYS_YIELD (Уступить процессор)
     yield(); // Фактический switch context через int $32
     break;
-  case 12:
-  { // SYS_GET_FONT
+  case 12: { // SYS_GET_FONT
     extern void *vesa_get_font();
     extern uint64_t vesa_get_font_size(void);
     void *kfont = vesa_get_font();
 
     uint64_t font_addr = (uint64_t)kfont;
-    if (font_addr < hhdm_offset)
-    {
+    if (font_addr < hhdm_offset) {
       font_addr = VIRT(font_addr);
     }
 
@@ -498,29 +500,24 @@ void syscall_handler(syscall_regs_t *regs)
     regs->rax = copy_to_user((void *)font_addr, size);
     break;
   }
-  case 13:
-  { // SYS_SLEEP
+  case 13: { // SYS_SLEEP
     uint32_t ms = regs->rdi;
-    if (ms > 0)
-    {
+    if (ms > 0) {
       current_task->sleep_until = tick + ms;
       yield();
     }
     break;
   }
 
-  case 14:
-  {
+  case 14: {
     uint64_t len = regs->rsi;
-    if (len == 0)
-    {
+    if (len == 0) {
       regs->rax = 0;
       break;
     }
     uint64_t pages = (len + 4095) / 4096;
     void *phys = pmm_alloc_continuous(pages);
-    if (!phys)
-    {
+    if (!phys) {
       regs->rax = 0;
       break;
     }
@@ -536,28 +533,24 @@ void syscall_handler(syscall_regs_t *regs)
     mmap_ptr += (pages * 4096);
     uint64_t cr3;
     __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
-    for (uint64_t i = 0; i < pages; i++)
-    {
+    for (uint64_t i = 0; i < pages; i++) {
       vmm_map((page_table_t *)VIRT(cr3), virt + (i * 4096),
               (uint64_t)phys + (i * 4096), PTE_USER | PTE_WRITABLE);
     }
     regs->rax = virt;
     break;
   }
-  case 15:
-  { // SYS_BRK
+  case 15: { // SYS_BRK
     if (current_task->process->brk == 0)
       current_task->process->brk = 0x40000000;
 
     uint64_t requested_brk = regs->rdi;
-    if (requested_brk == 0)
-    {
+    if (requested_brk == 0) {
       regs->rax = current_task->process->brk;
       break;
     }
 
-    if (requested_brk > current_task->process->brk)
-    {
+    if (requested_brk > current_task->process->brk) {
       uint64_t start_map = (current_task->process->brk + 4095) & ~4095;
       uint64_t end_map = (requested_brk + 4095) & ~4095;
 
@@ -567,8 +560,7 @@ void syscall_handler(syscall_regs_t *regs)
 
       bool oom = false;
 
-      for (uint64_t addr = start_map; addr < end_map; addr += 4096)
-      {
+      for (uint64_t addr = start_map; addr < end_map; addr += 4096) {
         void *phys = pmm_alloc();
         if (!phys) {
           oom = true;
@@ -589,38 +581,31 @@ void syscall_handler(syscall_regs_t *regs)
     regs->rax = current_task->process->brk;
     break;
   }
-  case 16:
-  {
-    if (regs->rdi == 1 || regs->rdi == 2)
-    {
+  case 16: {
+    if (regs->rdi == 1 || regs->rdi == 2) {
       term_print((const char *)regs->rsi);
       regs->rax = regs->rdx;
-    }
-    else
-    {
+    } else {
       regs->rax = -1;
     }
     break;
   }
-  case 17:
-  {
+  case 17: {
     regs->rax = 0;
     break;
   }
-  case 18:
-  {
+  case 18: {
     regs->rax = -1;
     break;
   }
-  case 19:
-  {
+  case 19: {
     regs->rax = 0;
     break;
   }
-  case 20:
-  { // SYS_AUDIO_PLAY
+  case 20: { // SYS_AUDIO_PLAY
     extern int ac97_is_ready(void);
-    if (!ac97_is_ready()) break; // карта ещё не инициализирована — тихо выходим
+    if (!ac97_is_ready())
+      break; // карта ещё не инициализирована — тихо выходим
     uintptr_t user_ptr = regs->rdi;
     uint32_t size = (uint32_t)regs->rsi;
     if (size == 0) {
@@ -638,9 +623,9 @@ void syscall_handler(syscall_regs_t *regs)
         s_bufs_phys[i] = pmm_alloc_continuous(2);
         s_bufs_virt[i] = (void *)((uintptr_t)s_bufs_phys[i] + hhdm_offset);
         memset(s_bufs_virt[i], 0, 8192);
-        
+
         // Привязываем буфер к BDL без старта воспроизведения
-        extern void ac97_set_bdl_entry(int idx, void* phys_addr);
+        extern void ac97_set_bdl_entry(int idx, void *phys_addr);
         ac97_set_bdl_entry(i, s_bufs_phys[i]);
       }
     }
@@ -648,8 +633,7 @@ void syscall_handler(syscall_regs_t *regs)
     extern uint8_t ac97_get_civ();
 
     // При самом первом звуке начинаем писать СРАЗУ ЗА текущим указателем карты
-    if (ring_ptr == -1)
-    {
+    if (ring_ptr == -1) {
       ring_ptr = (ac97_get_civ() + 1) % 32;
     }
 
@@ -661,7 +645,7 @@ void syscall_handler(syscall_regs_t *regs)
 
     int safety = 0;
     while (dist > 8 && safety < 100) {
-      current_task->sleep_until = tick + 2; 
+      current_task->sleep_until = tick + 2;
       yield();
       civ = ac97_get_civ();
       dist = (ring_ptr - civ + 32) % 32;
@@ -681,22 +665,21 @@ void syscall_handler(syscall_regs_t *regs)
     ring_ptr = (ring_ptr + 1) % 32;
     break;
   }
-  case 21:
-  { // SYS_AUDIO_SET_RATE
+  case 21: { // SYS_AUDIO_SET_RATE
     extern int ac97_is_ready(void);
-    if (!ac97_is_ready()) break;
+    if (!ac97_is_ready())
+      break;
     extern void ac97_set_rate(uint32_t rate);
     ac97_set_rate((uint32_t)regs->rdi);
     break;
   }
-  case 22:
-  { // SYS_AUDIO_READY — готова ли звуковая карта (AC'97 инициализирован)
+  case 22: { // SYS_AUDIO_READY — готова ли звуковая карта (AC'97
+             // инициализирован)
     extern int ac97_is_ready(void);
     regs->rax = (uint64_t)ac97_is_ready();
     break;
   }
-  case 30:
-  { // SYS_MAP_PHYS (Для Композитора: мапим VESA LFB в юзерспейс)
+  case 30: { // SYS_MAP_PHYS (Для Композитора: мапим VESA LFB в юзерспейс)
     uint64_t phys = regs->rdi;
     uint32_t size = regs->rsi;
     uint32_t pages = (size + 4095) / 4096;
@@ -704,8 +687,7 @@ void syscall_handler(syscall_regs_t *regs)
     uint64_t virt = 0x20000000000; // Фиксированный адрес для видеопамяти
 
     page_table_t *pml4 = (page_table_t *)VIRT(current_task->process->cr3);
-    for (uint32_t i = 0; i < pages; i++)
-    {
+    for (uint32_t i = 0; i < pages; i++) {
       // Добавляем флаги PCD и PWT для активации Write-Combining (Index 3 в PAT)
       vmm_map(pml4, virt + (i * 4096), phys + (i * 4096),
               PTE_PRESENT | PTE_USER | PTE_WRITABLE | PTE_PCD | PTE_PWT);
@@ -714,44 +696,62 @@ void syscall_handler(syscall_regs_t *regs)
     break;
   }
 
-  case 31:
-  { // SYS_SHM_GET
+  case 31: { // SYS_SHM_GET
     regs->rax = sys_shm_get((uint32_t)regs->rdi, (uint32_t)regs->rsi);
     break;
   }
 
   case 32: // SYS_GET_VESA_INFO (RDI=&phys, RSI=&w, RDX=&h, RCX=&pitch)
-{
+  {
     extern uintptr_t fb_base_addr;
     extern uint32_t screen_width, screen_height, screen_pitch;
     extern uint64_t hhdm_offset;
 
-    uint64_t phys_fb = (uint64_t)fb_base_addr - hhdm_offset;
+    // Объявляем нашу функцию трансляции
+    extern uint64_t vmm_get_phys(page_table_t * pml4, uint64_t virt);
+
+    // Читаем текущий CR3, чтобы получить активный PML4 (работает в контексте
+    // любого процесса)
+    uint64_t cr3_val;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3_val));
+    page_table_t *active_pml4 = (page_table_t *)VIRT(cr3_val & ~0xFFFULL);
+
+    // Находим абсолютно точный физический адрес фреймбуфера
+    uint64_t phys_fb = vmm_get_phys(active_pml4, (uint64_t)fb_base_addr);
+
+    if (!phys_fb) {
+      // Резервный фоллбек
+      phys_fb = (uint64_t)fb_base_addr - hhdm_offset;
+    }
 
     // Читаем указатели из регистров, которые передал пользователь
-    uint64_t* user_phys  = (uint64_t*)regs->rdi;
-    uint32_t* user_w     = (uint32_t*)regs->rsi;
-    uint32_t* user_h     = (uint32_t*)regs->rdx;
-    uint32_t* user_pitch = (uint32_t*)regs->rcx;
+    uint64_t *user_phys = (uint64_t *)regs->rdi;
+    uint32_t *user_w = (uint32_t *)regs->rsi;
+    uint32_t *user_h = (uint32_t *)regs->rdx;
+    uint32_t *user_pitch = (uint32_t *)regs->rcx;
 
-    // Прямая запись в память процесса (user-space)
-    if (user_phys)  *user_phys  = phys_fb;
-    if (user_w)     *user_w     = screen_width;
-    if (user_h)     *user_h     = screen_height;
-    if (user_pitch) *user_pitch = screen_pitch;
+    // Прямая запись в память процесса (user-space) under stac/clac
+    stac();
+    if (user_phys)
+      *user_phys = phys_fb;
+    if (user_w)
+      *user_w = screen_width;
+    if (user_h)
+      *user_h = screen_height;
+    if (user_pitch)
+      *user_pitch = screen_pitch;
+    clac();
 
     regs->rax = 0; // Успех
     break;
-}
-  case 33:
-  { // SYS_GET_WINDOW_POS
+  }
+  case 33: { // SYS_GET_WINDOW_POS
     regs->rax = (uint64_t)k_app_win_x;
     regs->rbx = (uint64_t)k_app_win_y;
     break;
   }
 
-  case 36:
-  { // SYS_SET_WINDOW_POS (Вызывается из Lua)
+  case 36: { // SYS_SET_WINDOW_POS (Вызывается из Lua)
     k_app_win_x = (int)regs->rdi;
     k_app_win_y = (int)regs->rsi;
     k_app_win_w = (int)regs->rdx;
@@ -759,56 +759,43 @@ void syscall_handler(syscall_regs_t *regs)
     k_app_win_active = (k_app_win_w > 0 && k_app_win_h > 0);
     break;
   }
-  case 40:
-  { // SYS_NET_DNS_RESOLVE
+  case 40: { // SYS_NET_DNS_RESOLVE
     const char *hostname = (const char *)regs->rdi;
 
     // IPv4 literal short-circuit. Без этого URL вида http://10.0.2.2/
     // и любые тесты против host-only QEMU-сети (где у хоста просто IP, а DNS
     // не настроен) уходят в DNS-запрос к 8.8.8.8 и валятся таймаутом. Парсим
     // строго "a.b.c.d", a-d ∈ [0,255]. На любое отклонение — fallback в DNS.
-    if (hostname)
-    {
+    if (hostname) {
       uint32_t parts[4] = {0, 0, 0, 0};
       int part_idx = 0;
       int digits_in_part = 0;
       bool ok = true;
-      for (const char *p = hostname;; p++)
-      {
+      for (const char *p = hostname;; p++) {
         char c = *p;
-        if (c >= '0' && c <= '9')
-        {
+        if (c >= '0' && c <= '9') {
           parts[part_idx] = parts[part_idx] * 10 + (uint32_t)(c - '0');
-          if (parts[part_idx] > 255 || ++digits_in_part > 3)
-          {
+          if (parts[part_idx] > 255 || ++digits_in_part > 3) {
             ok = false;
             break;
           }
-        }
-        else if (c == '.')
-        {
-          if (digits_in_part == 0 || part_idx >= 3)
-          {
+        } else if (c == '.') {
+          if (digits_in_part == 0 || part_idx >= 3) {
             ok = false;
             break;
           }
           part_idx++;
           digits_in_part = 0;
-        }
-        else if (c == '\0')
-        {
+        } else if (c == '\0') {
           if (part_idx != 3 || digits_in_part == 0)
             ok = false;
           break;
-        }
-        else
-        {
+        } else {
           ok = false;
           break;
         }
       }
-      if (ok)
-      {
+      if (ok) {
         // Сетевые драйверы EquinoxOS трактуют uint32_t IP как
         // network-byte-order (a в старшем байте). dns_get_result возвращает в
         // той же форме.
@@ -819,8 +806,7 @@ void syscall_handler(syscall_regs_t *regs)
     }
 
     net_interface_t *iface = net_get_primary_interface();
-    if (!iface)
-    {
+    if (!iface) {
       regs->rax = 0;
       break;
     }
@@ -848,18 +834,15 @@ void syscall_handler(syscall_regs_t *regs)
     uint32_t resolved = 0;
     for (unsigned s = 0;
          s < sizeof(dns_servers) / sizeof(dns_servers[0]) && resolved == 0;
-         s++)
-    {
+         s++) {
       stac();
       dns_query(iface, hostname, dns_servers[s]);
       clac();
 
       uint32_t timeout = 400;
-      while (timeout > 0)
-      {
+      while (timeout > 0) {
         uint32_t ip = dns_get_result(hostname);
-        if (ip != 0)
-        {
+        if (ip != 0) {
           resolved = ip;
           break;
         }
@@ -871,12 +854,10 @@ void syscall_handler(syscall_regs_t *regs)
     regs->rax = resolved;
     break;
   }
-  case 41:
-  { // SYS_NET_HTTP_GET
+  case 41: { // SYS_NET_HTTP_GET
     uint32_t ip = (uint32_t)regs->rdi;
     net_interface_t *iface = net_get_primary_interface();
-    if (!iface)
-    {
+    if (!iface) {
       regs->rax = 0;
       break;
     }
@@ -886,8 +867,7 @@ void syscall_handler(syscall_regs_t *regs)
     extern bool http_finished;
 
     http_finished = false;
-    if (http_response_buf)
-    {
+    if (http_response_buf) {
       kfree(http_response_buf);
       http_response_buf = NULL;
     }
@@ -900,48 +880,39 @@ void syscall_handler(syscall_regs_t *regs)
 
     // Wait for finish — interrupts MUST be on for network_thread
     uint32_t timeout = 2000;
-    while (timeout > 0 && !http_finished)
-    {
+    while (timeout > 0 && !http_finished) {
       __asm__ volatile("hlt"); // sleep until next interrupt (timer)
       timeout--;
     }
 
     __asm__ volatile("cli");
 
-    if (http_finished && http_response_buf)
-    {
+    if (http_finished && http_response_buf) {
       regs->rax = copy_to_user(http_response_buf, http_response_len);
-      if (regs->rsi)
-      {
+      if (regs->rsi) {
         stac();
         *(uint32_t *)regs->rsi = http_response_len;
         clac();
       }
-    }
-    else
-    {
+    } else {
       regs->rax = 0;
     }
     break;
   }
-  case 34:
-  { // SYS_GET_USED_MEM
+  case 34: { // SYS_GET_USED_MEM
     regs->rax = pmm_get_used_memory();
     break;
   }
-  case 35:
-  { // SYS_GET_TOTAL_MEM
+  case 35: { // SYS_GET_TOTAL_MEM
     regs->rax = pmm_get_total_memory();
     break;
   }
-  case 50:
-  { // SYS_EXEC
+  case 50: { // SYS_EXEC
     const char *cmd = (const char *)regs->rdi;
     char cmd_buf[256];
     stac();
     int idx = 0;
-    while (idx < 255 && cmd[idx] != '\0')
-    {
+    while (idx < 255 && cmd[idx] != '\0') {
       cmd_buf[idx] = cmd[idx];
       idx++;
     }
@@ -980,11 +951,9 @@ void syscall_handler(syscall_regs_t *regs)
     mq_close((int)regs->rdi);
     break;
   /* ---- task introspection / control (ps / kill / killall) ------------ */
-  case 70:
-  { // SYS_TASK_INFO
+  case 70: { // SYS_TASK_INFO
     int idx = (int)regs->rdi;
-    struct user_task_info
-    {
+    struct user_task_info {
       uint64_t pid;
       uint64_t cr3;
       uint64_t brk;
@@ -992,8 +961,7 @@ void syscall_handler(syscall_regs_t *regs)
       uint32_t _pad;
     } *uout = (void *)regs->rsi;
     struct task_snapshot snap;
-    if (uout && task_snapshot_at(idx, &snap))
-    {
+    if (uout && task_snapshot_at(idx, &snap)) {
       stac();
       uout->pid = snap.pid;
       uout->cr3 = snap.cr3;
@@ -1002,32 +970,30 @@ void syscall_handler(syscall_regs_t *regs)
       uout->_pad = 0;
       clac();
       regs->rax = 1;
-    }
-    else
-    {
+    } else {
       regs->rax = 0;
     }
     break;
   }
   case 71: { // SYS_TASK_KILL
     uint64_t pid = regs->rdi;
-    
-    // ЗАЩИТА ОТ САМОУБИЙСТВА: Процесс не может завершить сам себя через этот вызов!
-    if (current_task && current_task->process && pid == current_task->process->pid) {
+
+    // ЗАЩИТА ОТ САМОУБИЙСТВА: Процесс не может завершить сам себя через этот
+    // вызов!
+    if (current_task && current_task->process &&
+        pid == current_task->process->pid) {
       regs->rax = 0;
       break;
     }
-    
+
     regs->rax = task_terminate_by_pid(pid) ? 1 : 0;
     break;
   }
-  case 72:
-  { // SYS_TASK_KILLALL
+  case 72: { // SYS_TASK_KILLALL
     regs->rax = (uint64_t)task_kill_all_user_count();
     break;
   }
-  case 73:
-  { // SYS_SHELL_EXEC — выполнить строку ring-0 shell'а и
+  case 73: { // SYS_SHELL_EXEC — выполнить строку ring-0 shell'а и
     // вернуть printed-вывод в user-buf. См. shellsyntx.h и
     // shell_capture_sink ниже.
     const char *user_line = (const char *)regs->rdi;
@@ -1040,8 +1006,7 @@ void syscall_handler(syscall_regs_t *regs)
     {
       uint64_t i = 0;
       stac();
-      while (i < sizeof(kline) - 1 && user_line && user_line[i] != '\0')
-      {
+      while (i < sizeof(kline) - 1 && user_line && user_line[i] != '\0') {
         kline[i] = user_line[i];
         i++;
       }
@@ -1060,8 +1025,7 @@ void syscall_handler(syscall_regs_t *regs)
 
     /* 3) Скопировать результат юзеру, усечение допустимо. */
     int n = shell_capture_pos;
-    if (out_cap == 0 || user_outbuf == NULL)
-    {
+    if (out_cap == 0 || user_outbuf == NULL) {
       regs->rax = (uint64_t)n;
       break;
     }
@@ -1075,8 +1039,7 @@ void syscall_handler(syscall_regs_t *regs)
     regs->rax = (to_copy > 0) ? to_copy - 1 : 0;
     break;
   }
-  case 74:
-  { // SYS_GET_FG_APP — текущий PID foreground-приложения
+  case 74: { // SYS_GET_FG_APP — текущий PID foreground-приложения
     // 0 если нет (десктоп пустой → ввод и vram свободны для sysgui).
     // Используется sysgui чтобы не композитить vram, пока активна
     // полно­экранная игра вроде doom — иначе sysgui раз в 16 ms
@@ -1096,13 +1059,11 @@ void syscall_handler(syscall_regs_t *regs)
    * stac()/clac() bracketing for the buffer transfers — same convention
    * as the read/write/dns paths above.
    * ================================================================== */
-  case 80:
-  { /* SYS_SOCKET () -> int fd */
+  case 80: { /* SYS_SOCKET () -> int fd */
     regs->rax = (uint64_t)(int64_t)sock_create();
     break;
   }
-  case 81:
-  { /* SYS_CONNECT (fd, ip_be, port) -> int rc */
+  case 81: { /* SYS_CONNECT (fd, ip_be, port) -> int rc */
     int fd = (int)regs->rdi;
     uint32_t ip_be = (uint32_t)regs->rsi;
     uint16_t port = (uint16_t)regs->rdx;
@@ -1113,8 +1074,7 @@ void syscall_handler(syscall_regs_t *regs)
     regs->rax = (uint64_t)(int64_t)rc;
     break;
   }
-  case 82:
-  { /* SYS_SEND (fd, buf, len) -> int sent */
+  case 82: { /* SYS_SEND (fd, buf, len) -> int sent */
     int fd = (int)regs->rdi;
     const uint8_t *buf = (const uint8_t *)regs->rsi;
     uint32_t len = (uint32_t)regs->rdx;
@@ -1124,8 +1084,7 @@ void syscall_handler(syscall_regs_t *regs)
     regs->rax = (uint64_t)(int64_t)rc;
     break;
   }
-  case 83:
-  { /* SYS_RECV (fd, buf, len) -> int recvd */
+  case 83: { /* SYS_RECV (fd, buf, len) -> int recvd */
     int fd = (int)regs->rdi;
     uint8_t *buf = (uint8_t *)regs->rsi;
     uint32_t len = (uint32_t)regs->rdx;
@@ -1138,15 +1097,13 @@ void syscall_handler(syscall_regs_t *regs)
     regs->rax = (uint64_t)(int64_t)rc;
     break;
   }
-  case 84:
-  { /* SYS_CLOSE_SOCK (fd) -> int rc */
+  case 84: { /* SYS_CLOSE_SOCK (fd) -> int rc */
     int fd = (int)regs->rdi;
     regs->rax = (uint64_t)(int64_t)sock_close(fd);
     break;
   }
-  case 85:
-  { /* SYS_SETSOCKOPT (fd, level, optname, val_ptr, vallen) -> int rc
-     */
+  case 85: { /* SYS_SETSOCKOPT (fd, level, optname, val_ptr, vallen) -> int rc
+              */
     int fd = (int)regs->rdi;
     int level = (int)regs->rsi;
     int optname = (int)regs->rdx;
@@ -1158,23 +1115,20 @@ void syscall_handler(syscall_regs_t *regs)
     regs->rax = (uint64_t)(int64_t)rc;
     break;
   }
-  case 86:
-  { /* SYS_GETRANDOM (buf, len, flags) -> int rc
-     *   rdi = void   *buf    — userspace destination
-     *   rsi = uint32  len    — bytes to fill
-     *   rdx = uint32  flags  — reserved (must be 0 for now)
-     * Always returns 0 on success, -1 on bad args.
-     * No partial fills: either len bytes are written or none. */
+  case 86: { /* SYS_GETRANDOM (buf, len, flags) -> int rc
+              *   rdi = void   *buf    — userspace destination
+              *   rsi = uint32  len    — bytes to fill
+              *   rdx = uint32  flags  — reserved (must be 0 for now)
+              * Always returns 0 on success, -1 on bad args.
+              * No partial fills: either len bytes are written or none. */
     void *buf = (void *)regs->rdi;
     uint32_t len = (uint32_t)regs->rsi;
     uint32_t flags = (uint32_t)regs->rdx;
-    if (!buf || flags != 0)
-    {
+    if (!buf || flags != 0) {
       regs->rax = (uint64_t)(int64_t)-1;
       break;
     }
-    if (len == 0)
-    {
+    if (len == 0) {
       regs->rax = 0;
       break;
     }
@@ -1184,16 +1138,14 @@ void syscall_handler(syscall_regs_t *regs)
     regs->rax = (uint64_t)(int64_t)rc;
     break;
   }
-  case 87:
-  { /* SYS_GET_WALL_TIME (uint64_t *out_unix_secs) -> int rc
-     *   rdi = uint64_t *out — must be non-NULL, user-mapped.
-     * Writes the current UTC time (whole seconds since the
-     * Unix epoch) read from the CMOS RTC. The kernel-side
-     * helper rtc_unix_time() does its own UIP/recheck loop,
-     * so the result is consistent across the seconds tick. */
+  case 87: { /* SYS_GET_WALL_TIME (uint64_t *out_unix_secs) -> int rc
+              *   rdi = uint64_t *out — must be non-NULL, user-mapped.
+              * Writes the current UTC time (whole seconds since the
+              * Unix epoch) read from the CMOS RTC. The kernel-side
+              * helper rtc_unix_time() does its own UIP/recheck loop,
+              * so the result is consistent across the seconds tick. */
     uint64_t *out = (uint64_t *)regs->rdi;
-    if (!out)
-    {
+    if (!out) {
       regs->rax = (uint64_t)(int64_t)-1;
       break;
     }
@@ -1205,8 +1157,8 @@ void syscall_handler(syscall_regs_t *regs)
     break;
   }
 
-  case 88:
-  { // SYS_BOOT_ANIM_DONE — sysgui сообщает, что первый кадр рабочего стола
+  case 88: { // SYS_BOOT_ANIM_DONE — sysgui сообщает, что первый кадр рабочего
+             // стола
     // уже на экране. Гасим kernel-side boot-анимацию Nyan Cat: дальше
     // фреймбуфером владеет GUI, и подрисовка гифки из PIT-таймера затирала
     // бы его. Вызывается ровно при первом present (см. enGUI main.c,
@@ -1250,15 +1202,15 @@ void syscall_handler(syscall_regs_t *regs)
    *   95  SYS_FSTAT     (fd, uint32_t *out_size)  -> int 0 / -1
    *   96  SYS_STAT_PATH (path, uint32_t *out_sz)  -> int 0 / -1
    * ================================================================== */
-  case 90:
-  { /* SYS_OPEN (path, flags) -> fd */
-    const char *path  = (const char *)regs->rdi;
-    int         oflags = (int)regs->rsi;
+  case 90: { /* SYS_OPEN (path, flags) -> fd */
+    const char *path = (const char *)regs->rdi;
+    int oflags = (int)regs->rsi;
     char kpath[256];
     stac();
     size_t i = 0;
     while (i < sizeof(kpath) - 1 && path && path[i] != '\0') {
-      kpath[i] = path[i]; i++;
+      kpath[i] = path[i];
+      i++;
     }
     clac();
     kpath[i] = '\0';
@@ -1268,15 +1220,13 @@ void syscall_handler(syscall_regs_t *regs)
     regs->rax = (uint64_t)(int64_t)fd_open(rpath[0] ? rpath : kpath, oflags);
     break;
   }
-  case 91:
-  { /* SYS_CLOSE_FD (fd) -> 0 / -1 */
+  case 91: { /* SYS_CLOSE_FD (fd) -> 0 / -1 */
     regs->rax = (uint64_t)(int64_t)fd_close((int)regs->rdi);
     break;
   }
-  case 92:
-  { /* SYS_READ_FD (fd, buf, size) -> bytes_read / -1 */
-    int      fd   = (int)regs->rdi;
-    void    *buf  = (void *)regs->rsi;
+  case 92: { /* SYS_READ_FD (fd, buf, size) -> bytes_read / -1 */
+    int fd = (int)regs->rdi;
+    void *buf = (void *)regs->rsi;
     uint32_t size = (uint32_t)regs->rdx;
     stac();
     int rc = fd_read(fd, buf, size);
@@ -1284,33 +1234,30 @@ void syscall_handler(syscall_regs_t *regs)
     regs->rax = (uint64_t)(int64_t)rc;
     break;
   }
-  case 93:
-  { /* SYS_WRITE_FD (fd, buf, size) -> bytes_written / -1
-     * Этап 2: fd 1/2 больше НЕ спец-кейсятся здесь — консоль обрабатывает
-     * сам fd_write (kind == OFD_CONSOLE). Иначе перенаправление stdout в
-     * пайп/файл (dup2) не работало бы. */
-    int      fd   = (int)regs->rdi;
+  case 93: { /* SYS_WRITE_FD (fd, buf, size) -> bytes_written / -1
+              * Этап 2: fd 1/2 больше НЕ спец-кейсятся здесь — консоль
+              * обрабатывает сам fd_write (kind == OFD_CONSOLE). Иначе
+              * перенаправление stdout в пайп/файл (dup2) не работало бы. */
+    int fd = (int)regs->rdi;
     const void *buf = (const void *)regs->rsi;
-    uint32_t size  = (uint32_t)regs->rdx;
+    uint32_t size = (uint32_t)regs->rdx;
     stac();
     int rc = fd_write(fd, buf, size);
     clac();
     regs->rax = (uint64_t)(int64_t)rc;
     break;
   }
-  case 94:
-  { /* SYS_SEEK (fd, offset, whence) -> new_pos / -1 */
-    int     fd     = (int)regs->rdi;
+  case 94: { /* SYS_SEEK (fd, offset, whence) -> new_pos / -1 */
+    int fd = (int)regs->rdi;
     int32_t offset = (int32_t)regs->rsi;
-    int     whence = (int)regs->rdx;
+    int whence = (int)regs->rdx;
     regs->rax = (uint64_t)(int64_t)fd_seek(fd, offset, whence);
     break;
   }
-  case 95:
-  { /* SYS_FSTAT (fd, uint32_t *out_size) -> 0 / -1 */
-    int       fd  = (int)regs->rdi;
+  case 95: { /* SYS_FSTAT (fd, uint32_t *out_size) -> 0 / -1 */
+    int fd = (int)regs->rdi;
     uint32_t *out = (uint32_t *)regs->rsi;
-    uint32_t  sz  = 0;
+    uint32_t sz = 0;
     int rc = fd_stat(fd, &sz);
     if (out) {
       stac();
@@ -1320,15 +1267,15 @@ void syscall_handler(syscall_regs_t *regs)
     regs->rax = (uint64_t)(int64_t)rc;
     break;
   }
-  case 96:
-  { /* SYS_STAT_PATH (path, uint32_t *out_size) -> 0 / -1 */
-    const char *path  = (const char *)regs->rdi;
-    uint32_t   *out   = (uint32_t *)regs->rsi;
+  case 96: { /* SYS_STAT_PATH (path, uint32_t *out_size) -> 0 / -1 */
+    const char *path = (const char *)regs->rdi;
+    uint32_t *out = (uint32_t *)regs->rsi;
     char kpath[256];
     stac();
     size_t i = 0;
     while (i < sizeof(kpath) - 1 && path && path[i] != '\0') {
-      kpath[i] = path[i]; i++;
+      kpath[i] = path[i];
+      i++;
     }
     clac();
     kpath[i] = '\0';
@@ -1347,10 +1294,9 @@ void syscall_handler(syscall_regs_t *regs)
   }
 
   /* ---- Этап 2: pipe / dup / dup2 ------------------------------------- */
-  case 97:
-  { /* SYS_PIPE (int fds[2]) -> 0 / -1 */
+  case 97: { /* SYS_PIPE (int fds[2]) -> 0 / -1 */
     int *user_fds = (int *)regs->rdi;
-    int kfds[2] = { -1, -1 };
+    int kfds[2] = {-1, -1};
     int rc = fd_make_pipe(kfds);
     if (rc == 0 && user_fds) {
       stac();
@@ -1361,89 +1307,104 @@ void syscall_handler(syscall_regs_t *regs)
     regs->rax = (uint64_t)(int64_t)rc;
     break;
   }
-  case 98:
-  { /* SYS_DUP (oldfd) -> newfd / -1 */
+  case 98: { /* SYS_DUP (oldfd) -> newfd / -1 */
     regs->rax = (uint64_t)(int64_t)fd_dup((int)regs->rdi);
     break;
   }
-  case 99:
-  { /* SYS_DUP2 (oldfd, newfd) -> newfd / -1 */
+  case 99: { /* SYS_DUP2 (oldfd, newfd) -> newfd / -1 */
     regs->rax = (uint64_t)(int64_t)fd_dup2((int)regs->rdi, (int)regs->rsi);
     break;
   }
 
   /* ---- Этап 3: cwd ---------------------------------------------------- */
-  case 100:
-  { /* SYS_GETCWD (char *buf, uint32_t size) -> len / -1 */
-    char     *ubuf = (char *)regs->rdi;
-    uint32_t  usize = (uint32_t)regs->rsi;
+  case 100: { /* SYS_GETCWD (char *buf, uint32_t size) -> len / -1 */
+    char *ubuf = (char *)regs->rdi;
+    uint32_t usize = (uint32_t)regs->rsi;
     const char *cwd = task_current_cwd();
-    int len = 0; while (cwd[len]) len++;
+    int len = 0;
+    while (cwd[len])
+      len++;
     if (!ubuf || usize == 0 || (uint32_t)(len + 1) > usize) {
-      regs->rax = (uint64_t)-1; break;
+      regs->rax = (uint64_t)-1;
+      break;
     }
     stac();
-    int k = 0; for (; k < len; k++) ubuf[k] = cwd[k];
+    int k = 0;
+    for (; k < len; k++)
+      ubuf[k] = cwd[k];
     ubuf[k] = '\0';
     clac();
     regs->rax = (uint64_t)(int64_t)len;
     break;
   }
-  case 101:
-  { /* SYS_CHDIR (const char *path) -> 0 / -1 */
+  case 101: { /* SYS_CHDIR (const char *path) -> 0 / -1 */
     const char *upath = (const char *)regs->rdi;
-    if (!upath) { regs->rax = (uint64_t)-1; break; }
+    if (!upath) {
+      regs->rax = (uint64_t)-1;
+      break;
+    }
     char kpath[256];
     stac();
     int i = 0;
-    while (i < (int)sizeof(kpath) - 1 && upath[i]) { kpath[i] = upath[i]; i++; }
+    while (i < (int)sizeof(kpath) - 1 && upath[i]) {
+      kpath[i] = upath[i];
+      i++;
+    }
     clac();
     kpath[i] = '\0';
     regs->rax = (uint64_t)(int64_t)task_chdir(kpath);
     break;
   }
 
-  case 102:
-  { // SYS_KILL (pid, sig) -> 0 / -1
+  case 102: { // SYS_KILL (pid, sig) -> 0 / -1
     regs->rax = (uint64_t)(int64_t)signal_send(regs->rdi, (int)regs->rsi);
     break;
   }
-  case 103:
-  { // SYS_SIGACTION (sig, handler, restorer, &old) -> 0 / -1
+  case 103: { // SYS_SIGACTION (sig, handler, restorer, &old) -> 0 / -1
     uint64_t old = 0;
     int rc = signal_setaction((int)regs->rdi, regs->rsi, regs->rdx, &old);
-    if (regs->rcx) { stac(); *(uint64_t *)regs->rcx = old; clac(); }
+    if (regs->rcx) {
+      stac();
+      *(uint64_t *)regs->rcx = old;
+      clac();
+    }
     regs->rax = (uint64_t)(int64_t)rc;
     break;
   }
   case 104:
-    // SYS_SIGRETURN — восстановить контекст после обработчика (не «возвращает»).
+    // SYS_SIGRETURN — восстановить контекст после обработчика (не
+    // «возвращает»).
     signal_sigreturn(regs);
     break;
-  case 105:
-  { // SYS_SIGPROCMASK (how, set, &old)
+  case 105: { // SYS_SIGPROCMASK (how, set, &old)
     uint64_t old = 0;
     signal_procmask((int)regs->rdi, regs->rsi, &old);
-    if (regs->rdx) { stac(); *(uint64_t *)regs->rdx = old; clac(); }
+    if (regs->rdx) {
+      stac();
+      *(uint64_t *)regs->rdx = old;
+      clac();
+    }
     regs->rax = 0;
     break;
   }
 
-  case 106:
-  { /* SYS_IOCTL (fd, request, argp) -> 0 / -1 (Этап 5: termios/winsize)
-     *
-     * Поддерживаются только консольные fd (0/1/2). Для остальных -> -1
-     * (ENOTTY) — этим же isatty() в libc понимает «это не терминал». */
-    int       fd  = (int)regs->rdi;
-    uint64_t  req = regs->rsi;
-    void     *arg = (void *)regs->rdx;
+  case 106: { /* SYS_IOCTL (fd, request, argp) -> 0 / -1 (Этап 5:
+               * termios/winsize)
+               *
+               * Поддерживаются только консольные fd (0/1/2). Для остальных ->
+               * -1 (ENOTTY) — этим же isatty() в libc понимает «это не
+               * терминал». */
+    int fd = (int)regs->rdi;
+    uint64_t req = regs->rsi;
+    void *arg = (void *)regs->rdx;
 
     /* Этап 7 (bash): консольный fd не обязан быть 0/1/2 — bash двигает свой
      * tty-fd наверх через fcntl(F_DUPFD). Проверяем ВИД дескриптора. */
     {
-      int kind = 0; uint32_t sz_ = 0;
+      int kind = 0;
+      uint32_t sz_ = 0;
       if (fd_statx(fd, &kind, &sz_) != 0 || kind != OFD_CONSOLE) {
-        regs->rax = (uint64_t)(int64_t)-1;  /* не tty -> ENOTTY для isatty() */
+        regs->rax = (uint64_t)(int64_t)-1; /* не tty -> ENOTTY для isatty() */
         break;
       }
     }
@@ -1451,54 +1412,90 @@ void syscall_handler(syscall_regs_t *regs)
     switch (req) {
     case K_TCGETS: {
       ktermios_t kt;
-      if (tty_get_termios(&kt) != 0 || !arg) { regs->rax = (uint64_t)(int64_t)-1; break; }
-      stac(); *(ktermios_t *)arg = kt; clac();
+      if (tty_get_termios(&kt) != 0 || !arg) {
+        regs->rax = (uint64_t)(int64_t)-1;
+        break;
+      }
+      stac();
+      *(ktermios_t *)arg = kt;
+      clac();
       regs->rax = 0;
       break;
     }
     case K_TCSETS:
     case K_TCSETSW:
     case K_TCSETSF: {
-      if (!arg) { regs->rax = (uint64_t)(int64_t)-1; break; }
+      if (!arg) {
+        regs->rax = (uint64_t)(int64_t)-1;
+        break;
+      }
       ktermios_t kt;
-      stac(); kt = *(ktermios_t *)arg; clac();
+      stac();
+      kt = *(ktermios_t *)arg;
+      clac();
       regs->rax = (uint64_t)(int64_t)tty_set_termios(&kt);
       break;
     }
     case K_TIOCGWINSZ: {
-      if (!arg) { regs->rax = (uint64_t)(int64_t)-1; break; }
+      if (!arg) {
+        regs->rax = (uint64_t)(int64_t)-1;
+        break;
+      }
       struct kwinsize ws;
       tty_get_winsize(&ws);
-      stac(); *(struct kwinsize *)arg = ws; clac();
+      stac();
+      *(struct kwinsize *)arg = ws;
+      clac();
       regs->rax = 0;
       break;
     }
-    case K_TIOCGPGRP: {  /* tcgetpgrp(fd): foreground-группа терминала */
-      if (!arg) { regs->rax = (uint64_t)(int64_t)-1; break; }
+    case K_TIOCGPGRP: { /* tcgetpgrp(fd): foreground-группа терминала */
+      if (!arg) {
+        regs->rax = (uint64_t)(int64_t)-1;
+        break;
+      }
       uint64_t fg = g_tty_fg_pgrp ? g_tty_fg_pgrp
-                  : (current_task->process->pgid ? current_task->process->pgid : current_task->process->pid);
-      stac(); *(int *)arg = (int)fg; clac();
+                                  : (current_task->process->pgid
+                                         ? current_task->process->pgid
+                                         : current_task->process->pid);
+      stac();
+      *(int *)arg = (int)fg;
+      clac();
       regs->rax = 0;
       break;
     }
-    case K_TIOCSPGRP: {  /* tcsetpgrp(fd, pgrp): задать foreground-группу */
-      if (!arg) { regs->rax = (uint64_t)(int64_t)-1; break; }
-      int pg; stac(); pg = *(int *)arg; clac();
-      if (pg <= 0) { regs->rax = (uint64_t)(int64_t)-1; break; }
+    case K_TIOCSPGRP: { /* tcsetpgrp(fd, pgrp): задать foreground-группу */
+      if (!arg) {
+        regs->rax = (uint64_t)(int64_t)-1;
+        break;
+      }
+      int pg;
+      stac();
+      pg = *(int *)arg;
+      clac();
+      if (pg <= 0) {
+        regs->rax = (uint64_t)(int64_t)-1;
+        break;
+      }
       g_tty_fg_pgrp = (uint64_t)pg;
       regs->rax = 0;
       break;
     }
-    case 0x541B: {  /* FIONREAD (Этап 7, readline): байт во входном буфере tty */
-      if (!arg) { regs->rax = (uint64_t)(int64_t)-1; break; }
+    case 0x541B: { /* FIONREAD (Этап 7, readline): байт во входном буфере tty */
+      if (!arg) {
+        regs->rax = (uint64_t)(int64_t)-1;
+        break;
+      }
       extern int serial_received(uint16_t port);
-      int avail = serial_received(COM1) ? 1 : 0;   /* UART без FIFO-учёта: 0/1 */
-      stac(); *(int *)arg = avail; clac();
+      int avail = serial_received(COM1) ? 1 : 0; /* UART без FIFO-учёта: 0/1 */
+      stac();
+      *(int *)arg = avail;
+      clac();
       regs->rax = 0;
       break;
     }
     default:
-      regs->rax = (uint64_t)(int64_t)-1;  /* неизвестный ioctl */
+      regs->rax = (uint64_t)(int64_t)-1; /* неизвестный ioctl */
       break;
     }
     break;
@@ -1538,19 +1535,25 @@ void syscall_handler(syscall_regs_t *regs)
  * ========================================================================= */
 
 /* Линуксовые аргументы (x86-64): a1=rdi a2=rsi a3=rdx a4=r10 a5=r8 a6=r9. */
-struct l_iovec { const void *iov_base; uint64_t iov_len; };
-struct l_timespec { int64_t tv_sec; int64_t tv_nsec; };
+struct l_iovec {
+  const void *iov_base;
+  uint64_t iov_len;
+};
+struct l_timespec {
+  int64_t tv_sec;
+  int64_t tv_nsec;
+};
 
 #define LERR(e) ((uint64_t)(int64_t)(-(e)))
 #define L_ENOSYS 38
 #define L_EINVAL 22
 #define L_ENOMEM 12
 #define L_ENOENT 2
-#define L_EBADF  9
-#define L_EINTR  4
+#define L_EBADF 9
+#define L_EINTR 4
 #define L_ECHILD 10
-#define L_ESRCH  3
-#define L_EPERM  1
+#define L_ESRCH 3
+#define L_EPERM 1
 #define L_EMFILE 24
 
 /* ---- Этап 6d: Linux x86-64 struct sigaction (kernel-ABI, как его передаёт
@@ -1558,10 +1561,10 @@ struct l_timespec { int64_t tv_sec; int64_t tv_nsec; };
  *   sa_handler@0, sa_flags@8, sa_restorer@16, sa_mask@24 (sigsetsize байт).
  * musl всегда ставит SA_RESTORER и кладёт адрес трамплина в sa_restorer. */
 struct l_sigaction {
-  uint64_t sa_handler;   /* 0  : 0=SIG_DFL, 1=SIG_IGN, иначе адрес ring3 */
-  uint64_t sa_flags;     /* 8  */
-  uint64_t sa_restorer;  /* 16 : трамплин sigreturn (при SA_RESTORER) */
-  uint64_t sa_mask;      /* 24 : младшие 64 бита маски (sigsetsize=8) */
+  uint64_t sa_handler;  /* 0  : 0=SIG_DFL, 1=SIG_IGN, иначе адрес ring3 */
+  uint64_t sa_flags;    /* 8  */
+  uint64_t sa_restorer; /* 16 : трамплин sigreturn (при SA_RESTORER) */
+  uint64_t sa_mask;     /* 24 : младшие 64 бита маски (sigsetsize=8) */
 };
 #define L_SA_RESTORER 0x04000000ULL
 
@@ -1570,21 +1573,21 @@ struct l_sigaction {
  * fstatat (statx пропускается, т.к. st_atime_sec == time_t). Поля/смещения
  * взяты из musl arch/x86_64/kstat.h — менять нельзя. */
 struct l_stat {
-  uint64_t st_dev;        /* 0  */
-  uint64_t st_ino;        /* 8  */
-  uint64_t st_nlink;      /* 16 */
-  uint32_t st_mode;       /* 24 */
-  uint32_t st_uid;        /* 28 */
-  uint32_t st_gid;        /* 32 */
-  uint32_t __pad0;        /* 36 */
-  uint64_t st_rdev;       /* 40 */
-  int64_t  st_size;       /* 48 */
-  int64_t  st_blksize;    /* 56 */
-  int64_t  st_blocks;     /* 64 */
-  int64_t  st_atime_sec, st_atime_nsec;  /* 72, 80  */
-  int64_t  st_mtime_sec, st_mtime_nsec;  /* 88, 96  */
-  int64_t  st_ctime_sec, st_ctime_nsec;  /* 104,112 */
-  int64_t  __unused[3];                  /* 120     */
+  uint64_t st_dev;                     /* 0  */
+  uint64_t st_ino;                     /* 8  */
+  uint64_t st_nlink;                   /* 16 */
+  uint32_t st_mode;                    /* 24 */
+  uint32_t st_uid;                     /* 28 */
+  uint32_t st_gid;                     /* 32 */
+  uint32_t __pad0;                     /* 36 */
+  uint64_t st_rdev;                    /* 40 */
+  int64_t st_size;                     /* 48 */
+  int64_t st_blksize;                  /* 56 */
+  int64_t st_blocks;                   /* 64 */
+  int64_t st_atime_sec, st_atime_nsec; /* 72, 80  */
+  int64_t st_mtime_sec, st_mtime_nsec; /* 88, 96  */
+  int64_t st_ctime_sec, st_ctime_nsec; /* 104,112 */
+  int64_t __unused[3];                 /* 120     */
 };
 _Static_assert(sizeof(struct l_stat) == 144, "l_stat must match x86_64 kstat");
 
@@ -1593,17 +1596,19 @@ _Static_assert(sizeof(struct l_stat) == 144, "l_stat must match x86_64 kstat");
 #define L_S_IFCHR 0x2000u
 #define L_S_IFIFO 0x1000u
 #define L_AT_EMPTY_PATH 0x1000
-#define L_O_DIRECTORY 0200000   /* musl O_DIRECTORY (x86_64), восьмеричное */
+#define L_O_DIRECTORY 0200000 /* musl O_DIRECTORY (x86_64), восьмеричное */
 
 /* Скопировать путь из юзерспейса (stac/clac) и нормализовать к cwd процесса. */
-static void lx_copy_path(uint64_t uptr, char *out, int outsz)
-{
+static void lx_copy_path(uint64_t uptr, char *out, int outsz) {
   char kpath[256];
   const char *p = (const char *)uptr;
   int i = 0;
   if (p) {
     stac();
-    while (i < (int)sizeof(kpath) - 1 && p[i]) { kpath[i] = p[i]; i++; }
+    while (i < (int)sizeof(kpath) - 1 && p[i]) {
+      kpath[i] = p[i];
+      i++;
+    }
     clac();
   }
   kpath[i] = '\0';
@@ -1611,24 +1616,25 @@ static void lx_copy_path(uint64_t uptr, char *out, int outsz)
   task_resolve_fs_path(kpath, rpath, sizeof(rpath));
   const char *src = rpath[0] ? rpath : kpath;
   int j = 0;
-  for (; src[j] && j < outsz - 1; j++) out[j] = src[j];
+  for (; src[j] && j < outsz - 1; j++)
+    out[j] = src[j];
   out[j] = '\0';
 }
 
 /* Заполнить пользовательский struct l_stat (mode уже включает тип S_IF*). */
-static void lx_fill_stat(uint64_t uptr, uint32_t mode, uint64_t size)
-{
-  if (!uptr) return;
+static void lx_fill_stat(uint64_t uptr, uint32_t mode, uint64_t size) {
+  if (!uptr)
+    return;
   struct l_stat st;
   memset(&st, 0, sizeof(st));
-  st.st_dev     = 1;
-  st.st_ino     = 1;
-  st.st_nlink   = 1;
-  st.st_mode    = mode;
-  st.st_size    = (int64_t)size;
+  st.st_dev = 1;
+  st.st_ino = 1;
+  st.st_nlink = 1;
+  st.st_mode = mode;
+  st.st_size = (int64_t)size;
   st.st_blksize = 4096;
-  st.st_blocks  = (int64_t)((size + 511) / 512);
-  int64_t now   = (int64_t)rtc_unix_time();
+  st.st_blocks = (int64_t)((size + 511) / 512);
+  int64_t now = (int64_t)rtc_unix_time();
   st.st_atime_sec = st.st_mtime_sec = st.st_ctime_sec = now;
   stac();
   memcpy((void *)uptr, &st, sizeof(st));
@@ -1636,25 +1642,46 @@ static void lx_fill_stat(uint64_t uptr, uint32_t mode, uint64_t size)
 }
 
 /* stat по пути: 0 + mode/size если существует (файл/каталог), иначе -1. */
-static int lx_path_stat(const char *path, uint32_t *out_mode, uint64_t *out_size)
-{
+static int lx_path_stat(const char *path, uint32_t *out_mode,
+                        uint64_t *out_size) {
   uint32_t sz = 0;
-  if (fd_stat_path(path, &sz) == 0) { *out_mode = L_S_IFREG | 0644u; *out_size = sz; return 0; }
-  if (vfs_dir_exists(path))         { *out_mode = L_S_IFDIR | 0755u; *out_size = 0;  return 0; }
+  if (fd_stat_path(path, &sz) == 0) {
+    *out_mode = L_S_IFREG | 0644u;
+    *out_size = sz;
+    return 0;
+  }
+  if (vfs_dir_exists(path)) {
+    *out_mode = L_S_IFDIR | 0755u;
+    *out_size = 0;
+    return 0;
+  }
   return -1;
 }
 
 /* stat по fd: вид ofd -> mode (+ size для обычных файлов). */
-static int lx_fd_stat(int fd, uint32_t *out_mode, uint64_t *out_size)
-{
-  int kind = 0; uint32_t sz = 0;
-  if (fd_statx(fd, &kind, &sz) != 0) return -1;
+static int lx_fd_stat(int fd, uint32_t *out_mode, uint64_t *out_size) {
+  int kind = 0;
+  uint32_t sz = 0;
+  if (fd_statx(fd, &kind, &sz) != 0)
+    return -1;
   switch (kind) {
-    case OFD_CONSOLE: *out_mode = L_S_IFCHR | 0620u; *out_size = 0;  break;
-    case OFD_PIPE_R:
-    case OFD_PIPE_W:  *out_mode = L_S_IFIFO | 0600u; *out_size = 0;  break;
-    case OFD_DIR:     *out_mode = L_S_IFDIR | 0755u; *out_size = 0;  break;
-    default:          *out_mode = L_S_IFREG | 0644u; *out_size = sz; break;
+  case OFD_CONSOLE:
+    *out_mode = L_S_IFCHR | 0620u;
+    *out_size = 0;
+    break;
+  case OFD_PIPE_R:
+  case OFD_PIPE_W:
+    *out_mode = L_S_IFIFO | 0600u;
+    *out_size = 0;
+    break;
+  case OFD_DIR:
+    *out_mode = L_S_IFDIR | 0755u;
+    *out_size = 0;
+    break;
+  default:
+    *out_mode = L_S_IFREG | 0644u;
+    *out_size = sz;
+    break;
   }
   return 0;
 }
@@ -1663,20 +1690,23 @@ static int lx_fd_stat(int fd, uint32_t *out_mode, uint64_t *out_size)
  * открыть его как OFD_DIR (для opendir/getdents64). Используется и open(2),
  * и openat(257) — musl на x86_64 для open() шлёт именно SYS_open=2.
  * Возвращает 1, если обработано (regs->rax уже выставлен), иначе 0. */
-static int lx_open_dir_maybe(syscall_regs_t *regs, uint64_t path_uptr, int lflags)
-{
+static int lx_open_dir_maybe(syscall_regs_t *regs, uint64_t path_uptr,
+                             int lflags) {
   char kpath[256];
   int ci = 0;
   const char *upath = (const char *)path_uptr;
   if (upath) {
     stac();
-    while (ci < (int)sizeof(kpath) - 1 && upath[ci]) { kpath[ci] = upath[ci]; ci++; }
+    while (ci < (int)sizeof(kpath) - 1 && upath[ci]) {
+      kpath[ci] = upath[ci];
+      ci++;
+    }
     clac();
   }
   kpath[ci] = '\0';
 
   char rpath[256];
-  task_resolve_fs_path(kpath, rpath, sizeof(rpath));  /* плоский путь без '/' */
+  task_resolve_fs_path(kpath, rpath, sizeof(rpath)); /* плоский путь без '/' */
 
   uint32_t fsz = 0;
   int is_file = (fd_stat_path(rpath, &fsz) == 0);
@@ -1684,7 +1714,8 @@ static int lx_open_dir_maybe(syscall_regs_t *regs, uint64_t path_uptr, int lflag
   char logical[260];
   logical[0] = '/';
   int lj = 0;
-  for (; rpath[lj] && lj < (int)sizeof(logical) - 2; lj++) logical[lj + 1] = rpath[lj];
+  for (; rpath[lj] && lj < (int)sizeof(logical) - 2; lj++)
+    logical[lj + 1] = rpath[lj];
   logical[lj + 1] = '\0';
 
   if (!is_file && ((lflags & L_O_DIRECTORY) || vfs_dir_exists(logical))) {
@@ -1695,73 +1726,138 @@ static int lx_open_dir_maybe(syscall_regs_t *regs, uint64_t path_uptr, int lflag
   return 0;
 }
 
-void linux_syscall_handler(syscall_regs_t *regs)
-{
+void linux_syscall_handler(syscall_regs_t *regs) {
   uint64_t n = regs->rax;
 
-  switch (n)
-  {
+  switch (n) {
   /* ---- совпадающая семантика: переписать номер и делегировать ---------- */
-  case 0:  regs->rax = 92; break;            /* read(fd,buf,cnt) -> SYS_READ_FD */
-  case 1:  regs->rax = 93; break;            /* write -> SYS_WRITE_FD */
-  case 2:                                    /* open(path,flags,mode) */
+  case 0:
+    regs->rax = 92;
+    break; /* read(fd,buf,cnt) -> SYS_READ_FD */
+  case 1:
+    regs->rax = 93;
+    break; /* write -> SYS_WRITE_FD */
+  case 2:  /* open(path,flags,mode) */
     /* Этап 6c-2: каталог -> OFD_DIR; иначе -> SYS_OPEN(path,flags). */
-    if (lx_open_dir_maybe(regs, regs->rdi, (int)regs->rsi)) { signal_deliver(regs); return; }
+    if (lx_open_dir_maybe(regs, regs->rdi, (int)regs->rsi)) {
+      signal_deliver(regs);
+      return;
+    }
     /* Этап 7: несуществующий файл без O_CREAT -> честный ENOENT (родной
      * SYS_OPEN отдаёт -1, что в Linux-errno читалось бы как EPERM). */
     if (!((int)regs->rsi & 0x40 /* O_CREAT */)) {
-      char p7[256]; uint32_t m7; uint64_t s7;
+      char p7[256];
+      uint32_t m7;
+      uint64_t s7;
       lx_copy_path(regs->rdi, p7, sizeof(p7));
-      if (lx_path_stat(p7, &m7, &s7) != 0) { regs->rax = LERR(L_ENOENT); signal_deliver(regs); return; }
+      if (lx_path_stat(p7, &m7, &s7) != 0) {
+        regs->rax = LERR(L_ENOENT);
+        signal_deliver(regs);
+        return;
+      }
     }
-    regs->rax = 90; break;
-  case 3:  regs->rax = 91; break;            /* close -> SYS_CLOSE_FD */
-  case 8:  regs->rax = 94; break;            /* lseek(fd,off,whence) -> SYS_SEEK */
-  case 12: regs->rax = 15; break;            /* brk(addr) -> SYS_BRK */
-  case 16: regs->rax = 106; break;           /* ioctl(fd,req,argp) -> SYS_IOCTL */
-  case 32: regs->rax = 98; break;            /* dup(oldfd) -> SYS_DUP */
-  case 33: regs->rax = 99; break;            /* dup2(old,new) -> SYS_DUP2 */
-  case 292: regs->rax = 99; break;           /* dup3(old,new,flags) -> SYS_DUP2 (flags игнор) */
-  case 22: regs->rax = 97; break;            /* pipe(fds) -> SYS_PIPE */
-  case 293: regs->rax = 97; break;           /* pipe2(fds,flags) -> SYS_PIPE (flags игнор) */
-  case 39: regs->rax = 53; break;            /* getpid -> SYS_GETPID */
-  case 57: regs->rax = 51; break;            /* fork -> SYS_FORK */
-  case 58: regs->rax = 51; break;            /* vfork -> SYS_FORK (без COW-семантики) */
-  case 59: regs->rax = 54; break;            /* execve(path,argv,envp) -> SYS_EXECVE */
-  case 60: regs->rax = 10; break;            /* exit -> SYS_EXIT */
-  case 231: regs->rax = 10; break;           /* exit_group -> SYS_EXIT */
+    regs->rax = 90;
+    break;
+  case 3:
+    regs->rax = 91;
+    break; /* close -> SYS_CLOSE_FD */
+  case 8:
+    regs->rax = 94;
+    break; /* lseek(fd,off,whence) -> SYS_SEEK */
+  case 12:
+    regs->rax = 15;
+    break; /* brk(addr) -> SYS_BRK */
+  case 16:
+    regs->rax = 106;
+    break; /* ioctl(fd,req,argp) -> SYS_IOCTL */
+  case 32:
+    regs->rax = 98;
+    break; /* dup(oldfd) -> SYS_DUP */
+  case 33:
+    regs->rax = 99;
+    break; /* dup2(old,new) -> SYS_DUP2 */
+  case 292:
+    regs->rax = 99;
+    break; /* dup3(old,new,flags) -> SYS_DUP2 (flags игнор) */
+  case 22:
+    regs->rax = 97;
+    break; /* pipe(fds) -> SYS_PIPE */
+  case 293:
+    regs->rax = 97;
+    break; /* pipe2(fds,flags) -> SYS_PIPE (flags игнор) */
+  case 39:
+    regs->rax = 53;
+    break; /* getpid -> SYS_GETPID */
+  case 57:
+    regs->rax = 51;
+    break; /* fork -> SYS_FORK */
+  case 58:
+    regs->rax = 51;
+    break; /* vfork -> SYS_FORK (без COW-семантики) */
+  case 59:
+    regs->rax = 54;
+    break; /* execve(path,argv,envp) -> SYS_EXECVE */
+  case 60:
+    regs->rax = 10;
+    break; /* exit -> SYS_EXIT */
+  case 231:
+    regs->rax = 10;
+    break; /* exit_group -> SYS_EXIT */
 
-  case 62: regs->rax = 102; break;           /* kill(pid,sig) -> SYS_KILL */
-  case 200: regs->rax = 102; break;          /* tkill(tid,sig) -> SYS_KILL (tid==pid; raise() в musl) */
-  case 79: regs->rax = 100; break;           /* getcwd(buf,size) -> SYS_GETCWD */
-  case 80: regs->rax = 101; break;           /* chdir(path) -> SYS_CHDIR */
-  case 15: regs->rax = 104; break;           /* rt_sigreturn -> SYS_SIGRETURN */
-  case 318: regs->rax = 86; break;           /* getrandom(buf,len,flags) -> SYS_GETRANDOM */
+  case 62:
+    regs->rax = 102;
+    break; /* kill(pid,sig) -> SYS_KILL */
+  case 200:
+    regs->rax = 102;
+    break; /* tkill(tid,sig) -> SYS_KILL (tid==pid; raise() в musl) */
+  case 79:
+    regs->rax = 100;
+    break; /* getcwd(buf,size) -> SYS_GETCWD */
+  case 80:
+    regs->rax = 101;
+    break; /* chdir(path) -> SYS_CHDIR */
+  case 15:
+    regs->rax = 104;
+    break; /* rt_sigreturn -> SYS_SIGRETURN */
+  case 318:
+    regs->rax = 86;
+    break; /* getrandom(buf,len,flags) -> SYS_GETRANDOM */
   /* Этап 11: shell.elf REPL дёргает ядерный shell_dispatch через Linux-шлюз.
    * Linux 73 = fsync, занято; берём 1000 как "EquinoxOS extension". */
-  case 1000: regs->rax = 73; break;          /* SYS_SHELL_EXEC(line,outbuf,cap) */
+  case 1000:
+    regs->rax = 73;
+    break; /* SYS_SHELL_EXEC(line,outbuf,cap) */
 
   /* ---- требуют перетасовки аргументов, затем делегирование ------------- */
-  case 234:                                  /* tgkill(tgid, tid, sig) -> SYS_KILL(tid,sig) */
-    regs->rdi = regs->rsi;                    /* pid = tid */
-    regs->rsi = regs->rdx;                    /* sig */
+  case 234:                /* tgkill(tgid, tid, sig) -> SYS_KILL(tid,sig) */
+    regs->rdi = regs->rsi; /* pid = tid */
+    regs->rsi = regs->rdx; /* sig */
     regs->rax = 102;
     break;
 
-  case 257:                                  /* openat(dirfd,path,flags,mode) */
+  case 257: /* openat(dirfd,path,flags,mode) */
     /* Этап 6c-2: каталог -> OFD_DIR; иначе делегируем родному SYS_OPEN. */
-    if (lx_open_dir_maybe(regs, regs->rsi, (int)regs->rdx)) { signal_deliver(regs); return; }
-    if (!((int)regs->rdx & 0x40 /* O_CREAT */)) {   /* Этап 7: честный ENOENT */
-      char p7[256]; uint32_t m7; uint64_t s7;
-      lx_copy_path(regs->rsi, p7, sizeof(p7));
-      if (lx_path_stat(p7, &m7, &s7) != 0) { regs->rax = LERR(L_ENOENT); signal_deliver(regs); return; }
+    if (lx_open_dir_maybe(regs, regs->rsi, (int)regs->rdx)) {
+      signal_deliver(regs);
+      return;
     }
-    regs->rdi = regs->rsi;                    /* path */
-    regs->rsi = regs->rdx;                    /* flags */
-    regs->rax = 90;                           /* -> SYS_OPEN (dirfd=AT_FDCWD игнор) */
+    if (!((int)regs->rdx & 0x40 /* O_CREAT */)) { /* Этап 7: честный ENOENT */
+      char p7[256];
+      uint32_t m7;
+      uint64_t s7;
+      lx_copy_path(regs->rsi, p7, sizeof(p7));
+      if (lx_path_stat(p7, &m7, &s7) != 0) {
+        regs->rax = LERR(L_ENOENT);
+        signal_deliver(regs);
+        return;
+      }
+    }
+    regs->rdi = regs->rsi; /* path */
+    regs->rsi = regs->rdx; /* flags */
+    regs->rax = 90;        /* -> SYS_OPEN (dirfd=AT_FDCWD игнор) */
     break;
 
-  case 217:                                  /* getdents64(fd, void *dirp, size_t count) */
+  case 217: /* getdents64(fd, void *dirp, size_t count) */
   {
     int fd = (int)regs->rdi;
     uint8_t *dirp = (uint8_t *)regs->rsi;
@@ -1773,27 +1869,36 @@ void linux_syscall_handler(syscall_regs_t *regs)
     stac();
     for (;;) {
       int saved = fd_dir_tell(fd);
-      if (saved < 0) { err = 1; break; }       /* не каталог / плохой fd */
+      if (saved < 0) {
+        err = 1;
+        break;
+      } /* не каталог / плохой fd */
       int rc = fd_readdir(fd, name, sizeof(name), &isd);
-      if (rc < 0) { err = 1; break; }
-      if (rc == 0) break;                       /* конец каталога */
+      if (rc < 0) {
+        err = 1;
+        break;
+      }
+      if (rc == 0)
+        break; /* конец каталога */
 
       int nlen = 0;
-      while (name[nlen]) nlen++;
+      while (name[nlen])
+        nlen++;
       /* struct linux_dirent64: d_ino@0, d_off@8, d_reclen@16, d_type@18,
        * d_name@19 (NUL-terminated). reclen выровнен на 8 байт. */
       uint64_t reclen = (uint64_t)(19 + nlen + 1);
       reclen = (reclen + 7) & ~7ULL;
       if (filled + reclen > count) {
-        fd_dir_seek(fd, saved);                 /* откат: запись не влезла */
+        fd_dir_seek(fd, saved); /* откат: запись не влезла */
         break;
       }
       uint8_t *rec = dirp + filled;
-      *(uint64_t *)(rec + 0)  = (uint64_t)(filled + 1);    /* d_ino (синтет.) */
-      *(int64_t  *)(rec + 8)  = (int64_t)(filled + reclen);/* d_off */
-      *(uint16_t *)(rec + 16) = (uint16_t)reclen;          /* d_reclen */
-      rec[18] = isd ? 4 : 8;                                /* d_type: DT_DIR/DT_REG */
-      for (int k = 0; k < nlen; k++) rec[19 + k] = (uint8_t)name[k];
+      *(uint64_t *)(rec + 0) = (uint64_t)(filled + 1);    /* d_ino (синтет.) */
+      *(int64_t *)(rec + 8) = (int64_t)(filled + reclen); /* d_off */
+      *(uint16_t *)(rec + 16) = (uint16_t)reclen;         /* d_reclen */
+      rec[18] = isd ? 4 : 8; /* d_type: DT_DIR/DT_REG */
+      for (int k = 0; k < nlen; k++)
+        rec[19 + k] = (uint8_t)name[k];
       rec[19 + nlen] = '\0';
       filled += reclen;
     }
@@ -1804,53 +1909,66 @@ void linux_syscall_handler(syscall_regs_t *regs)
   }
 
   /* ---- mmap: длина в rsi совпадает; родной возвращает 0 при ошибке ------ */
-  case 9:                                     /* mmap(addr,len,prot,flags,fd,off) */
-    regs->rax = 14;                           /* -> SYS_MMAP (использует только len) */
+  case 9:           /* mmap(addr,len,prot,flags,fd,off) */
+    regs->rax = 14; /* -> SYS_MMAP (использует только len) */
     syscall_handler(regs);
-    if (regs->rax == 0) regs->rax = LERR(L_ENOMEM); /* Linux: MAP_FAILED как -errno */
-    return;                                   /* сигналы уже доставлены */
-  case 11:                                    /* munmap — родного освобождения нет */
+    if (regs->rax == 0)
+      regs->rax = LERR(L_ENOMEM); /* Linux: MAP_FAILED как -errno */
+    return;                       /* сигналы уже доставлены */
+  case 11:                        /* munmap — родного освобождения нет */
     regs->rax = 0;
     signal_deliver(regs);
     return;
 
   /* ---- writev / readv: цикл по iovec ----------------------------------- */
-  case 20:                                    /* writev(fd, iov, iovcnt) */
+  case 20: /* writev(fd, iov, iovcnt) */
   {
     int fd = (int)regs->rdi;
     const struct l_iovec *iov = (const struct l_iovec *)regs->rsi;
     int cnt = (int)regs->rdx;
-    int64_t total = 0; int had_err = 0;
+    int64_t total = 0;
+    int had_err = 0;
     stac();
     for (int i = 0; i < cnt; i++) {
       const void *b = iov[i].iov_base;
       uint64_t l = iov[i].iov_len;
-      if (l == 0) continue;
+      if (l == 0)
+        continue;
       int rc = fd_write(fd, b, (uint32_t)l);
-      if (rc < 0) { had_err = 1; break; }
+      if (rc < 0) {
+        had_err = 1;
+        break;
+      }
       total += rc;
-      if ((uint64_t)rc < l) break;            /* частичная запись */
+      if ((uint64_t)rc < l)
+        break; /* частичная запись */
     }
     clac();
     regs->rax = (had_err && total == 0) ? LERR(L_EINVAL) : (uint64_t)total;
     signal_deliver(regs);
     return;
   }
-  case 19:                                    /* readv(fd, iov, iovcnt) */
+  case 19: /* readv(fd, iov, iovcnt) */
   {
     int fd = (int)regs->rdi;
     const struct l_iovec *iov = (const struct l_iovec *)regs->rsi;
     int cnt = (int)regs->rdx;
-    int64_t total = 0; int had_err = 0;
+    int64_t total = 0;
+    int had_err = 0;
     stac();
     for (int i = 0; i < cnt; i++) {
       void *b = (void *)iov[i].iov_base;
       uint64_t l = iov[i].iov_len;
-      if (l == 0) continue;
+      if (l == 0)
+        continue;
       int rc = fd_read(fd, b, (uint32_t)l);
-      if (rc < 0) { had_err = 1; break; }
+      if (rc < 0) {
+        had_err = 1;
+        break;
+      }
       total += rc;
-      if ((uint64_t)rc < l) break;            /* короткое чтение/EOF */
+      if ((uint64_t)rc < l)
+        break; /* короткое чтение/EOF */
     }
     clac();
     regs->rax = (had_err && total == 0) ? LERR(L_EINVAL) : (uint64_t)total;
@@ -1859,37 +1977,43 @@ void linux_syscall_handler(syscall_regs_t *regs)
   }
 
   /* ---- nanosleep(req, rem): timespec -> миллисекунды -> SYS_SLEEP ------- */
-  case 35:
-  {
+  case 35: {
     const struct l_timespec *req = (const struct l_timespec *)regs->rdi;
     uint64_t ms = 0;
-    if (req) { stac(); ms = (uint64_t)req->tv_sec * 1000 + (uint64_t)req->tv_nsec / 1000000ULL; clac(); }
+    if (req) {
+      stac();
+      ms = (uint64_t)req->tv_sec * 1000 + (uint64_t)req->tv_nsec / 1000000ULL;
+      clac();
+    }
     regs->rdi = ms;
-    regs->rax = 13;                           /* SYS_SLEEP */
-    syscall_handler(regs);                    /* доставит сигналы */
+    regs->rax = 13;        /* SYS_SLEEP */
+    syscall_handler(regs); /* доставит сигналы */
     regs->rax = 0;
     return;
   }
 
   /* ---- arch_prctl(code, addr): TLS через FS_BASE ----------------------- */
-  case 158:
-  {
+  case 158: {
     int code = (int)regs->rdi;
     uint64_t addr = regs->rsi;
-    if (code == 0x1002) {                     /* ARCH_SET_FS */
+    if (code == 0x1002) { /* ARCH_SET_FS */
       uint32_t lo = (uint32_t)addr, hi = (uint32_t)(addr >> 32);
-      __asm__ volatile("wrmsr" :: "c"(0xC0000100), "a"(lo), "d"(hi));
+      __asm__ volatile("wrmsr" ::"c"(0xC0000100), "a"(lo), "d"(hi));
       /* Этап 6b: ОБЯЗАТЕЛЬНО сохраняем FS_BASE в задаче, иначе schedule()
        * на следующем же тике перезапишет MSR старым current_task->fs_base
        * (значением с момента создания задачи) и затрёт TLS-указатель musl —
        * errno/TLS развалятся после первого переключения контекста. */
       current_task->fs_base = addr;
       regs->rax = 0;
-    } else if (code == 0x1003) {              /* ARCH_GET_FS */
+    } else if (code == 0x1003) { /* ARCH_GET_FS */
       uint32_t lo, hi;
       __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0xC0000100));
       uint64_t v = ((uint64_t)hi << 32) | lo;
-      if (addr) { stac(); *(uint64_t *)addr = v; clac(); }
+      if (addr) {
+        stac();
+        *(uint64_t *)addr = v;
+        clac();
+      }
       regs->rax = 0;
     } else {
       regs->rax = LERR(L_EINVAL);
@@ -1899,40 +2023,45 @@ void linux_syscall_handler(syscall_regs_t *regs)
   }
 
   /* ---- clock_gettime(clk_id, struct timespec*) — Этап 6b-2 ------------- */
-  case 228:
-  {
+  case 228: {
     int clk = (int)regs->rdi;
-    uint64_t uts = regs->rsi;                 /* user struct timespec {long sec; long nsec} */
-    uint64_t ms = (uint64_t)tick;             /* PIT @ 1 kHz => мс с загрузки */
+    uint64_t uts = regs->rsi; /* user struct timespec {long sec; long nsec} */
+    uint64_t ms = (uint64_t)tick; /* PIT @ 1 kHz => мс с загрузки */
     int64_t sec, nsec = (int64_t)(ms % 1000) * 1000000;
-    if (clk == 0 || clk == 5)                 /* CLOCK_REALTIME / _COARSE */
+    if (clk == 0 || clk == 5) /* CLOCK_REALTIME / _COARSE */
       sec = (int64_t)rtc_unix_time();
-    else                                      /* MONOTONIC(1)/RAW(4)/COARSE(6)/BOOTTIME(7) */
+    else /* MONOTONIC(1)/RAW(4)/COARSE(6)/BOOTTIME(7) */
       sec = (int64_t)(ms / 1000);
-    if (uts) { stac(); ((int64_t *)uts)[0] = sec; ((int64_t *)uts)[1] = nsec; clac(); }
+    if (uts) {
+      stac();
+      ((int64_t *)uts)[0] = sec;
+      ((int64_t *)uts)[1] = nsec;
+      clac();
+    }
     regs->rax = 0;
     signal_deliver(regs);
     return;
   }
 
   /* ---- uname(struct utsname*) — Этап 6b-2 ------------------------------ */
-  case 63:
-  {
+  case 63: {
     uint64_t up = regs->rdi;
     if (up) {
       /* Linux struct utsname: 6 полей по 65 байт
        * (sysname, nodename, release, version, machine, domainname). */
-      static const char *const uf[6] = {
-        "EquinoxOS", "equinox", "1.0", "EquinoxOS 6b musl", "x86_64", "(none)"
-      };
+      static const char *const uf[6] = {"EquinoxOS", "equinox",
+                                        "1.0",       "EquinoxOS 6b musl",
+                                        "x86_64",    "(none)"};
       stac();
       char *p = (char *)up;
       for (int f = 0; f < 6; f++) {
         char *dst = p + f * 65;
         const char *s = uf[f];
         int i = 0;
-        for (; s[i] && i < 64; i++) dst[i] = s[i];
-        for (; i < 65; i++) dst[i] = 0;
+        for (; s[i] && i < 64; i++)
+          dst[i] = s[i];
+        for (; i < 65; i++)
+          dst[i] = 0;
       }
       clac();
     }
@@ -1942,128 +2071,177 @@ void linux_syscall_handler(syscall_regs_t *regs)
   }
 
   /* ---- stat-семейство (Этап 6c): Linux struct stat (kstat layout) ------ */
-  case 5:                                     /* fstat(fd, statbuf) */
+  case 5: /* fstat(fd, statbuf) */
   {
-    uint32_t mode; uint64_t size;
+    uint32_t mode;
+    uint64_t size;
     if (lx_fd_stat((int)regs->rdi, &mode, &size) == 0) {
-      lx_fill_stat(regs->rsi, mode, size); regs->rax = 0;
-    } else regs->rax = LERR(L_EBADF);
+      lx_fill_stat(regs->rsi, mode, size);
+      regs->rax = 0;
+    } else
+      regs->rax = LERR(L_EBADF);
     signal_deliver(regs);
     return;
   }
-  case 4:                                     /* stat(path, statbuf) */
-  case 6:                                     /* lstat — символ. ссылок нет, как stat */
+  case 4: /* stat(path, statbuf) */
+  case 6: /* lstat — символ. ссылок нет, как stat */
   {
     char path[256];
     lx_copy_path(regs->rdi, path, sizeof(path));
-    uint32_t mode; uint64_t size;
+    uint32_t mode;
+    uint64_t size;
     if (lx_path_stat(path, &mode, &size) == 0) {
-      lx_fill_stat(regs->rsi, mode, size); regs->rax = 0;
-    } else regs->rax = LERR(L_ENOENT);
+      lx_fill_stat(regs->rsi, mode, size);
+      regs->rax = 0;
+    } else
+      regs->rax = LERR(L_ENOENT);
     signal_deliver(regs);
     return;
   }
-  case 262:                                   /* newfstatat(dirfd, path, statbuf, flag) */
+  case 262: /* newfstatat(dirfd, path, statbuf, flag) */
   {
     const char *pp = (const char *)regs->rsi;
     char c = 0;
-    if (pp) { stac(); c = pp[0]; clac(); }
+    if (pp) {
+      stac();
+      c = pp[0];
+      clac();
+    }
     int empty = (pp == 0 || c == '\0');
-    uint32_t mode; uint64_t size;
-    if (((int)regs->r10 & L_AT_EMPTY_PATH) || empty) {  /* AT_EMPTY_PATH -> fstat(dirfd) */
+    uint32_t mode;
+    uint64_t size;
+    if (((int)regs->r10 & L_AT_EMPTY_PATH) ||
+        empty) { /* AT_EMPTY_PATH -> fstat(dirfd) */
       if (lx_fd_stat((int)regs->rdi, &mode, &size) == 0) {
-        lx_fill_stat(regs->rdx, mode, size); regs->rax = 0;
-      } else regs->rax = LERR(L_EBADF);
+        lx_fill_stat(regs->rdx, mode, size);
+        regs->rax = 0;
+      } else
+        regs->rax = LERR(L_EBADF);
     } else {
       char path[256];
       lx_copy_path(regs->rsi, path, sizeof(path));
       if (lx_path_stat(path, &mode, &size) == 0) {
-        lx_fill_stat(regs->rdx, mode, size); regs->rax = 0;
-      } else regs->rax = LERR(L_ENOENT);
+        lx_fill_stat(regs->rdx, mode, size);
+        regs->rax = 0;
+      } else
+        regs->rax = LERR(L_ENOENT);
     }
     signal_deliver(regs);
     return;
   }
 
   /* ---- access / faccessat (Этап 6c): 0 если существует, иначе -ENOENT --- */
-  case 21:                                    /* access(path, mode) */
+  case 21: /* access(path, mode) */
   {
     char path[256];
     lx_copy_path(regs->rdi, path, sizeof(path));
-    uint32_t m; uint64_t s;
+    uint32_t m;
+    uint64_t s;
     regs->rax = (lx_path_stat(path, &m, &s) == 0) ? 0 : LERR(L_ENOENT);
     signal_deliver(regs);
     return;
   }
-  case 89:                                    /* readlink(path, buf, sz) — Этап 8 */
-  case 267:                                   /* readlinkat(dirfd, path, buf, sz) */
+  case 89:  /* readlink(path, buf, sz) — Этап 8 */
+  case 267: /* readlinkat(dirfd, path, buf, sz) */
   {
     /* Симлинков у ext2-драйвера пока нет: существующий путь -> EINVAL
      * («не симлинк», как в Linux), несуществующий -> ENOENT. musl/bash
      * корректно переживают оба ответа (realpath, canonicalize). */
     char path[256];
     lx_copy_path((n == 89) ? regs->rdi : regs->rsi, path, sizeof(path));
-    uint32_t m; uint64_t s;
-    regs->rax = (lx_path_stat(path, &m, &s) == 0) ? LERR(L_EINVAL) : LERR(L_ENOENT);
+    uint32_t m;
+    uint64_t s;
+    regs->rax =
+        (lx_path_stat(path, &m, &s) == 0) ? LERR(L_EINVAL) : LERR(L_ENOENT);
     signal_deliver(regs);
     return;
   }
 
-  case 269:                                   /* faccessat(dirfd, path, mode, flag) */
-  case 439:                                   /* faccessat2 — то же + flags (Этап 7: bash) */
+  case 269: /* faccessat(dirfd, path, mode, flag) */
+  case 439: /* faccessat2 — то же + flags (Этап 7: bash) */
   {
     char path[256];
     lx_copy_path(regs->rsi, path, sizeof(path));
-    uint32_t m; uint64_t s;
+    uint32_t m;
+    uint64_t s;
     regs->rax = (lx_path_stat(path, &m, &s) == 0) ? 0 : LERR(L_ENOENT);
     signal_deliver(regs);
     return;
   }
 
   /* ---- мелкие совместимостные заглушки --------------------------------- */
-  case 218: regs->rax = (uint64_t)current_task->id; signal_deliver(regs); return; /* set_tid_address */
-  case 102: case 104: case 107: case 108:     /* getuid/getgid/geteuid/getegid */
-    regs->rax = 0; signal_deliver(regs); return;                                  /* «root» */
-  case 110: regs->rax = 1; signal_deliver(regs); return;                          /* getppid */
-  case 186: regs->rax = (uint64_t)current_task->id; signal_deliver(regs); return; /* gettid (==pid, однопоточно) */
+  case 218:
+    regs->rax = (uint64_t)current_task->id;
+    signal_deliver(regs);
+    return; /* set_tid_address */
+  case 102:
+  case 104:
+  case 107:
+  case 108: /* getuid/getgid/geteuid/getegid */
+    regs->rax = 0;
+    signal_deliver(regs);
+    return; /* «root» */
+  case 110:
+    regs->rax = 1;
+    signal_deliver(regs);
+    return; /* getppid */
+  case 186:
+    regs->rax = (uint64_t)current_task->id;
+    signal_deliver(regs);
+    return; /* gettid (==pid, однопоточно) */
 
   /* ---- Этап 7 (bash): честный fcntl ------------------------------------ */
   case 72: { /* fcntl(fd, cmd, arg) */
-    int fd  = (int)regs->rdi;
+    int fd = (int)regs->rdi;
     int cmd = (int)regs->rsi;
     long arg = (long)regs->rdx;
-    int kind = 0; uint32_t fsz = 0;
+    int kind = 0;
+    uint32_t fsz = 0;
     int valid = (fd_statx(fd, &kind, &fsz) == 0);
     switch (cmd) {
-      case 0:     /* F_DUPFD */
-      case 1030: { /* F_DUPFD_CLOEXEC (CLOEXEC не отслеживаем — exec'и наши) */
-        if (!valid) { regs->rax = LERR(L_EBADF); break; }
-        int nfd = fd_dup_from(fd, (int)arg);
-        regs->rax = (nfd < 0) ? LERR(L_EMFILE) : (uint64_t)nfd;
+    case 0:      /* F_DUPFD */
+    case 1030: { /* F_DUPFD_CLOEXEC (CLOEXEC не отслеживаем — exec'и наши) */
+      if (!valid) {
+        regs->rax = LERR(L_EBADF);
         break;
       }
-      case 1:  /* F_GETFD */
-        regs->rax = valid ? 0 : LERR(L_EBADF);   /* FD_CLOEXEC не храним */
-        break;
-      case 2:  /* F_SETFD — принять и забыть (наш execve fd не наследует «лишних») */
-        regs->rax = valid ? 0 : LERR(L_EBADF);
-        break;
-      case 3:  /* F_GETFL */
-        if (!valid) { regs->rax = LERR(L_EBADF); break; }
-        switch (kind) {
-          case OFD_CONSOLE: regs->rax = 2; break;  /* O_RDWR */
-          case OFD_PIPE_W:  regs->rax = 1; break;  /* O_WRONLY */
-          default:          regs->rax = 0; break;  /* O_RDONLY */
-        }
-        break;
-      case 4:  /* F_SETFL — O_NONBLOCK/O_APPEND игнорируем (документировано) */
-        regs->rax = valid ? 0 : LERR(L_EBADF);
-        break;
-      default:
-        regs->rax = LERR(L_EINVAL);
-        break;
+      int nfd = fd_dup_from(fd, (int)arg);
+      regs->rax = (nfd < 0) ? LERR(L_EMFILE) : (uint64_t)nfd;
+      break;
     }
-    signal_deliver(regs); return;
+    case 1:                                  /* F_GETFD */
+      regs->rax = valid ? 0 : LERR(L_EBADF); /* FD_CLOEXEC не храним */
+      break;
+    case 2: /* F_SETFD — принять и забыть (наш execve fd не наследует «лишних»)
+             */
+      regs->rax = valid ? 0 : LERR(L_EBADF);
+      break;
+    case 3: /* F_GETFL */
+      if (!valid) {
+        regs->rax = LERR(L_EBADF);
+        break;
+      }
+      switch (kind) {
+      case OFD_CONSOLE:
+        regs->rax = 2;
+        break; /* O_RDWR */
+      case OFD_PIPE_W:
+        regs->rax = 1;
+        break; /* O_WRONLY */
+      default:
+        regs->rax = 0;
+        break; /* O_RDONLY */
+      }
+      break;
+    case 4: /* F_SETFL — O_NONBLOCK/O_APPEND игнорируем (документировано) */
+      regs->rax = valid ? 0 : LERR(L_EBADF);
+      break;
+    default:
+      regs->rax = LERR(L_EINVAL);
+      break;
+    }
+    signal_deliver(regs);
+    return;
   }
 
   /* ---- Этап 7 (bash): umask / rlimit / times / группы ------------------- */
@@ -2072,49 +2250,61 @@ void linux_syscall_handler(syscall_regs_t *regs)
     uint32_t old = k_umask;
     k_umask = (uint32_t)regs->rdi & 0777u;
     regs->rax = old;
-    signal_deliver(regs); return;
+    signal_deliver(regs);
+    return;
   }
 
-  case 97:   /* getrlimit(res, rlim*) */
+  case 97:    /* getrlimit(res, rlim*) */
   case 302: { /* prlimit64(pid, res, new*, old*) — new игнорируем */
     int res = (int)((n == 97) ? regs->rdi : regs->rsi);
     uint64_t uptr = (n == 97) ? regs->rsi : regs->r10;
     if (uptr) {
       uint64_t cur, max;
-      if (res == 7 /* RLIMIT_NOFILE */) { cur = max = FD_MAX; }
-      else { cur = max = ~0ULL; }      /* RLIM_INFINITY */
+      if (res == 7 /* RLIMIT_NOFILE */) {
+        cur = max = FD_MAX;
+      } else {
+        cur = max = ~0ULL;
+      } /* RLIM_INFINITY */
       stac();
       ((uint64_t *)uptr)[0] = cur;
       ((uint64_t *)uptr)[1] = max;
       clac();
     }
     regs->rax = 0;
-    signal_deliver(regs); return;
+    signal_deliver(regs);
+    return;
   }
 
-  case 160:  /* setrlimit — принять и игнорировать */
-    regs->rax = 0; signal_deliver(regs); return;
+  case 160: /* setrlimit — принять и игнорировать */
+    regs->rax = 0;
+    signal_deliver(regs);
+    return;
 
-  case 100: { /* times(struct tms*) -> clock ticks (PIT 1 кГц == CLK_TCK 100? нет:
-               * musl __SC_CLK_TCK = 100, поэтому отдаём тики/10). Поля tms —
-               * нули: учёта cpu-времени у ядра пока нет, честный минимум. */
+  case 100: { /* times(struct tms*) -> clock ticks (PIT 1 кГц == CLK_TCK 100?
+               * нет: musl __SC_CLK_TCK = 100, поэтому отдаём тики/10). Поля tms
+               * — нули: учёта cpu-времени у ядра пока нет, честный минимум. */
     uint64_t t10 = (uint64_t)tick / 10;
     if (regs->rdi) {
       stac();
-      ((int64_t *)regs->rdi)[0] = 0; ((int64_t *)regs->rdi)[1] = 0;
-      ((int64_t *)regs->rdi)[2] = 0; ((int64_t *)regs->rdi)[3] = 0;
+      ((int64_t *)regs->rdi)[0] = 0;
+      ((int64_t *)regs->rdi)[1] = 0;
+      ((int64_t *)regs->rdi)[2] = 0;
+      ((int64_t *)regs->rdi)[3] = 0;
       clac();
     }
     regs->rax = t10;
-    signal_deliver(regs); return;
+    signal_deliver(regs);
+    return;
   }
 
-  case 115:  /* getgroups(size, list*) — дополнительных групп нет */
-    regs->rax = 0; signal_deliver(regs); return;
+  case 115: /* getgroups(size, list*) — дополнительных групп нет */
+    regs->rax = 0;
+    signal_deliver(regs);
+    return;
 
   case 96: { /* gettimeofday(tv*, tz*) */
     if (regs->rdi) {
-      int64_t sec  = (int64_t)rtc_unix_time();
+      int64_t sec = (int64_t)rtc_unix_time();
       int64_t usec = (int64_t)((uint64_t)tick % 1000) * 1000;
       stac();
       ((int64_t *)regs->rdi)[0] = sec;
@@ -2122,14 +2312,15 @@ void linux_syscall_handler(syscall_regs_t *regs)
       clac();
     }
     regs->rax = 0;
-    signal_deliver(regs); return;
+    signal_deliver(regs);
+    return;
   }
 
   /* ---- Этап 7 (bash/readline): poll / select / pselect6 ----------------- */
   case 7: { /* poll(pollfd*, nfds, timeout_ms) */
     uint64_t ufds = regs->rdi;
     int nfds = (int)regs->rsi;
-    int64_t timeout = (int64_t)(int32_t)regs->rdx;   /* мс; <0 = бесконечно */
+    int64_t timeout = (int64_t)(int32_t)regs->rdx; /* мс; <0 = бесконечно */
     uint64_t deadline = (timeout >= 0) ? (uint64_t)tick + (uint64_t)timeout : 0;
     int nready;
     for (;;) {
@@ -2137,124 +2328,185 @@ void linux_syscall_handler(syscall_regs_t *regs)
       stac();
       for (int i = 0; i < nfds; i++) {
         /* struct pollfd { int fd; short events; short revents; } — 8 байт */
-        int32_t  pfd = *(int32_t *)(ufds + (uint64_t)i * 8);
-        int16_t  ev  = *(int16_t *)(ufds + (uint64_t)i * 8 + 4);
-        int16_t  rev = 0;
+        int32_t pfd = *(int32_t *)(ufds + (uint64_t)i * 8);
+        int16_t ev = *(int16_t *)(ufds + (uint64_t)i * 8 + 4);
+        int16_t rev = 0;
         if (pfd >= 0) {
           int rin = fd_ready_in(pfd);
-          if (rin < 0) rev |= 0x020;                       /* POLLNVAL */
+          if (rin < 0)
+            rev |= 0x020; /* POLLNVAL */
           else {
-            if ((ev & 0x001) && rin) rev |= 0x001;          /* POLLIN  */
-            if (ev & 0x004) rev |= 0x004;                   /* POLLOUT: пишем без блокировки */
+            if ((ev & 0x001) && rin)
+              rev |= 0x001; /* POLLIN  */
+            if (ev & 0x004)
+              rev |= 0x004; /* POLLOUT: пишем без блокировки */
           }
         }
         *(int16_t *)(ufds + (uint64_t)i * 8 + 6) = rev;
-        if (rev) nready++;
+        if (rev)
+          nready++;
       }
       clac();
-      if (nready > 0 || timeout == 0) break;
-      if (timeout > 0 && (uint64_t)tick >= deadline) break;
-      uint64_t deliverable = current_task->sig_pending & ~current_task->sig_blocked;
-      if (deliverable) { regs->rax = LERR(L_EINTR); signal_deliver(regs); return; }
+      if (nready > 0 || timeout == 0)
+        break;
+      if (timeout > 0 && (uint64_t)tick >= deadline)
+        break;
+      uint64_t deliverable =
+          current_task->sig_pending & ~current_task->sig_blocked;
+      if (deliverable) {
+        regs->rax = LERR(L_EINTR);
+        signal_deliver(regs);
+        return;
+      }
       yield();
     }
     regs->rax = (uint64_t)nready;
-    signal_deliver(regs); return;
+    signal_deliver(regs);
+    return;
   }
 
-  case 23:   /* select(nfds, r*, w*, e*, timeval*) */
-  case 270: { /* pselect6(nfds, r*, w*, e*, timespec*, sigmask) — маску игнорируем */
+  case 23:    /* select(nfds, r*, w*, e*, timeval*) */
+  case 270: { /* pselect6(nfds, r*, w*, e*, timespec*, sigmask) — маску
+                 игнорируем */
     int nfds = (int)regs->rdi;
     uint64_t urd = regs->rsi, uwr = regs->rdx, uex = regs->r10, uts = regs->r8;
-    if (nfds < 0 || nfds > FD_MAX) nfds = (nfds < 0) ? 0 : FD_MAX;
-    int64_t timeout = -1;                            /* мс; <0 = бесконечно */
+    if (nfds < 0 || nfds > FD_MAX)
+      nfds = (nfds < 0) ? 0 : FD_MAX;
+    int64_t timeout = -1; /* мс; <0 = бесконечно */
     if (uts) {
       stac();
       int64_t a = ((int64_t *)uts)[0];
       int64_t b = ((int64_t *)uts)[1];
       clac();
-      timeout = (n == 23) ? a * 1000 + b / 1000      /* timeval: usec */
-                          : a * 1000 + b / 1000000;  /* timespec: nsec */
-      if (timeout < 0) timeout = 0;
+      timeout = (n == 23) ? a * 1000 + b / 1000     /* timeval: usec */
+                          : a * 1000 + b / 1000000; /* timespec: nsec */
+      if (timeout < 0)
+        timeout = 0;
     }
     uint64_t deadline = (timeout >= 0) ? (uint64_t)tick + (uint64_t)timeout : 0;
     uint64_t rd = 0, wr = 0, ex = 0;
     stac();
-    if (urd) rd = *(uint64_t *)urd;                  /* fd < 64 => одно слово */
-    if (uwr) wr = *(uint64_t *)uwr;
-    if (uex) ex = *(uint64_t *)uex;
+    if (urd)
+      rd = *(uint64_t *)urd; /* fd < 64 => одно слово */
+    if (uwr)
+      wr = *(uint64_t *)uwr;
+    if (uex)
+      ex = *(uint64_t *)uex;
     clac();
     (void)ex;
     uint64_t ord, owr;
     int nready;
     for (;;) {
-      ord = 0; owr = 0; nready = 0;
+      ord = 0;
+      owr = 0;
+      nready = 0;
       for (int fd = 0; fd < nfds && fd < 64; fd++) {
         uint64_t bit = 1ULL << fd;
-        if ((rd & bit) && fd_ready_in(fd) > 0) { ord |= bit; nready++; }
-        if (wr & bit)                           { owr |= bit; nready++; }
+        if ((rd & bit) && fd_ready_in(fd) > 0) {
+          ord |= bit;
+          nready++;
+        }
+        if (wr & bit) {
+          owr |= bit;
+          nready++;
+        }
       }
-      if (nready > 0 || timeout == 0) break;
-      if (timeout > 0 && (uint64_t)tick >= deadline) break;
-      uint64_t deliverable = current_task->sig_pending & ~current_task->sig_blocked;
-      if (deliverable) { regs->rax = LERR(L_EINTR); signal_deliver(regs); return; }
+      if (nready > 0 || timeout == 0)
+        break;
+      if (timeout > 0 && (uint64_t)tick >= deadline)
+        break;
+      uint64_t deliverable =
+          current_task->sig_pending & ~current_task->sig_blocked;
+      if (deliverable) {
+        regs->rax = LERR(L_EINTR);
+        signal_deliver(regs);
+        return;
+      }
       yield();
     }
     stac();
-    if (urd) { *(uint64_t *)urd = ord; for (int w = 1; w < 16; w++) ((uint64_t *)urd)[w] = 0; }
-    if (uwr) { *(uint64_t *)uwr = owr; for (int w = 1; w < 16; w++) ((uint64_t *)uwr)[w] = 0; }
-    if (uex) { for (int w = 0; w < 16; w++) ((uint64_t *)uex)[w] = 0; }
+    if (urd) {
+      *(uint64_t *)urd = ord;
+      for (int w = 1; w < 16; w++)
+        ((uint64_t *)urd)[w] = 0;
+    }
+    if (uwr) {
+      *(uint64_t *)uwr = owr;
+      for (int w = 1; w < 16; w++)
+        ((uint64_t *)uwr)[w] = 0;
+    }
+    if (uex) {
+      for (int w = 0; w < 16; w++)
+        ((uint64_t *)uex)[w] = 0;
+    }
     clac();
     regs->rax = (uint64_t)nready;
-    signal_deliver(regs); return;
+    signal_deliver(regs);
+    return;
   }
 
   /* ---- Этап 6d: настоящие сигналы (rt_sigaction / rt_sigprocmask) ------- */
-  case 13: {  /* rt_sigaction(sig, act*, oldact*, sigsetsize) */
+  case 13: { /* rt_sigaction(sig, act*, oldact*, sigsetsize) */
     int sig = (int)regs->rdi;
     /* act==NULL → только прочитать прежний обработчик (SIG_QUERY). */
     uint64_t handler = 0xFFFFFFFFFFFFFFFFULL, restorer = 0;
     if (regs->rsi) {
       struct l_sigaction act;
-      stac(); act = *(const struct l_sigaction *)regs->rsi; clac();
-      handler  = act.sa_handler;
+      stac();
+      act = *(const struct l_sigaction *)regs->rsi;
+      clac();
+      handler = act.sa_handler;
       restorer = (act.sa_flags & L_SA_RESTORER) ? act.sa_restorer : 0;
     }
     uint64_t old = 0;
     int rc = signal_setaction(sig, handler, restorer, &old);
-    if (rc != 0) { regs->rax = LERR(L_EINVAL); signal_deliver(regs); return; }
-    if (regs->rdx) {  /* вернуть прежний обработчик в oldact */
-      struct l_sigaction oa;
-      oa.sa_handler  = old;
-      oa.sa_flags    = L_SA_RESTORER;
-      oa.sa_restorer = current_task ? current_task->sig_restorer : 0;
-      oa.sa_mask     = 0;
-      stac(); *(struct l_sigaction *)regs->rdx = oa; clac();
+    if (rc != 0) {
+      regs->rax = LERR(L_EINVAL);
+      signal_deliver(regs);
+      return;
     }
-    regs->rax = 0; signal_deliver(regs); return;
+    if (regs->rdx) { /* вернуть прежний обработчик в oldact */
+      struct l_sigaction oa;
+      oa.sa_handler = old;
+      oa.sa_flags = L_SA_RESTORER;
+      oa.sa_restorer = current_task ? current_task->sig_restorer : 0;
+      oa.sa_mask = 0;
+      stac();
+      *(struct l_sigaction *)regs->rdx = oa;
+      clac();
+    }
+    regs->rax = 0;
+    signal_deliver(regs);
+    return;
   }
-  case 14: {  /* rt_sigprocmask(how, set*, oldset*, sigsetsize) — Linux передаёт
-               * set/oldset УКАЗАТЕЛЯМИ (натив ждёт значение), поэтому inline.
-               * ВАЖНО: Linux sigset кладёт сигнал N в бит N-1, а наше ядро
-               * (signal.c SIGBIT=1<<s) — в бит N. Конвертируем сдвигом. */
+  case 14: { /* rt_sigprocmask(how, set*, oldset*, sigsetsize) — Linux передаёт
+              * set/oldset УКАЗАТЕЛЯМИ (натив ждёт значение), поэтому inline.
+              * ВАЖНО: Linux sigset кладёт сигнал N в бит N-1, а наше ядро
+              * (signal.c SIGBIT=1<<s) — в бит N. Конвертируем сдвигом. */
     uint64_t old = 0;
     int how = (int)regs->rdi;
-    if (regs->rsi) {  /* есть новый набор — применить */
+    if (regs->rsi) { /* есть новый набор — применить */
       uint64_t lset;
-      stac(); lset = *(const uint64_t *)regs->rsi; clac();
+      stac();
+      lset = *(const uint64_t *)regs->rsi;
+      clac();
       signal_procmask(how, lset << 1 /* linux->native */, &old);
-    } else {          /* set==NULL — только прочитать текущую маску */
+    } else { /* set==NULL — только прочитать текущую маску */
       signal_procmask(0 /*BLOCK*/, 0, &old);
     }
     if (regs->rdx) {
-      uint64_t lold = old >> 1;  /* native->linux */
-      stac(); *(uint64_t *)regs->rdx = lold; clac();
+      uint64_t lold = old >> 1; /* native->linux */
+      stac();
+      *(uint64_t *)regs->rdx = lold;
+      clac();
     }
-    regs->rax = 0; signal_deliver(regs); return;
+    regs->rax = 0;
+    signal_deliver(regs);
+    return;
   }
 
   /* ---- Этап 6e: ожидание потомков + группы процессов (job control) ----- */
-  case 61: {  /* wait4(pid, int *status, options, rusage*) */
+  case 61: { /* wait4(pid, int *status, options, rusage*) */
     int raw = 0;
     int nohang = (int)(regs->rdx & 1 /* WNOHANG */);
     int64_t r = task_waitpid_ex(regs->rdi, &raw, nohang);
@@ -2266,7 +2518,8 @@ void linux_syscall_handler(syscall_regs_t *regs)
        * Разбираем как Linux: есть доставляемый сигнал (кроме SIGCHLD) → EINTR,
        * иначе ECHILD. (rusage игнорируется.) */
       uint64_t deliverable = current_task->sig_pending &
-                             ~current_task->sig_blocked & ~(1ULL << 17 /*SIGCHLD*/);
+                             ~current_task->sig_blocked &
+                             ~(1ULL << 17 /*SIGCHLD*/);
       regs->rax = deliverable ? LERR(L_EINTR) : LERR(L_ECHILD);
     } else {
       if (regs->rsi) {
@@ -2274,53 +2527,78 @@ void linux_syscall_handler(syscall_regs_t *regs)
          * == 0, WEXITSTATUS == (status>>8)&0xff. (Сигнальную смерть ядро пока
          * не различает — отдаём как обычный выход с кодом.) */
         int wstatus = (raw & 0xff) << 8;
-        stac(); *(int *)regs->rsi = wstatus; clac();
+        stac();
+        *(int *)regs->rsi = wstatus;
+        clac();
       }
       regs->rax = (uint64_t)r;
     }
-    signal_deliver(regs); return;
+    signal_deliver(regs);
+    return;
   }
 
-  case 111:   /* getpgrp() -> группа текущего процесса */
-    regs->rax = current_task->process->pgid ? current_task->process->pgid : current_task->process->pid;
-    signal_deliver(regs); return;
+  case 111: /* getpgrp() -> группа текущего процесса */
+    regs->rax = current_task->process->pgid ? current_task->process->pgid
+                                            : current_task->process->pid;
+    signal_deliver(regs);
+    return;
 
   case 121: { /* getpgid(pid) -> группа процесса pid (0 == текущий) */
     uint64_t pid = regs->rdi;
     task_t *t = pid ? task_by_id(pid) : current_task;
-    if (!t) { regs->rax = LERR(L_ESRCH); signal_deliver(regs); return; }
+    if (!t) {
+      regs->rax = LERR(L_ESRCH);
+      signal_deliver(regs);
+      return;
+    }
     regs->rax = t->process->pgid ? t->process->pgid : t->process->pid;
-    signal_deliver(regs); return;
+    signal_deliver(regs);
+    return;
   }
 
-  case 124:   /* getsid(pid) — сессий не различаем, отдаём группу как прокси */
-    regs->rax = current_task->process->pgid ? current_task->process->pgid : current_task->process->pid;
-    signal_deliver(regs); return;
+  case 124: /* getsid(pid) — сессий не различаем, отдаём группу как прокси */
+    regs->rax = current_task->process->pgid ? current_task->process->pgid
+                                            : current_task->process->pid;
+    signal_deliver(regs);
+    return;
 
-  case 109: { /* setpgid(pid, pgid): pid 0=текущий, pgid 0=сделать pid лидером */
-    uint64_t pid  = regs->rdi ? regs->rdi : current_task->id;
+  case 109: { /* setpgid(pid, pgid): pid 0=текущий, pgid 0=сделать pid лидером
+               */
+    uint64_t pid = regs->rdi ? regs->rdi : current_task->id;
     uint64_t pgid = regs->rsi;
     task_t *t = (pid == current_task->id) ? current_task : task_by_id(pid);
-    if (!t) { regs->rax = LERR(L_ESRCH); signal_deliver(regs); return; }
+    if (!t) {
+      regs->rax = LERR(L_ESRCH);
+      signal_deliver(regs);
+      return;
+    }
     /* Менять можно только себя или своего ребёнка (POSIX). */
-    if (t != current_task && t->process->parent_pid != current_task->process->pid) {
-      regs->rax = LERR(L_EPERM); signal_deliver(regs); return;
+    if (t != current_task &&
+        t->process->parent_pid != current_task->process->pid) {
+      regs->rax = LERR(L_EPERM);
+      signal_deliver(regs);
+      return;
     }
     t->process->pgid = pgid ? pgid : t->process->pid;
-    regs->rax = 0; signal_deliver(regs); return;
+    regs->rax = 0;
+    signal_deliver(regs);
+    return;
   }
 
-  case 112:   /* setsid(): новая сессия/группа — текущий становится лидером */
+  case 112: /* setsid(): новая сессия/группа — текущий становится лидером */
     current_task->process->pgid = current_task->process->pid;
     regs->rax = current_task->id;
-    signal_deliver(regs); return;
+    signal_deliver(regs);
+    return;
 
   default: {
     /* Этап 7: каждый незнакомый Linux-сисколл светим в COM1 — так дыры под
      * bash/новые порты видны сразу, а не как «тихий» сбой юзерспейса. */
     char eb[64];
-    sprintf(eb, "[lx] ENOSYS syscall %u (pid %u)\n",
-            (unsigned)n, (unsigned)(current_task && current_task->process ? current_task->process->pid : 0));
+    sprintf(eb, "[lx] ENOSYS syscall %u (pid %u)\n", (unsigned)n,
+            (unsigned)(current_task && current_task->process
+                           ? current_task->process->pid
+                           : 0));
     serial_puts(COM1, eb);
     regs->rax = LERR(L_ENOSYS);
     signal_deliver(regs);
@@ -2339,12 +2617,10 @@ char shell_capture_buf[2048];
 int shell_capture_pos = 0;
 const int shell_capture_cap = (int)sizeof(shell_capture_buf);
 
-void shell_capture_sink(const char *s)
-{
+void shell_capture_sink(const char *s) {
   if (!s)
     return;
-  while (*s && shell_capture_pos < shell_capture_cap - 1)
-  {
+  while (*s && shell_capture_pos < shell_capture_cap - 1) {
     shell_capture_buf[shell_capture_pos++] = *s++;
   }
   shell_capture_buf[shell_capture_pos] = '\0';
