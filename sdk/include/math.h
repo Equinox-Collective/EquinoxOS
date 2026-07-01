@@ -11,6 +11,8 @@
 // Округление
 double floor(double x);
 double ceil(double x);
+float floorf(float x);
+float ceilf(float x);
 
 // Экспоненты и логарифмы
 double pow(double x, double y);
@@ -18,6 +20,7 @@ double log(double x);
 double log10(double x);
 double exp(double x);
 double sqrt(double x);
+float sqrtf(float x);
 
 // Тригонометрия
 double sin(double x);
@@ -28,16 +31,19 @@ double acos(double x);
 double atan(double x);
 double atan2(double y, double x);
 
+float sinf(float x);
+float cosf(float x);
+float tanf(float x);
+
 // Манипуляции с числами (критично для Lua)
 double frexp(double x, int *exp);
 double ldexp(double x, int exp);
 double modf(double x, double *iptr);
 double fmod(double x, double y);
 double fabs(double x);
+float fabsf(float x);
 
-/* C99 classification macros — QuickJS uses these in its number /
- * Math.* code. Map to GCC built-ins; they're constant-foldable and
- * don't require any libm symbol. */
+/* C99 classification macros */
 #ifndef isnan
 #define isnan(x)     __builtin_isnan(x)
 #endif
@@ -54,8 +60,6 @@ double fabs(double x);
 #define copysign(x,y) __builtin_copysign((x),(y))
 #endif
 
-/* Additional functions QuickJS' Math.* surface needs. Implementations
- * live in sdk/lib/qjs_math.c (simple but spec-correct). */
 double trunc(double x);
 double round(double x);
 double scalbn(double x, int n);

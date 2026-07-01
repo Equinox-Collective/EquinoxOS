@@ -172,3 +172,31 @@ double difftime(time_t t1, time_t t0) { return (double)(t1 - t0); }
 float powf(float x, float y) {
   return (float)pow((double)x, (double)y);
 }
+
+float fabsf(float x) {
+  return x < 0.0f ? -x : x;
+}
+
+float sqrtf(float x) {
+  return (float)sqrt((double)x);
+}
+
+float sinf(float x) {
+  return (float)sin((double)x);
+}
+
+float cosf(float x) {
+  return (float)cos((double)x);
+}
+
+float tanf(float x) {
+  return (float)tan((double)x);
+}
+
+float floorf(float x) {
+  return (float)floor((double)x);
+}
+
+float ceilf(float x) {
+  return (float)ceil((double)x);
+}
