@@ -1,5 +1,10 @@
 #ifndef _STDIO_H
 #define _STDIO_H
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+
 #include <stddef.h>
 #include <stdint.h>
 #include <stdarg.h>
@@ -62,4 +67,7 @@ void rewind(FILE *stream);
 char *tmpnam(char *s);
 FILE *tmpfile(void);
 
+#ifdef __cplusplus
+}
+#endif
 #endif
