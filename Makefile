@@ -296,14 +296,14 @@ MUSL_LIB    := $(MUSL_DIR)/lib
 MUSL_CFLAGS := -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -g -nostdinc -isystem $(MUSL_DIR)/include
 
 app/musltest.o: app/musltest.c ; $(CC) $(MUSL_CFLAGS) -c $< -o $@
-$(ISO_ROOT)/bin/musltest.elf: app/musltest.o $(VIP_LIB)/libc.a
+$(ISO_ROOT)/bin/musltest.elf: app/musltest.o $(MUSL_LIB)/libc.a
 	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/musltest.o $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
 
 app/stattest.o: app/stattest.c ; $(CC) $(MUSL_CFLAGS) -c $< -o $@
 $(ISO_ROOT)/bin/stattest.elf: app/stattest.o $(MUSL_LIB)/libc.a
 	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/stattest.o $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
 
-app/dirtest.o: app/dirtest.c ; $(CC) $(VIP_CFLAGS) -c $< -o $@
+app/dirtest.o: app/dirtest.c ; $(CC) $(MUSL_CFLAGS) -c $< -o $@
 $(ISO_ROOT)/bin/dirtest.elf: app/dirtest.o $(MUSL_LIB)/libc.a
 	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/dirtest.o $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
 
