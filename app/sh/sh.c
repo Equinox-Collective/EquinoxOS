@@ -1,22 +1,6 @@
 /* =============================================================================
- * EquinoxOS — bin/sh.elf — Этап 12: REPL + GUI pipe I/O
+ * EquinoxOS — bin/sh.elf — REPL + GUI pipe I/O (English Debug Edition)
  * =============================================================================
- *
- * sh.elf — интерактивный шелл EquinoxOS (REPL поверх SYS_SHELL_EXEC).
- *
- * Режимы терминала
- * ----------------
- *   COM1 (по умолчанию): stdin/stdout = fd 0/1 → ядерная line discipline COM1.
- *   GUI (--gui):         те же fd 0/1, но родитель (sysgui) подключает их к
- *                        pipe-парам через dup2() перед execve. Вывод идёт в
- *                        LVGL-терминал, а не в serial console.
- *
- * Запуск из sysgui
- * ----------------
- *   pipe + fork + dup2(stdin/stdout) + execve("bin/sh.elf", ["sh","--gui"], env)
- *
- * Архитектура REPL — без изменений: локальные builtin'ы → SYS_SHELL_EXEC →
- * execve(/bin/<cmd>.elf).
  */
 
 #include <stdio.h>
@@ -30,6 +14,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// Include native EquinoxOS system calls
+#include <equos.h>
+
 extern char **environ;
 
 #define SH_LINE_MAX    256
@@ -40,7 +27,7 @@ extern char **environ;
 
 static char sh_cwd[SH_CWD_MAX] = "/";
 
-/* Настраиваемые fd и режим (COM1 vs GUI pipe). */
+/* FD configuration and mode */
 static int sh_in_fd  = 0;
 static int sh_out_fd = 1;
 static bool sh_gui_mode = false;
@@ -134,17 +121,17 @@ static void split_verb(const char *line, char *verb, size_t cap) {
 static void builtin_help(void) {
     out(
         "sh.elf builtins:\n"
-        "  help               — эта подсказка\n"
-        "  exit, logout       — завершить шелл\n"
-        "  cd <path>          — сменить CWD внутри sh.elf\n"
-        "  pwd                — напечатать CWD\n"
-        "  env                — текущее окружение\n"
-        "  export NAME=VALUE  — выставить переменную окружения\n"
-        "  bash [args]        — запустить GNU bash 5.2.37\n"
+        "  help               - this help message\n"
+        "  exit, logout       - terminate shell\n"
+        "  cd <path>          - change CWD inside sh.elf\n"
+        "  pwd                - print CWD\n"
+        "  env                - current environment\n"
+        "  export NAME=VALUE  - set environment variable\n"
+        "  bash [args]        - launch GNU bash 5.2.37\n"
         "\n"
-        "Любая другая команда сначала идёт в ядерный шелл (SYS_SHELL_EXEC),\n"
-        "иначе — execve(/bin/<команда>.elf). Команды ядра: `ls`, `ps`,\n"
-        "`meminfo`, `version`, `clear`, `cat <file>` и т.д.\n"
+        "Any other command will be processed by the kernel shell (SYS_SHELL_EXEC),\n"
+        "otherwise - execve(/bin/<command>.elf). Kernel commands: `ls`, `ps`,\n"
+        "  `meminfo`, `version`, `clear`, `cat <file>`, etc.\n"
     );
 }
 
@@ -181,8 +168,18 @@ static void path_normalize(char *p) {
     if (out_pos == 0) tmp[out_pos++] = '/';
     if (out_pos > 1 && tmp[out_pos - 1] == '/') out_pos--;
     tmp[out_pos] = '\0';
-    strncpy(p, tmp, SH_CWD_MAX - 1);
-    p[SH_CWD_MAX - 1] = '\0';
+}
+
+static void parse_args(int argc, char **argv) {
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--gui")) {
+            sh_gui_mode = true;
+        } else if (!strncmp(argv[i], "--in-fd=", 8)) {
+            sh_in_fd = atoi(argv[i] + 8);
+        } else if (!strncmp(argv[i], "--out-fd=", 9)) {
+            sh_out_fd = atoi(argv[i] + 9);
+        }
+    }
 }
 
 static void builtin_cd(const char *args) {
@@ -233,9 +230,10 @@ static void launch_bash(const char *rest) {
             (char *)"-i",
             NULL
         };
-        execve("/bin/bash.elf", bargv, environ);
-        execve("bin/bash.elf",  bargv, environ);
-        execve("bash.elf",      bargv, environ);
+        // Use native sys_execve for stability
+        sys_execve("/bin/bash.elf", bargv, environ);
+        sys_execve("bin/bash.elf",  bargv, environ);
+        sys_execve("bash.elf",      bargv, environ);
         out("\x1b[31m[sh.elf]\x1b[0m bash.elf not loadable.\n");
         _exit(127);
     }
@@ -261,7 +259,9 @@ static int try_exec_binary(const char *verb, const char *full_line) {
         strncpy(rest, r, sizeof(rest) - 1);
         rest[sizeof(rest) - 1] = '\0';
         char *bargv[] = { (char *)verb, rest[0] ? rest : NULL, NULL };
-        execve(path, bargv, environ);
+        
+        // Use native sys_execve
+        sys_execve(path, bargv, environ);
         _exit(127);
     }
     int status = 0;
@@ -273,7 +273,7 @@ static int output_says_not_found(const char *buf) {
     return strstr(buf, "Command not found:") != NULL;
 }
 
-/* Читает строку до \n. Работает и с COM1 (canonical), и с pipe от sysgui. */
+/* Reads a line up to \n. Works both on COM1 and GUI pipe. */
 static int read_line(char *buf, size_t cap) {
     size_t pos = 0;
     while (pos + 1 < cap) {
@@ -294,18 +294,6 @@ static int read_line(char *buf, size_t cap) {
     }
     buf[pos] = '\0';
     return (int)pos;
-}
-
-static void parse_args(int argc, char **argv) {
-    for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--gui")) {
-            sh_gui_mode = true;
-        } else if (!strncmp(argv[i], "--in-fd=", 8)) {
-            sh_in_fd = atoi(argv[i] + 8);
-        } else if (!strncmp(argv[i], "--out-fd=", 9)) {
-            sh_out_fd = atoi(argv[i] + 9);
-        }
-    }
 }
 
 static void sh_repl(void) {

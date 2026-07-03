@@ -325,7 +325,7 @@ $(ISO_ROOT)/bin/bash.elf: third_party/bash/bash.o $(MUSL_LIB)/libc.a
 $(ISO_ROOT)/bin/busybox.elf: third_party/busybox/busybox.o $(MUSL_LIB)/libc.a
 	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o third_party/busybox/busybox.o $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
 
-app/sh/sh.o: app/sh/sh.c ; $(CC) $(MUSL_CFLAGS) -c $< -o $@
+app/sh/sh.o: app/sh/sh.c ; $(CC) $(MUSL_CFLAGS) -I./sdk/include -c $< -o $@
 $(ISO_ROOT)/bin/sh.elf: app/sh/sh.o $(MUSL_LIB)/libc.a
 	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/sh/sh.o $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
 
