@@ -1,6 +1,10 @@
 #ifndef _FCNTL_H
 #define _FCNTL_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Стандартные флаги POSIX (цифры взяты из стандарта, чтобы не было конфликтов)
 #define O_RDONLY    0x0000
 #define O_WRONLY    0x0001
@@ -12,5 +16,9 @@
 
 // На случай, если он решит напрямую вызвать open() вместо fopen()
 int open(const char *pathname, int flags, ...);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

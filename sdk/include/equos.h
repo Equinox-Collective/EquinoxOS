@@ -150,17 +150,12 @@ typedef struct {
 static inline uint64_t _syscall(uint64_t num, uint64_t a1, uint64_t a2,
                                 uint64_t a3, uint64_t a4, uint64_t a5) {
   uint64_t ret;
-  __asm__ volatile("mov %1, %%rax; "
-                   "mov %2, %%rdi; "
-                   "mov %3, %%rsi; "
-                   "mov %4, %%rdx; "
-                   "mov %5, %%rcx; "
-                   "mov %6, %%r8; "
-                   "int $0x80; "
-                   "mov %%rax, %0; "
-                   : "=r"(ret)
-                   : "r"(num), "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(a5)
-                   : "rax", "rdi", "rsi", "rdx", "rcx", "r8", "memory");
+  register uint64_t r8_val __asm__("r8") = a5;
+
+  __asm__ volatile("int $0x80"
+                   : "=a"(ret)
+                   : "a"(num), "D"(a1), "S"(a2), "d"(a3), "c"(a4), "r"(r8_val)
+                   : "memory");
   return ret;
 }
 
@@ -198,7 +193,10 @@ static inline void sys_audio_submit(void *buffer, uint32_t size) {
   _syscall(SYS_AUDIO_PLAY, (uint64_t)buffer, (uint64_t)size, 0, 0, 0);
 }
 
-static inline void sys_exit(int code) { _syscall(SYS_EXIT, code, 0, 0, 0, 0); }
+static inline __attribute__((noreturn)) void sys_exit(int code) {
+  _syscall(SYS_EXIT, code, 0, 0, 0, 0);
+  __builtin_unreachable();
+}
 static inline void sys_yield() { _syscall(SYS_YIELD, 0, 0, 0, 0, 0); }
 static inline void *sys_get_font() {
   return (void *)_syscall(SYS_GET_FONT, 0, 0, 0, 0, 0);

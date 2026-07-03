@@ -4,6 +4,10 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef int sig_atomic_t;
 typedef void (*__sighandler_t)(int);
 
@@ -62,5 +66,9 @@ int  sigaddset(sigset_t *set, int sig);
 int  sigdelset(sigset_t *set, int sig);
 int  sigismember(const sigset_t *set, int sig);
 int  sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

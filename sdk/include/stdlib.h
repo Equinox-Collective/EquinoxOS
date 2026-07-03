@@ -10,7 +10,8 @@ void* malloc(size_t size);
 void free(void* ptr);
 void* calloc(size_t nmemb, size_t size);
 void* realloc(void* ptr, size_t size);
-void exit(int status);
+__attribute__((noreturn)) void exit(int status);
+__attribute__((noreturn)) void abort(void);
 int abs(int j);
 int rand(void);
 void srand(unsigned int seed);
@@ -25,7 +26,7 @@ int   unsetenv(const char *name);
 int   putenv(char *string);
 int   clearenv(void);
 double strtod(const char *nptr, char **endptr);
-void abort(void);
+/* abort declared above with noreturn attribute */
 
 /* QuickJS uses alloca() for a few small scratch buffers. Provide the
  * declaration here so callers that include <stdlib.h> (as glibc users

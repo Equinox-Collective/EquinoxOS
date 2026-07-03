@@ -5,6 +5,10 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Standard file descriptors */
 #define STDIN_FILENO  0
 #define STDOUT_FILENO 1
@@ -47,5 +51,9 @@ pid_t   fork(void);
 int     execve(const char *path, char *const argv[], char *const envp[]);
 int     execv(const char *path, char *const argv[]);
 int     execvp(const char *file, char *const argv[]);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _UNISTD_H */

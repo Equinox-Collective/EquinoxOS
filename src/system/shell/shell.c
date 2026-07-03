@@ -237,7 +237,7 @@ static void cmd_sh_fn(const char *args) {
         return;
     }
     sh_print("Launching /bin/sh.elf — session attached to COM1 serial console.\n");
-    sh_print("(GUI terminal currently does not bind ring-3 pty; use serial.)\n");
+    sh_print("(For in-GUI sh.elf, open Terminal in sysgui.)\n");
     task_exec((char *)"bin/sh.elf");
 }
 

@@ -214,7 +214,8 @@ char *tmpnam(char *s) {
 
 void exit(int status) {
     _syscall(10, (uint64_t)status, 0, 0, 0, 0);
-    while(1); 
+    while(1);
+    __builtin_unreachable();
 }
 
 int abs(int n) { return (n < 0) ? -n : n; }
@@ -283,7 +284,7 @@ double strtod(const char *nptr, char **endptr) {
   return res;
 }
 
-void abort(void) { exit(1); }
+void abort(void) { exit(1); __builtin_unreachable(); }
 /* signal/raise/kill/sigaction/sigprocmask реализованы в sdk/lib/signal.c (Этап 4). */
 clock_t clock(void) { return (clock_t)time(NULL); }
 struct tm *localtime(const time_t *t) { static struct tm tmp; return &tmp; }
@@ -318,6 +319,7 @@ void srand(unsigned int seed) {
 
 void _exit(int status) {
     exit(status);
+    __builtin_unreachable();
 }
 
 long strtol(const char *nptr, char **endptr, int base) {
