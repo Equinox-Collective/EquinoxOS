@@ -38,7 +38,7 @@ CFLAGS = -ffreestanding -O2 -Wall -Wextra -fno-exceptions -std=c11 \
 LDFLAGS  = -nostdlib -T src/linker.ld -z max-page-size=0x1000
 ASMFLAGS = -f elf64
 
-SDK_INC     = -I./sdk/include
+SDK_INC = -I./third_party/musl/include -I./sdk/include
 USER_CFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -g \
               -fno-omit-frame-pointer $(SDK_INC) -MMD -MP -DSDL_DYNAMIC_API=0
 
@@ -221,7 +221,7 @@ apps: setup $(SDK_LIB) $(BEARSSL_LIB) $(QUICKJS_LIB) $(SDL_LIB) \
       $(ISO_ROOT)/bin/sdltest.elf sysgui_app
 
 $(ISO_ROOT)/bin/%.elf: app/%.o $(SDK_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $< -o $@
+    $(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $< $(MUSL_LIB)/libc.a -o $@
 
 # --- MUSL И ШЕЛЛ ПРИЛОЖЕНИЯ ---
 app/musltest.o: app/musltest.c ; $(CC) $(MUSL_CFLAGS) -c $< -o $@
