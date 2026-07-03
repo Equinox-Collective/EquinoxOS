@@ -24,7 +24,6 @@ else
   CP_F     = cp -f "$1" "$2"
 endif
 
-# --- НАСТРОЙКИ ПУТЕЙ И ФЛАГОВ ---
 OBJ_DIR     = obj
 SDK_LIB_DIR = sdk/lib
 ISO_ROOT    = iso_root
@@ -43,7 +42,6 @@ SDK_INC     = -I./sdk/include
 USER_CFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -g \
               -fno-omit-frame-pointer $(SDK_INC) -MMD -MP -DSDL_DYNAMIC_API=0
 
-# Настройки для компиляции C++ (без RTTI и без исключений)
 USER_CXXFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -g \
                 -fno-omit-frame-pointer -fno-exceptions -fno-rtti -std=c++17 $(SDK_INC) -MMD -MP
 
@@ -63,36 +61,16 @@ KERNEL_OBJS     = $(patsubst src/%.c,$(OBJ_DIR)/%.o,$(filter %.c,$(KERNEL_C_SRCS
                   $(patsubst src/%.asm,$(OBJ_DIR)/%.o,$(KERNEL_ASM_SRCS))
 KERNEL_OBJ_SUBDIRS = $(OBJ_DIR) $(addprefix $(OBJ_DIR)/,$(patsubst src/%,%,$(filter-out src,$(SRC_DIRS))))
 
-# --- SDK OBJECTS ---
+# --- SDK SOURCES & OBJECTS ---
 SDK_C_SRCS   = $(wildcard $(SDK_LIB_DIR)/*.c)
 SDK_ASM_SRCS = $(wildcard $(SDK_LIB_DIR)/*.asm)
 SDK_CPP_SRCS = $(wildcard $(SDK_LIB_DIR)/*.cpp)
-
 SDK_OBJS     = $(patsubst $(SDK_LIB_DIR)/%.c,$(SDK_LIB_DIR)/%.o,$(SDK_C_SRCS)) \
                $(patsubst $(SDK_LIB_DIR)/%.asm,$(SDK_LIB_DIR)/%.o,$(SDK_ASM_SRCS)) \
                $(patsubst $(SDK_LIB_DIR)/%.cpp,$(SDK_LIB_DIR)/%.o,$(SDK_CPP_SRCS))
-
-# --- ПАРСИНГ ФЛАГОВ SKIP И NO_CLEAN ---
-comma := ,
-space := $(subst ,, )
-SKIP_WORDS   := $(subst $(comma),$(space),$(SKIP))
-
-SKIP_DOOM    := $(filter doom,$(SKIP_WORDS))
-SKIP_BEARSSL := $(filter bearssl,$(SKIP_WORDS))
-SKIP_QUICKJS := $(filter quickjs,$(SKIP_WORDS))
-SKIP_SDL2    := $(filter sdl2,$(SKIP_WORDS))
-SKIP_LVGL    := $(filter lvgl,$(SKIP_WORDS))
-
-NOCLEAN_WORDS   := $(subst $(comma),$(space),$(no_clean)) $(subst $(comma),$(space),$(NOCLEAN)) $(subst $(comma),$(space),$(NO_CLEAN))
-NOCLEAN_DOOM    := $(filter doom,$(NOCLEAN_WORDS))
-NOCLEAN_SDL2    := $(filter sdl2,$(NOCLEAN_WORDS))
-NOCLEAN_BEARSSL := $(filter bearssl,$(NOCLEAN_WORDS))
-NOCLEAN_QUICKJS := $(filter quickjs,$(NOCLEAN_WORDS))
-NOCLEAN_LVGL    := $(filter lvgl,$(NOCLEAN_WORDS))
+SDK_LIB      = $(SDK_LIB_DIR)/libequos.a
 
 # --- СТОРОННИЕ БИБЛИОТЕКИ ---
-
-# BearSSL
 BEARSSL_DIR       := third_party/bearssl
 BEARSSL_SRC_DIRS  := $(BEARSSL_DIR)/src $(foreach d,aead codec ec hash int kdf mac rand rsa ssl symcipher x509,$(BEARSSL_DIR)/src/$(d))
 BEARSSL_C_SRCS    := $(foreach d,$(BEARSSL_SRC_DIRS),$(wildcard $(d)/*.c))
@@ -100,7 +78,6 @@ BEARSSL_OBJS      := $(BEARSSL_C_SRCS:.c=.o)
 BEARSSL_LIB       := $(BEARSSL_DIR)/libbearssl.a
 BEARSSL_CFLAGS    := $(USER_CFLAGS) -I./$(BEARSSL_DIR)/inc -I./$(BEARSSL_DIR)/src -DBR_USE_URANDOM=0 -DBR_USE_WIN32_RAND=0 -DBR_64=1 -Os
 
-# QuickJS
 QUICKJS_DIR       := third_party/quickjs
 QUICKJS_C_SRCS    := $(addprefix $(QUICKJS_DIR)/,quickjs.c dtoa.c libregexp.c libunicode.c)
 QUICKJS_OBJS      := $(QUICKJS_C_SRCS:.c=.o)
@@ -109,7 +86,6 @@ QUICKJS_CFLAGS    := $(USER_CFLAGS) -I./$(QUICKJS_DIR) -DNO_TM_GMTOFF -D_GNU_SOU
                      -Wno-unused -Wno-sign-compare -Wno-pointer-sign -Wno-implicit-fallthrough \
                      -Wno-unused-parameter -Wno-format -Wno-format-extra-args -Wno-cast-function-type
 
-# SDL2
 SDL_DIR           := third_party/sdl2
 SDL_SRCS          := $(SDL_DIR)/SDL.c $(SDL_DIR)/SDL_assert.c $(SDL_DIR)/SDL_dataqueue.c \
                      $(SDL_DIR)/SDL_error.c $(SDL_DIR)/SDL_guid.c $(SDL_DIR)/SDL_hints.c \
@@ -126,7 +102,6 @@ SDL_OBJS          := $(SDL_SRCS:.c=.o)
 SDL_LIB           := $(SDL_DIR)/libSDL2.a
 SDL_CFLAGS        := $(USER_CFLAGS) -I./$(SDL_DIR) -I./$(SDL_DIR)/include -Os -DHAVE_FLOOR -DHAVE_CEIL -fno-strict-aliasing
 
-# LVGL
 LVGL_DIR          := third_party/lvgl
 rwildcard = $(foreach d,$(wildcard $(1:=/*)),$(call rwildcard,$d,$2) $(filter $(subst *,%,$2),$d))
 LVGL_ALL_C        := $(call rwildcard,$(LVGL_DIR)/src,*.c)
@@ -143,6 +118,10 @@ LVGL_CFLAGS       := -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-prot
                      -Wno-type-limits -Wno-unused-function -Wno-missing-prototypes \
                      -Wno-strict-prototypes -Wno-implicit-fallthrough -Wno-unused-but-set-variable \
                      -std=c11
+
+MUSL_DIR    := third_party/musl
+MUSL_LIB    := $(MUSL_DIR)/lib
+MUSL_CFLAGS := -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -g -nostdinc -isystem $(MUSL_DIR)/include
 
 # --- ПРАВИЛА СБОРКИ СТОРОННИХ БИБЛИОТЕК ---
 $(BEARSSL_DIR)/src/%.o: $(BEARSSL_DIR)/src/%.c
@@ -170,53 +149,9 @@ $(LVGL_LIB): $(LVGL_OBJS)
 	$(AR) -rcs $@ $(LVGL_OBJS)
 
 # --- ПРИЛОЖЕНИЯ И ЗАВИСИМОСТИ ---
-
-# Doom
 DOOM_DIR  := app/doom
 DOOM_SRCS := $(wildcard $(DOOM_DIR)/*.c)
 DOOM_OBJS := $(patsubst $(DOOM_DIR)/%.c, $(OBJ_DIR)/doom/%.o, $(DOOM_SRCS))
-
-ifeq ($(SKIP_DOOM),doom)
-  DOOM_DEP =
-else
-  DOOM_DEP = doom.elf
-endif
-
-# SDL2 Apps
-ifeq ($(SKIP_SDL2),sdl2)
-  SDL_DEP =
-  SDL_APPS_DEP =
-else
-  SDL_DEP = $(SDL_LIB)
-  SDL_APPS_DEP = $(ISO_ROOT)/bin/sdltest.elf
-endif
-
-# BearSSL & QuickJS
-ifeq ($(SKIP_BEARSSL),bearssl)
-  BEARSSL_DEP =
-  TLS_APPS_DEP =
-  QUICKJS_DEP =
-  QJS_APPS_DEP =
-else
-  BEARSSL_DEP = $(BEARSSL_LIB)
-  TLS_APPS_DEP = $(APP_ELFS_TLS)
-  ifeq ($(SKIP_QUICKJS),quickjs)
-    QUICKJS_DEP =
-    QJS_APPS_DEP =
-  else
-    QUICKJS_DEP = $(QUICKJS_LIB)
-    QJS_APPS_DEP = $(APP_ELFS_QJS)
-  endif
-endif
-
-# LVGL & sysgui
-ifeq ($(SKIP_LVGL),lvgl)
-  LVGL_DEP =
-  SYSGUI_DEP =
-else
-  LVGL_DEP = $(LVGL_LIB)
-  SYSGUI_DEP = sysgui_app
-endif
 
 # --- ОСНОВНЫЕ ЦЕЛИ (all, ci, setup) ---
 all: create_hdd iso
@@ -245,7 +180,7 @@ $(OBJ_DIR)/%.o: src/%.asm
 	@$(call MKDIR_P,$(@D))
 	$(ASM) $(ASMFLAGS) $< -o $@
 
-# --- СБОРКА ЮЗЕРСПЕЙС SDK ---
+# --- СБОРКА ЮЗЕРСПЕЙС SDK И ЕГО УПАКОВКА В СТАТИЧЕСКУЮ БИБЛИОТЕКУ ---
 $(SDK_LIB_DIR)/%.o: $(SDK_LIB_DIR)/%.c
 	$(CC) $(USER_CFLAGS) -c $< -o $@
 
@@ -255,17 +190,18 @@ $(SDK_LIB_DIR)/%.o: $(SDK_LIB_DIR)/%.asm
 $(SDK_LIB_DIR)/%.o: $(SDK_LIB_DIR)/%.cpp
 	$(CXX) $(USER_CXXFLAGS) -c $< -o $@
 
-# --- ПРАВИЛА СБОРКИ DOOM ---
+$(SDK_LIB): $(SDK_OBJS)
+	$(AR) -rcs $@ $(SDK_OBJS)
+
+# --- СБОРКА DOOM ---
 $(OBJ_DIR)/doom/%.o: $(DOOM_DIR)/%.c
 	@$(call MKDIR_P,$(OBJ_DIR)/doom)
 	$(CC) $(USER_CFLAGS) -DDOOMGENERIC_RESX=640 -DDOOMGENERIC_RESY=400 -DFEATURE_SOUND -c $< -o $@
 
-doom.elf: setup $(SDK_OBJS) $(DOOM_OBJS)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $(DOOM_OBJS) -o $(ISO_ROOT)/bin/doom.elf
+doom.elf: setup $(SDK_LIB) $(DOOM_OBJS)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $(DOOM_OBJS) -o $(ISO_ROOT)/bin/doom.elf
 
-# --- ЮЗЕРСПЕЙС ПРИЛОЖЕНИЯ (ПРОСТЫЕ, MUSL, TLS, JS) ---
-APP_SRCS        := $(wildcard app/*.c)
-APP_OBJS        := $(patsubst app/%.c,app/%.o,$(APP_SRCS))
+# --- ЮЗЕРСПЕЙС ПРИЛОЖЕНИЯ ---
 DOM_OBJ         := sdk/lib_dom/dom.o
 HTTP_CLIENT_OBJ := sdk/lib_http/http_client.o
 QJS_PAGE_OBJ    := sdk/lib_qjs/qjs_page.o
@@ -280,21 +216,14 @@ APP_ELFS_MUSL   := $(addprefix $(ISO_ROOT)/bin/,musltest.elf stattest.elf dirtes
 APP_ELFS_TLS    := $(addprefix $(ISO_ROOT)/bin/,tlsboot.elf tlstest.elf catest.elf httpsget.elf urlget.elf browser.elf)
 APP_ELFS_QJS    := $(addprefix $(ISO_ROOT)/bin/,jstest.elf domtest.elf jsdomtest.elf jsfetchtest.elf jspagetest.elf)
 
-$(KERNEL_OBJS) $(SDK_OBJS) $(APP_OBJS) $(DOOM_OBJS): | setup
+apps: setup $(SDK_LIB) $(BEARSSL_LIB) $(QUICKJS_LIB) $(SDL_LIB) \
+      $(APP_ELFS_SIMPLE) $(APP_ELFS_MUSL) $(APP_ELFS_TLS) $(APP_ELFS_QJS) \
+      $(ISO_ROOT)/bin/sdltest.elf sysgui_app
 
-# Цель сборки приложений гарантирует предварительную сборку SDK_OBJS
-apps: setup $(SDK_OBJS) $(BEARSSL_DEP) $(QUICKJS_DEP) $(SDL_DEP) \
-      $(APP_ELFS_SIMPLE) $(APP_ELFS_MUSL) $(TLS_APPS_DEP) $(QJS_APPS_DEP) $(SDL_APPS_DEP) \
-      $(SYSGUI_DEP)
+$(ISO_ROOT)/bin/%.elf: app/%.o $(SDK_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $< -o $@
 
-$(ISO_ROOT)/bin/%.elf: app/%.o $(SDK_OBJS)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< -o $@
-
-# --- СЛОЖНЫЕ ПРИЛОЖЕНИЯ И ШЕЛЬДЫ (BASH/BUSYBOX/MUSL) ---
-MUSL_DIR    := third_party/musl
-MUSL_LIB    := $(MUSL_DIR)/lib
-MUSL_CFLAGS := -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -g -nostdinc -isystem $(MUSL_DIR)/include
-
+# --- MUSL И ШЕЛЛ ПРИЛОЖЕНИЯ ---
 app/musltest.o: app/musltest.c ; $(CC) $(MUSL_CFLAGS) -c $< -o $@
 $(ISO_ROOT)/bin/musltest.elf: app/musltest.o $(MUSL_LIB)/libc.a
 	$(CC) -nostdlib -static -Wl,-Ttext=0x1000000 $(MUSL_LIB)/crt1.o $(MUSL_LIB)/crti.o app/musltest.o $(MUSL_LIB)/libc.a -lgcc $(MUSL_LIB)/crtn.o -o $@
@@ -335,57 +264,57 @@ $(ISO_ROOT)/bin/fstest.elf: app/fstest.o   ; $(LD) -nostdlib -Ttext=0x1000000 -e
 app/%.o: app/%.c ; $(CC) $(USER_CFLAGS) -c $< -o $@
 app/%.o: app/%.cpp ; $(CXX) $(USER_CXXFLAGS) -c $< -o $@
 
-# --- TLS / BEARSSL / HTTP / QUICKJS ПРИЛОЖЕНИЯ ---
+# --- TLS / QUICKJS / BROWSER ПРИЛОЖЕНИЯ ---
 app/tlsboot.o: app/tlsboot.c ; $(CC) $(USER_CFLAGS) -I./$(BEARSSL_DIR)/inc -c $< -o $@
-$(ISO_ROOT)/bin/tlsboot.elf: app/tlsboot.o $(SDK_OBJS) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(BEARSSL_LIB) -o $@
+$(ISO_ROOT)/bin/tlsboot.elf: app/tlsboot.o $(SDK_LIB) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $< $(BEARSSL_LIB) -o $@
 
 app/tlstest.o: app/tlstest.c app/ca_anchors.h ; $(CC) $(USER_CFLAGS) -I./$(BEARSSL_DIR)/inc -c $< -o $@
-$(ISO_ROOT)/bin/tlstest.elf: app/tlstest.o $(SDK_OBJS) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(BEARSSL_LIB) -o $@
+$(ISO_ROOT)/bin/tlstest.elf: app/tlstest.o $(SDK_LIB) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $< $(BEARSSL_LIB) -o $@
 
 app/catest.o: app/catest.c third_party/ca_bundle/ca_bundle.h ; $(CC) $(USER_CFLAGS) -I./$(BEARSSL_DIR)/inc -c $< -o $@
-$(ISO_ROOT)/bin/catest.elf: app/catest.o $(SDK_OBJS) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(BEARSSL_LIB) -o $@
+$(ISO_ROOT)/bin/catest.elf: app/catest.o $(SDK_LIB) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $< $(BEARSSL_LIB) -o $@
 
 app/httpsget.o: app/httpsget.c third_party/ca_bundle/ca_bundle.h ; $(CC) $(USER_CFLAGS) -I./$(BEARSSL_DIR)/inc -c $< -o $@
-$(ISO_ROOT)/bin/httpsget.elf: app/httpsget.o $(SDK_OBJS) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(BEARSSL_LIB) -o $@
+$(ISO_ROOT)/bin/httpsget.elf: app/httpsget.o $(SDK_LIB) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $< $(BEARSSL_LIB) -o $@
 
 sdk/lib_http/http_client.o: sdk/lib_http/http_client.c ; $(CC) $(USER_CFLAGS) -I./$(BEARSSL_DIR)/inc -c $< -o $@
 app/urlget.o: app/urlget.c ; $(CC) $(USER_CFLAGS) -I./$(BEARSSL_DIR)/inc -c $< -o $@
-$(ISO_ROOT)/bin/urlget.elf: app/urlget.o $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(HTTP_CLIENT_OBJ) $(BEARSSL_LIB) -o $@
+$(ISO_ROOT)/bin/urlget.elf: app/urlget.o $(HTTP_CLIENT_OBJ) $(SDK_LIB) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $< $(HTTP_CLIENT_OBJ) $(BEARSSL_LIB) -o $@
 
 sdk/lib_image/image_decode.o: sdk/lib_image/image_decode.c ; $(CC) $(USER_CFLAGS) -I./third_party/stb_image -Wno-unused-function -Wno-implicit-fallthrough -c $< -o $@
 sdk/lib_qjs/qjs_page.o: sdk/lib_qjs/qjs_page.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -I./$(BEARSSL_DIR)/inc -c $< -o $@
 sdk/lib_qjs/qjs_window.o: sdk/lib_qjs/qjs_window.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
 app/htmlview_browser.o: app/htmlview.c ; $(CC) $(USER_CFLAGS) -DBROWSER_BUILD -I./$(BEARSSL_DIR)/inc -I./$(QUICKJS_DIR) -c $< -o $@
 
-$(ISO_ROOT)/bin/browser.elf: app/htmlview_browser.o $(HTTP_CLIENT_OBJ) $(DOM_OBJ) $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(IMAGE_DECODE_OBJ) $(SDK_OBJS) $(QUICKJS_LIB) $(BEARSSL_LIB)
+$(ISO_ROOT)/bin/browser.elf: app/htmlview_browser.o $(HTTP_CLIENT_OBJ) $(DOM_OBJ) $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(IMAGE_DECODE_OBJ) $(SDK_LIB) $(QUICKJS_LIB) $(BEARSSL_LIB)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $^ -o $@
 
 app/htmlview.o: app/htmlview.c
-$(ISO_ROOT)/bin/htmlview.elf: app/htmlview.o $(DOM_OBJ) $(SDK_OBJS)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(DOM_OBJ) -o $@
+$(ISO_ROOT)/bin/htmlview.elf: app/htmlview.o $(DOM_OBJ) $(SDK_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $< $(DOM_OBJ) -o $@
 
 sdk/lib_qjs/qjs_helpers.o: sdk/lib_qjs/qjs_helpers.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
 app/jstest.o: app/jstest.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
-$(ISO_ROOT)/bin/jstest.elf: app/jstest.o $(QJS_HELPERS_OBJ) $(SDK_OBJS) $(QUICKJS_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(QJS_HELPERS_OBJ) $(QUICKJS_LIB) -o $@
+$(ISO_ROOT)/bin/jstest.elf: app/jstest.o $(QJS_HELPERS_OBJ) $(SDK_LIB) $(QUICKJS_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $< $(QJS_HELPERS_OBJ) $(QUICKJS_LIB) -o $@
 
-$(ISO_ROOT)/bin/jsdomtest.elf: app/jsdomtest.o $(QJS_HELPERS_OBJ) $(DOM_JS_OBJ) $(DOM_OBJ) $(SDK_OBJS) $(QUICKJS_LIB)
+$(ISO_ROOT)/bin/jsdomtest.elf: app/jsdomtest.o $(QJS_HELPERS_OBJ) $(DOM_JS_OBJ) $(DOM_OBJ) $(SDK_LIB) $(QUICKJS_LIB)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $^ -o $@
 
 sdk/lib_qjs/qjs_fetch.o: sdk/lib_qjs/qjs_fetch.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -I./$(BEARSSL_DIR)/inc -c $< -o $@
 app/jsfetchtest.o: app/jsfetchtest.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
 
-$(ISO_ROOT)/bin/jsfetchtest.elf: app/jsfetchtest.o $(QJS_HELPERS_OBJ) $(QJS_FETCH_OBJ) $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(QUICKJS_LIB) $(BEARSSL_LIB)
+$(ISO_ROOT)/bin/jsfetchtest.elf: app/jsfetchtest.o $(QJS_HELPERS_OBJ) $(QJS_FETCH_OBJ) $(HTTP_CLIENT_OBJ) $(SDK_LIB) $(QUICKJS_LIB) $(BEARSSL_LIB)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $^ -o $@
 
 app/jspagetest.o: app/jspagetest.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
 
-$(ISO_ROOT)/bin/jspagetest.elf: app/jspagetest.o $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(DOM_OBJ) $(HTTP_CLIENT_OBJ) $(SDK_OBJS) $(QUICKJS_LIB) $(BEARSSL_LIB)
+$(ISO_ROOT)/bin/jspagetest.elf: app/jspagetest.o $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(DOM_OBJ) $(HTTP_CLIENT_OBJ) $(SDK_LIB) $(QUICKJS_LIB) $(BEARSSL_LIB)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $^ -o $@
 
 sdk/lib_qjs/dom_js.o: sdk/lib_qjs/dom_js.c
@@ -396,16 +325,16 @@ app/jsdomtest.o: app/jsdomtest.c
 
 sdk/lib_dom/dom.o: sdk/lib_dom/dom.c ; $(CC) $(USER_CFLAGS) -c $< -o $@
 app/domtest.o: app/domtest.c ; $(CC) $(USER_CFLAGS) -c $< -o $@
-$(ISO_ROOT)/bin/domtest.elf: app/domtest.o $(DOM_OBJ) $(SDK_OBJS)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(DOM_OBJ) -o $@
+$(ISO_ROOT)/bin/domtest.elf: app/domtest.o $(DOM_OBJ) $(SDK_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $< $(DOM_OBJ) -o $@
 
 # --- SDL2 ПРИЛОЖЕНИЯ ---
 app/sdltest.o: app/sdltest.c ; $(CC) $(USER_CFLAGS) -I./$(SDL_DIR)/include/ -c $< -o $@
-$(ISO_ROOT)/bin/sdltest.elf: app/sdltest.o $(SDK_OBJS) $(SDL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_OBJS) $< $(SDL_LIB) -o $@
+$(ISO_ROOT)/bin/sdltest.elf: app/sdltest.o $(SDK_LIB) $(SDL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $< $(SDL_LIB) -o $@
 
 # --- СБОРКА SYSGUI (enGUI) ---
-sysgui_app: $(SDK_OBJS) $(LVGL_DEP)
+sysgui_app: $(SDK_LIB) $(LVGL_LIB)
 	@echo "=== Building sysgui (enGUI) ==="
 	$(MAKE) -C app/sysgui
 	@$(call CP_F,app/sysgui/sysgui.elf,$(ISO_ROOT)/bin/sysgui.elf)
@@ -416,14 +345,10 @@ sysgui_app: $(SDK_OBJS) $(LVGL_DEP)
 # --- ОЧИСТКА ВСЕХ КОМПОНЕНТОВ (CLEAN) ---
 ifeq ($(OS),Windows_NT)
 clean:
-ifeq ($(NOCLEAN_DOOM),doom)
-	@if exist $(OBJ_DIR)\system rmdir /s /q $(OBJ_DIR)\system
-	@for %%f in ($(OBJ_DIR)\*.o $(OBJ_DIR)\*.d) do @if exist "%%f" del /q "%%f"
-else
 	@if exist $(OBJ_DIR) rmdir /s /q $(OBJ_DIR)
-endif
 	@if exist sdk\lib\*.o del /q sdk\lib\*.o
 	@if exist sdk\lib\*.d del /q sdk\lib\*.d
+	@if exist sdk\lib\*.a del /q sdk\lib\*.a
 	@if exist sdk\lib_qjs\*.o del /q sdk\lib_qjs\*.o
 	@if exist sdk\lib_qjs\*.d del /q sdk\lib_qjs\*.d
 	@if exist sdk\lib_dom\*.o del /q sdk\lib_dom\*.o
@@ -434,78 +359,40 @@ endif
 	@if exist app\*.d del /q app\*.d
 	@if exist kernel.elf del /q kernel.elf
 	@if exist equos.iso del /q equos.iso
-ifeq ($(NOCLEAN_SDL2),sdl2)
-	@echo Skipping SDL2 clean
-else
 	@if exist third_party\sdl2\libSDL2.a del /q third_party\sdl2\libSDL2.a
 	@for /R third_party\sdl2 %%f in (*.o *.d) do @if exist "%%f" del /q "%%f"
-endif
-ifeq ($(NOCLEAN_BEARSSL),bearssl)
-	@echo Skipping BearSSL clean
-else
 	@if exist third_party\bearssl\libbearssl.a del /q third_party\bearssl\libbearssl.a
 	@for /R third_party\bearssl %%f in (*.o *.d) do @if exist "%%f" del /q "%%f"
-endif
-ifeq ($(NOCLEAN_QUICKJS),quickjs)
-	@echo Skipping QuickJS clean
-else
 	@if exist third_party\quickjs\libquickjs.a del /q third_party\quickjs\libquickjs.a
 	@for /R third_party\quickjs %%f in (*.o *.d) do @if exist "%%f" del /q "%%f"
-endif
 	$(MAKE) -C app/sysgui clean
-ifeq ($(NOCLEAN_LVGL),lvgl)
-	@echo Skipping LVGL clean
-else
 	@if exist third_party\lvgl\liblvgl.a del /q third_party\lvgl\liblvgl.a
 	@for /R third_party\lvgl %%f in (*.o *.d) do @if exist "%%f" del /q "%%f"
-endif
-
 else
 clean:
-ifeq ($(NOCLEAN_DOOM),doom)
-	@find $(OBJ_DIR) -mindepth 1 -maxdepth 1 ! -name 'doom' -exec rm -rf {} +
-else
 	@rm -rf $(OBJ_DIR)
-endif
-	@rm -f sdk/lib/*.o sdk/lib/*.d
+	@rm -f sdk/lib/*.o sdk/lib/*.d sdk/lib/*.a
 	@rm -f sdk/lib_qjs/*.o sdk/lib_qjs/*.d
 	@rm -f sdk/lib_dom/*.o sdk/lib_dom/*.d
 	@rm -f sdk/lib_http/*.o sdk/lib_http/*.d
 	@rm -f app/*.o app/*.d
 	@rm -f kernel.elf equos.iso
-ifeq ($(NOCLEAN_SDL2),sdl2)
-	@echo Skipping SDL2 clean
-else
 	@rm -f third_party/sdl2/libSDL2.a
 	@find third_party/sdl2 -name '*.o' -delete -o -name '*.d' -delete
-endif
-ifeq ($(NOCLEAN_BEARSSL),bearssl)
-	@echo Skipping BearSSL clean
-else
 	@rm -f third_party/bearssl/libbearssl.a
 	@find third_party/bearssl -name '*.o' -delete -o -name '*.d' -delete
-endif
-ifeq ($(NOCLEAN_QUICKJS),quickjs)
-	@echo Skipping QuickJS clean
-else
 	@rm -f third_party/quickjs/libquickjs.a
 	@find third_party/quickjs -name '*.o' -delete -o -name '*.d' -delete
-endif
 	$(MAKE) -C app/sysgui clean
-ifeq ($(NOCLEAN_LVGL),lvgl)
-	@echo Skipping LVGL clean
-else
 	@rm -f third_party/lvgl/liblvgl.a
 	@find third_party/lvgl -name '*.o' -delete -o -name '*.d' -delete
 endif
-endif
 
-# --- УТИЛИТЫ ГЕНЕРАЦИИ ДИСКА И ЗАПУСКА ---
-create_hdd: kernel.elf apps $(DOOM_DEP)
+create_hdd: kernel.elf apps doom.elf
 	@echo --- Generating EXT2 hdd.img ---
 	python WINDOWS_ext2.py
 
-iso: kernel.elf apps $(DOOM_DEP)
+iso: kernel.elf apps doom.elf
 	@$(call RM_F,equos.iso)
 	xorriso -as mkisofs -no-pad -b boot/limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table --efi-boot EFI/BOOT/limine-bios-cd.bin -efi-boot-part --efi-boot-image -o equos.iso $(ISO_ROOT)
 
@@ -534,7 +421,6 @@ run-debug:
 
 cleanrun: clean all run
 
-# Депенденси-трекинг
 -include $(KERNEL_OBJS:.o=.d)
 -include $(SDK_OBJS:.o=.d)
 -include $(APP_SRCS:.c=.d)

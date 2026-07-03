@@ -1,4 +1,0 @@
-# Файлы, попадающие внутрь образа ОС, обязаны оставаться с LF даже при
-# checkout на Windows (core.autocrlf=true): bash в EquinoxOS не понимает CRLF.
-iso_root/.bashrc text eol=lf
-iso_root/etc/** text eol=lf
