@@ -112,7 +112,7 @@ LVGL_C_SRCS       += $(LVGL_DEMO_C)
 LVGL_OBJS         := $(LVGL_C_SRCS:.c=.o)
 LVGL_LIB          := $(LVGL_DIR)/liblvgl.a
 LVGL_CFLAGS       := -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -g \
-                     -fno-omit-frame-pointer -I./sdk/include -O2 -MMD -MP \
+                     -fno-omit-frame-pointer -I./third_party/musl/include -I./sdk/include -O2 -MMD -MP \
                      -I$(LVGL_DIR) -Iapp/sysgui -DLV_CONF_INCLUDE_SIMPLE \
                      -Wno-unused-parameter -Wno-unused-variable -Wno-sign-compare \
                      -Wno-type-limits -Wno-unused-function -Wno-missing-prototypes \
@@ -199,7 +199,7 @@ $(OBJ_DIR)/doom/%.o: $(DOOM_DIR)/%.c
 	$(CC) $(USER_CFLAGS) -DDOOMGENERIC_RESX=640 -DDOOMGENERIC_RESY=400 -DFEATURE_SOUND -c $< -o $@
 
 doom.elf: setup $(SDK_LIB) $(DOOM_OBJS)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $(DOOM_OBJS) -o $(ISO_ROOT)/bin/doom.elf
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(DOOM_OBJS) $(SDK_LIB) third_party/musl/lib/libc.a -o $(ISO_ROOT)/bin/doom.elf
 
 # --- ЮЗЕРСПЕЙС ПРИЛОЖЕНИЯ ---
 DOM_OBJ         := sdk/lib_dom/dom.o
@@ -221,8 +221,7 @@ apps: setup $(SDK_LIB) $(BEARSSL_LIB) $(QUICKJS_LIB) $(SDL_LIB) \
       $(ISO_ROOT)/bin/sdltest.elf sysgui_app
 
 $(ISO_ROOT)/bin/%.elf: app/%.o $(SDK_LIB)
-    $(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $< $(MUSL_LIB)/libc.a -o $@
-
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $< $(SDK_LIB) third_party/musl/lib/libc.a -o $@
 # --- MUSL И ШЕЛЛ ПРИЛОЖЕНИЯ ---
 app/musltest.o: app/musltest.c ; $(CC) $(MUSL_CFLAGS) -c $< -o $@
 $(ISO_ROOT)/bin/musltest.elf: app/musltest.o $(MUSL_LIB)/libc.a
@@ -267,55 +266,55 @@ app/%.o: app/%.cpp ; $(CXX) $(USER_CXXFLAGS) -c $< -o $@
 # --- TLS / QUICKJS / BROWSER ПРИЛОЖЕНИЯ ---
 app/tlsboot.o: app/tlsboot.c ; $(CC) $(USER_CFLAGS) -I./$(BEARSSL_DIR)/inc -c $< -o $@
 $(ISO_ROOT)/bin/tlsboot.elf: app/tlsboot.o $(SDK_LIB) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $< $(BEARSSL_LIB) -o $@
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $< $(BEARSSL_LIB) $(SDK_LIB) third_party/musl/lib/libc.a -o $@
 
 app/tlstest.o: app/tlstest.c app/ca_anchors.h ; $(CC) $(USER_CFLAGS) -I./$(BEARSSL_DIR)/inc -c $< -o $@
 $(ISO_ROOT)/bin/tlstest.elf: app/tlstest.o $(SDK_LIB) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $< $(BEARSSL_LIB) -o $@
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $< $(BEARSSL_LIB) $(SDK_LIB) third_party/musl/lib/libc.a -o $@
 
 app/catest.o: app/catest.c third_party/ca_bundle/ca_bundle.h ; $(CC) $(USER_CFLAGS) -I./$(BEARSSL_DIR)/inc -c $< -o $@
 $(ISO_ROOT)/bin/catest.elf: app/catest.o $(SDK_LIB) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $< $(BEARSSL_LIB) -o $@
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $< $(BEARSSL_LIB) $(SDK_LIB) third_party/musl/lib/libc.a -o $@
 
 app/httpsget.o: app/httpsget.c third_party/ca_bundle/ca_bundle.h ; $(CC) $(USER_CFLAGS) -I./$(BEARSSL_DIR)/inc -c $< -o $@
 $(ISO_ROOT)/bin/httpsget.elf: app/httpsget.o $(SDK_LIB) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $< $(BEARSSL_LIB) -o $@
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $< $(BEARSSL_LIB) $(SDK_LIB) third_party/musl/lib/libc.a -o $@
 
 sdk/lib_http/http_client.o: sdk/lib_http/http_client.c ; $(CC) $(USER_CFLAGS) -I./$(BEARSSL_DIR)/inc -c $< -o $@
 app/urlget.o: app/urlget.c ; $(CC) $(USER_CFLAGS) -I./$(BEARSSL_DIR)/inc -c $< -o $@
 $(ISO_ROOT)/bin/urlget.elf: app/urlget.o $(HTTP_CLIENT_OBJ) $(SDK_LIB) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $< $(HTTP_CLIENT_OBJ) $(BEARSSL_LIB) -o $@
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $< $(HTTP_CLIENT_OBJ) $(BEARSSL_LIB) $(SDK_LIB) third_party/musl/lib/libc.a -o $@
 
 sdk/lib_image/image_decode.o: sdk/lib_image/image_decode.c ; $(CC) $(USER_CFLAGS) -I./third_party/stb_image -Wno-unused-function -Wno-implicit-fallthrough -c $< -o $@
 sdk/lib_qjs/qjs_page.o: sdk/lib_qjs/qjs_page.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -I./$(BEARSSL_DIR)/inc -c $< -o $@
 sdk/lib_qjs/qjs_window.o: sdk/lib_qjs/qjs_window.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
 app/htmlview_browser.o: app/htmlview.c ; $(CC) $(USER_CFLAGS) -DBROWSER_BUILD -I./$(BEARSSL_DIR)/inc -I./$(QUICKJS_DIR) -c $< -o $@
 
-$(ISO_ROOT)/bin/browser.elf: app/htmlview_browser.o $(HTTP_CLIENT_OBJ) $(DOM_OBJ) $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(IMAGE_DECODE_OBJ) $(SDK_LIB) $(QUICKJS_LIB) $(BEARSSL_LIB)
+$(ISO_ROOT)/bin/browser.elf: app/htmlview_browser.o $(HTTP_CLIENT_OBJ) $(DOM_OBJ) $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(IMAGE_DECODE_OBJ) $(QUICKJS_LIB) $(BEARSSL_LIB) $(SDK_LIB) third_party/musl/lib/libc.a
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $^ -o $@
 
 app/htmlview.o: app/htmlview.c
 $(ISO_ROOT)/bin/htmlview.elf: app/htmlview.o $(DOM_OBJ) $(SDK_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $< $(DOM_OBJ) -o $@
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start app/htmlview.o $(DOM_OBJ) $(SDK_LIB) third_party/musl/lib/libc.a -o $@
 
 sdk/lib_qjs/qjs_helpers.o: sdk/lib_qjs/qjs_helpers.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
 app/jstest.o: app/jstest.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
 $(ISO_ROOT)/bin/jstest.elf: app/jstest.o $(QJS_HELPERS_OBJ) $(SDK_LIB) $(QUICKJS_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $< $(QJS_HELPERS_OBJ) $(QUICKJS_LIB) -o $@
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $< $(QJS_HELPERS_OBJ) $(QUICKJS_LIB) $(SDK_LIB) third_party/musl/lib/libc.a -o $@
 
 $(ISO_ROOT)/bin/jsdomtest.elf: app/jsdomtest.o $(QJS_HELPERS_OBJ) $(DOM_JS_OBJ) $(DOM_OBJ) $(SDK_LIB) $(QUICKJS_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $^ -o $@
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start app/jsdomtest.o $(QJS_HELPERS_OBJ) $(DOM_JS_OBJ) $(DOM_OBJ) $(QUICKJS_LIB) $(SDK_LIB) third_party/musl/lib/libc.a -o $@
 
 sdk/lib_qjs/qjs_fetch.o: sdk/lib_qjs/qjs_fetch.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -I./$(BEARSSL_DIR)/inc -c $< -o $@
 app/jsfetchtest.o: app/jsfetchtest.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
 
 $(ISO_ROOT)/bin/jsfetchtest.elf: app/jsfetchtest.o $(QJS_HELPERS_OBJ) $(QJS_FETCH_OBJ) $(HTTP_CLIENT_OBJ) $(SDK_LIB) $(QUICKJS_LIB) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $^ -o $@
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start app/jsfetchtest.o $(QJS_HELPERS_OBJ) $(QJS_FETCH_OBJ) $(HTTP_CLIENT_OBJ) $(QUICKJS_LIB) $(BEARSSL_LIB) $(SDK_LIB) third_party/musl/lib/libc.a -o $@
 
 app/jspagetest.o: app/jspagetest.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
 
 $(ISO_ROOT)/bin/jspagetest.elf: app/jspagetest.o $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(DOM_OBJ) $(HTTP_CLIENT_OBJ) $(SDK_LIB) $(QUICKJS_LIB) $(BEARSSL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $^ -o $@
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start app/jspagetest.o $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(DOM_OBJ) $(HTTP_CLIENT_OBJ) $(QUICKJS_LIB) $(BEARSSL_LIB) $(SDK_LIB) third_party/musl/lib/libc.a -o $@
 
 sdk/lib_qjs/dom_js.o: sdk/lib_qjs/dom_js.c
 	$(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
@@ -326,13 +325,12 @@ app/jsdomtest.o: app/jsdomtest.c
 sdk/lib_dom/dom.o: sdk/lib_dom/dom.c ; $(CC) $(USER_CFLAGS) -c $< -o $@
 app/domtest.o: app/domtest.c ; $(CC) $(USER_CFLAGS) -c $< -o $@
 $(ISO_ROOT)/bin/domtest.elf: app/domtest.o $(DOM_OBJ) $(SDK_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $< $(DOM_OBJ) -o $@
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start app/domtest.o $(DOM_OBJ) $(SDK_LIB) third_party/musl/lib/libc.a -o $@
 
 # --- SDL2 ПРИЛОЖЕНИЯ ---
 app/sdltest.o: app/sdltest.c ; $(CC) $(USER_CFLAGS) -I./$(SDL_DIR)/include/ -c $< -o $@
 $(ISO_ROOT)/bin/sdltest.elf: app/sdltest.o $(SDK_LIB) $(SDL_LIB)
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $(SDK_LIB) $< $(SDL_LIB) -o $@
-
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start $< $(SDL_LIB) $(SDK_LIB) third_party/musl/lib/libc.a -o $@
 # --- СБОРКА SYSGUI (enGUI) ---
 sysgui_app: $(SDK_LIB) $(LVGL_LIB)
 	@echo "=== Building sysgui (enGUI) ==="
@@ -394,7 +392,8 @@ create_hdd: kernel.elf apps doom.elf
 
 iso: kernel.elf apps doom.elf
 	@$(call RM_F,equos.iso)
-	xorriso -as mkisofs -no-pad -b boot/limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table --efi-boot EFI/BOOT/limine-bios-cd.bin -efi-boot-part --efi-boot-image -o equos.iso $(ISO_ROOT)
+	xorriso -as mkisofs -no-pad -b boot/limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table --efi-boot boot/limine/limine-uefi-cd.bin -efi-boot-part --efi-boot-image --protective-msdos-label -o equos.iso $(ISO_ROOT)
+	limine bios-install equos.iso
 
 QEMU       := qemu-system-x86_64
 QEMU_BASE  := -m 512M -boot d -cpu qemu64,+rdrand,+rdseed,+aes \
@@ -403,6 +402,11 @@ QEMU_BASE  := -m 512M -boot d -cpu qemu64,+rdrand,+rdseed,+aes \
               -device pci-ohci,id=ohci -device usb-ehci,id=ehci -device qemu-xhci,id=xhci \
               -device ac97,audiodev=snd0 -audiodev dsound,id=snd0
 QEMU_ACCEL := -accel whpx,kernel-irqchip=off -accel kvm -accel hvf -accel tcg
+QEMU_NODISK := -m 512M -boot d -cpu qemu64,+rdrand,+rdseed,+aes \
+              -cdrom equos.iso \
+              -netdev user,id=n0,hostfwd=tcp::2222-:22 -device rtl8139,netdev=n0 \
+              -device pci-ohci,id=ohci -device usb-ehci,id=ehci -device qemu-xhci,id=xhci \
+              -device ac97,audiodev=snd0 -audiodev dsound,id=snd0
 
 run:
 	$(QEMU) $(QEMU_BASE) -serial mon:stdio $(QEMU_ACCEL)
@@ -418,6 +422,9 @@ run-log:
 
 run-debug:
 	$(QEMU) $(QEMU_BASE) -serial mon:stdio -d int,guest_errors,mmu -D qemu.log
+
+run-nodisk:
+	$(QEMU) $(QEMU_NODISK) -serial mon:stdio $(QEMU_ACCEL)
 
 cleanrun: clean all run
 

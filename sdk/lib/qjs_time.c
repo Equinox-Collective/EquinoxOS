@@ -21,7 +21,6 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/time.h>
-#include <sys/wall_time.h>
 #include <time.h>
 
 int gettimeofday(struct timeval *tv, void *tz) {

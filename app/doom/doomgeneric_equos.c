@@ -524,3 +524,7 @@ int main(int argc, char **argv) {
 
     return 0;
 }
+
+void DG_SetWindowTitle(const char *title) {
+    // Пустая заглушка: на EquinoxOS заголовки окон обрабатываются композитором
+}

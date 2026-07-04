@@ -8,7 +8,6 @@
  * Layered on top of (in order):
  *
  *   * <sys/socket.h>       — phase 1 sockets (sys_socket / connect / send / recv)
- *   * <sys/wall_time.h>    — phase 4b CMOS RTC -> Unix seconds for X.509
  *   * <bearssl.h> + <bearssl_io.h>
  *                          — phase 3 TLS (full client + minimal X.509)
  *   * <url.h>              — phase 5 URL parser / resolver
@@ -31,7 +30,6 @@
 
 #include <equos.h>
 #include <sys/socket.h>
-#include <sys/wall_time.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>

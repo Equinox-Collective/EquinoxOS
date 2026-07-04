@@ -3,6 +3,18 @@
 
 #include <stdint.h>
 
+static inline uint64_t _syscall(uint64_t num, uint64_t a1, uint64_t a2,
+                                uint64_t a3, uint64_t a4, uint64_t a5) {
+  uint64_t ret;
+  register uint64_t r8_val __asm__("r8") = a5;
+
+  __asm__ volatile("int $0x80"
+                   : "=a"(ret)
+                   : "a"(num), "D"(a1), "S"(a2), "d"(a3), "c"(a4), "r"(r8_val)
+                   : "memory");
+  return ret;
+}
+
 #define SYS_PRINT 1
 #define SYS_READ_FILE 2
 #define SYS_WRITE_FILE 3
@@ -138,6 +150,53 @@
 /* --- Этап 5: tty / termios -------------------------------------------- */
 #define SYS_IOCTL      106  /* (fd, request, argp)         -> 0 / -1       */
 
+#define SOCK_ERR_BADFD     -1
+#define SOCK_ERR_NOMEM     -2
+#define SOCK_ERR_NOTCONN   -3
+#define SOCK_ERR_TIMEOUT   -4
+#define SOCK_ERR_REFUSED   -5
+#define SOCK_ERR_CLOSED    -6
+#define SOCK_ERR_AGAIN     -7
+#define SOCK_ERR_INVAL     -8
+
+/* setsockopt levels / options. */
+#define SOCK_LEVEL_SOCKET   1
+#define SOCK_OPT_RCVTIMEO   1   /* uint32_t ms                          */
+#define SOCK_OPT_NODELAY    2   /* accepted, ignored (we never Nagle)   */
+
+#define IPV4(a,b,c,d) \
+    (((uint32_t)(a) << 24) | ((uint32_t)(b) << 16) | \
+     ((uint32_t)(c) << 8)  |  (uint32_t)(d))
+
+static inline int sys_socket(void) {
+  return (int)(int64_t)_syscall(SYS_SOCKET, 0, 0, 0, 0, 0);
+}
+static inline int sys_connect(int fd, uint32_t ip_be, uint16_t port) {
+  return (int)(int64_t)_syscall(SYS_CONNECT,
+                                (uint64_t)fd, (uint64_t)ip_be,
+                                (uint64_t)port, 0, 0);
+}
+static inline int sys_send(int fd, const void *buf, uint32_t len) {
+  return (int)(int64_t)_syscall(SYS_SEND,
+                                (uint64_t)fd, (uint64_t)(uintptr_t)buf,
+                                (uint64_t)len, 0, 0);
+}
+static inline int sys_recv(int fd, void *buf, uint32_t len) {
+  return (int)(int64_t)_syscall(SYS_RECV,
+                                (uint64_t)fd, (uint64_t)(uintptr_t)buf,
+                                (uint64_t)len, 0, 0);
+}
+static inline int sys_close_sock(int fd) {
+  return (int)(int64_t)_syscall(SYS_CLOSE_SOCK, (uint64_t)fd, 0, 0, 0, 0);
+}
+static inline int sys_setsockopt(int fd, int level, int optname,
+                                 const void *val, uint32_t vallen) {
+  return (int)(int64_t)_syscall(SYS_SETSOCKOPT,
+                                (uint64_t)fd, (uint64_t)level,
+                                (uint64_t)optname,
+                                (uint64_t)(uintptr_t)val, (uint64_t)vallen);
+}
+
 typedef struct {
   uint64_t pid;
   uint64_t cr3;
@@ -146,17 +205,16 @@ typedef struct {
   uint32_t _pad;
 } sys_task_info_t;
 
-// Переименовали в _syscall и всегда принимаем 5 аргументов + номер
-static inline uint64_t _syscall(uint64_t num, uint64_t a1, uint64_t a2,
-                                uint64_t a3, uint64_t a4, uint64_t a5) {
-  uint64_t ret;
-  register uint64_t r8_val __asm__("r8") = a5;
+static inline int sys_getrandom(void *buf, uint32_t len, uint32_t flags) {
+  return (int)(int64_t)_syscall(SYS_GETRANDOM,
+                                (uint64_t)(uintptr_t)buf,
+                                (uint64_t)len,
+                                (uint64_t)flags, 0, 0);
+}
 
-  __asm__ volatile("int $0x80"
-                   : "=a"(ret)
-                   : "a"(num), "D"(a1), "S"(a2), "d"(a3), "c"(a4), "r"(r8_val)
-                   : "memory");
-  return ret;
+/* --- Wall Time wrapper (SYS_GET_WALL_TIME) --- */
+static inline int sys_get_wall_time(uint64_t *out_unix_secs) {
+  return (int)(int64_t)_syscall(SYS_GET_WALL_TIME, (uint64_t)out_unix_secs, 0, 0, 0, 0);
 }
 
 static inline void *get_system_font() {
@@ -187,7 +245,7 @@ static inline void sys_sleep(uint32_t ms) {
   _syscall(SYS_SLEEP, ms, 0, 0, 0, 0);
 }
 
-static inline void sleep(uint32_t ms) { sys_sleep(ms); }
+// static inline void sleep(uint32_t ms) { sys_sleep(ms); }
 
 static inline void sys_audio_submit(void *buffer, uint32_t size) {
   _syscall(SYS_AUDIO_PLAY, (uint64_t)buffer, (uint64_t)size, 0, 0, 0);
@@ -313,6 +371,12 @@ static inline int sys_sigprocmask(int how, uint64_t set, uint64_t *old_out) {
 /* Этап 5: ioctl (termios/winsize). */
 static inline int sys_ioctl(int fd, uint64_t request, void *argp) {
   return (int)_syscall(SYS_IOCTL, (uint64_t)fd, request, (uint64_t)argp, 0, 0);
+}
+
+/* --- BearSSL Time Conversion Helper --- */
+static inline void unix_to_bearssl_time(uint32_t now, uint32_t *days, uint32_t *seconds) {
+    *days = now / 86400 + 719528;
+    *seconds = now % 86400;
 }
 
 #endif

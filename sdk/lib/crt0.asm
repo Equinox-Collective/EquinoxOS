@@ -2,7 +2,9 @@
 [extern main]
 [extern exit]
 [extern __libc_init_env]
-[extern __libc_init_array]   ; Импортируем функцию вызова конструкторов C++
+[extern __libc_init_array]
+[extern equos_init_musl]     ; Импортируем наш инициализатор
+
 [global _start]
 
 _start:
@@ -10,25 +12,28 @@ _start:
     ; 1. Выравниваем стек по 16 байтам (требование ABI)
     and rsp, -16
 
-    ; 2. Сохраняем argc/argv/envp в callee-saved регистры на время вызовов
+    ; 2. Сохраняем argc/argv/envp в callee-saved регистры
     mov r13, rdi          ; argc
     mov r14, rsi          ; argv
     mov r15, rdx          ; envp
 
-    ; 3. Инициализируем окружение: environ = envp
+    ; 3. Инициализируем структуры Musl libc перед любым вызовом malloc!
+    call equos_init_musl
+
+    ; 4. Инициализируем окружение: environ = envp
     mov rdi, r15
     call __libc_init_env
 
-    ; 4. Инициализируем глобальные конструкторы (C++)
+    ; 5. Инициализируем глобальные конструкторы (C++)
     call __libc_init_array
 
-    ; 5. Вызываем main(argc, argv, envp)
+    ; 6. Вызываем main(argc, argv, envp)
     mov rdi, r13
     mov rsi, r14
     mov rdx, r15
     call main
 
-    ; 6. Выход
+    ; 7. Выход
     mov rdi, rax
     call exit
 

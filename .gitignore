@@ -1,6 +1,5 @@
 kernel.elf
 equos.iso
-hdd.img
 qemu.log
 boot_serial.log
 obj/
@@ -14,3 +13,7 @@ obj/
 *.swp
 *.swo
 *~
+*.exe
+*.img
+hdd.img
+limine.exe

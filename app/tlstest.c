@@ -54,7 +54,6 @@
 #include <bearssl.h>
 #include <bearssl_io.h>
 #include <sys/socket.h>
-#include <sys/wall_time.h>
 #include <stdio.h>
 #include <string.h>
 
