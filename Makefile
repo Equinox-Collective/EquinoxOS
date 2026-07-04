@@ -45,6 +45,17 @@ USER_CFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -
 USER_CXXFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -g \
                 -fno-omit-frame-pointer -fno-exceptions -fno-rtti -std=c++17 $(SDK_INC) -MMD -MP
 
+# --- ПАРСЕР ПЕРЕМЕННЫХ SKIP И NOCLEAN ---
+comma := ,
+empty :=
+space := $(empty) $(empty)
+
+PARSED_SKIP    := $(subst $(comma),$(space),$(SKIP))
+PARSED_NOCLEAN := $(subst $(comma),$(space),$(NOCLEAN))
+
+is_skipped   = $(filter $1,$(PARSED_SKIP))
+is_nocleaned = $(filter $1,$(PARSED_NOCLEAN))
+
 # --- СИСТЕМНЫЕ ИСТОЧНИКИ (ЯДРО) ---
 SRC_DIRS = src src/boot src/syslibc src/system/core \
            src/system/drivers/devices/audio src/system/drivers/devices/keyboard \
@@ -153,6 +164,40 @@ DOOM_DIR  := app/doom
 DOOM_SRCS := $(wildcard $(DOOM_DIR)/*.c)
 DOOM_OBJS := $(patsubst $(DOOM_DIR)/%.c, $(OBJ_DIR)/doom/%.o, $(DOOM_SRCS))
 
+# --- ДИНАМИЧЕСКОЕ ИСКЛЮЧЕНИЕ СБОРКИ (SKIP) ---
+ACTIVE_LIBS :=
+ACTIVE_APPS := $(APP_ELFS_SIMPLE) $(APP_ELFS_MUSL) $(ISO_ROOT)/bin/sdltest.elf
+
+ifeq ($(call is_skipped,sysgui),)
+  ACTIVE_APPS += sysgui_app
+endif
+
+ifeq ($(call is_skipped,bearssl),)
+  ACTIVE_LIBS += $(BEARSSL_LIB)
+  ACTIVE_APPS += $(APP_ELFS_TLS)
+endif
+
+ifeq ($(call is_skipped,quickjs),)
+  ACTIVE_LIBS += $(QUICKJS_LIB)
+  ACTIVE_APPS += $(APP_ELFS_QJS)
+endif
+
+ifeq ($(call is_skipped,sdl2),)
+  ACTIVE_LIBS += $(SDL_LIB)
+endif
+
+ifeq ($(call is_skipped,lvgl),)
+  ACTIVE_LIBS += $(LVGL_LIB)
+endif
+ifeq ($(call is_skipped,lgvl),) # на случай опечатки
+  ACTIVE_LIBS += $(LVGL_LIB)
+endif
+
+ACTIVE_DOOM :=
+ifeq ($(call is_skipped,doom),)
+  ACTIVE_DOOM := doom.elf
+endif
+
 # --- ОСНОВНЫЕ ЦЕЛИ (all, ci, setup) ---
 all: create_hdd iso
 ci: iso
@@ -216,12 +261,11 @@ APP_ELFS_MUSL   := $(addprefix $(ISO_ROOT)/bin/,musltest.elf stattest.elf dirtes
 APP_ELFS_TLS    := $(addprefix $(ISO_ROOT)/bin/,tlsboot.elf tlstest.elf catest.elf httpsget.elf urlget.elf browser.elf)
 APP_ELFS_QJS    := $(addprefix $(ISO_ROOT)/bin/,jstest.elf domtest.elf jsdomtest.elf jsfetchtest.elf jspagetest.elf)
 
-apps: setup $(SDK_LIB) $(BEARSSL_LIB) $(QUICKJS_LIB) $(SDL_LIB) \
-      $(APP_ELFS_SIMPLE) $(APP_ELFS_MUSL) $(APP_ELFS_TLS) $(APP_ELFS_QJS) \
-      $(ISO_ROOT)/bin/sdltest.elf sysgui_app
+apps: setup $(SDK_LIB) $(ACTIVE_LIBS) $(ACTIVE_APPS)
 
 $(ISO_ROOT)/bin/%.elf: app/%.o $(SDK_LIB)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $< $(SDK_LIB) third_party/musl/lib/libc.a -o $@
+
 # --- MUSL И ШЕЛЛ ПРИЛОЖЕНИЯ ---
 app/musltest.o: app/musltest.c ; $(CC) $(MUSL_CFLAGS) -c $< -o $@
 $(ISO_ROOT)/bin/musltest.elf: app/musltest.o $(MUSL_LIB)/libc.a
@@ -290,8 +334,8 @@ sdk/lib_qjs/qjs_page.o: sdk/lib_qjs/qjs_page.c ; $(CC) $(USER_CFLAGS) -I./$(QUIC
 sdk/lib_qjs/qjs_window.o: sdk/lib_qjs/qjs_window.c ; $(CC) $(USER_CFLAGS) -I./$(QUICKJS_DIR) -c $< -o $@
 app/htmlview_browser.o: app/htmlview.c ; $(CC) $(USER_CFLAGS) -DBROWSER_BUILD -I./$(BEARSSL_DIR)/inc -I./$(QUICKJS_DIR) -c $< -o $@
 
-$(ISO_ROOT)/bin/browser.elf: app/htmlview_browser.o $(HTTP_CLIENT_OBJ) $(DOM_OBJ) $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(IMAGE_DECODE_OBJ) $(QUICKJS_LIB) $(BEARSSL_LIB) $(SDK_LIB) third_party/musl/lib/libc.a
-	$(LD) -nostdlib -Ttext=0x1000000 -e _start $^ -o $@
+$(ISO_ROOT)/bin/browser.elf: app/htmlview_browser.o $(HTTP_CLIENT_OBJ) $(DOM_OBJ) $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(IMAGE_DECODE_OBJ) $(SDK_LIB) $(QUICKJS_LIB) $(BEARSSL_LIB)
+	$(LD) -nostdlib -Ttext=0x1000000 -e _start app/htmlview_browser.o $(HTTP_CLIENT_OBJ) $(DOM_OBJ) $(QJS_PAGE_OBJ) $(QJS_WINDOW_OBJ) $(QJS_FETCH_OBJ) $(DOM_JS_OBJ) $(QJS_HELPERS_OBJ) $(IMAGE_DECODE_OBJ) $(QUICKJS_LIB) $(BEARSSL_LIB) $(SDK_LIB) third_party/musl/lib/libc.a -o $@
 
 app/htmlview.o: app/htmlview.c
 $(ISO_ROOT)/bin/htmlview.elf: app/htmlview.o $(DOM_OBJ) $(SDK_LIB)
@@ -331,6 +375,7 @@ $(ISO_ROOT)/bin/domtest.elf: app/domtest.o $(DOM_OBJ) $(SDK_LIB)
 app/sdltest.o: app/sdltest.c ; $(CC) $(USER_CFLAGS) -I./$(SDL_DIR)/include/ -c $< -o $@
 $(ISO_ROOT)/bin/sdltest.elf: app/sdltest.o $(SDK_LIB) $(SDL_LIB)
 	$(LD) -nostdlib -Ttext=0x1000000 -e _start $< $(SDL_LIB) $(SDK_LIB) third_party/musl/lib/libc.a -o $@
+
 # --- СБОРКА SYSGUI (enGUI) ---
 sysgui_app: $(SDK_LIB) $(LVGL_LIB)
 	@echo "=== Building sysgui (enGUI) ==="
@@ -357,15 +402,25 @@ clean:
 	@if exist app\*.d del /q app\*.d
 	@if exist kernel.elf del /q kernel.elf
 	@if exist equos.iso del /q equos.iso
+ifeq ($(call is_nocleaned,sdl2),)
 	@if exist third_party\sdl2\libSDL2.a del /q third_party\sdl2\libSDL2.a
 	@for /R third_party\sdl2 %%f in (*.o *.d) do @if exist "%%f" del /q "%%f"
+endif
+ifeq ($(call is_nocleaned,bearssl),)
 	@if exist third_party\bearssl\libbearssl.a del /q third_party\bearssl\libbearssl.a
 	@for /R third_party\bearssl %%f in (*.o *.d) do @if exist "%%f" del /q "%%f"
+endif
+ifeq ($(call is_nocleaned,quickjs),)
 	@if exist third_party\quickjs\libquickjs.a del /q third_party\quickjs\libquickjs.a
 	@for /R third_party\quickjs %%f in (*.o *.d) do @if exist "%%f" del /q "%%f"
+endif
+ifeq ($(call is_nocleaned,sysgui),)
 	$(MAKE) -C app/sysgui clean
+endif
+ifeq ($(call is_nocleaned,lvgl)$(call is_nocleaned,lgvl),)
 	@if exist third_party\lvgl\liblvgl.a del /q third_party\lvgl\liblvgl.a
 	@for /R third_party\lvgl %%f in (*.o *.d) do @if exist "%%f" del /q "%%f"
+endif
 else
 clean:
 	@rm -rf $(OBJ_DIR)
@@ -375,22 +430,32 @@ clean:
 	@rm -f sdk/lib_http/*.o sdk/lib_http/*.d
 	@rm -f app/*.o app/*.d
 	@rm -f kernel.elf equos.iso
+ifeq ($(call is_nocleaned,sdl2),)
 	@rm -f third_party/sdl2/libSDL2.a
 	@find third_party/sdl2 -name '*.o' -delete -o -name '*.d' -delete
+endif
+ifeq ($(call is_nocleaned,bearssl),)
 	@rm -f third_party/bearssl/libbearssl.a
 	@find third_party/bearssl -name '*.o' -delete -o -name '*.d' -delete
+endif
+ifeq ($(call is_nocleaned,quickjs),)
 	@rm -f third_party/quickjs/libquickjs.a
 	@find third_party/quickjs -name '*.o' -delete -o -name '*.d' -delete
+endif
+ifeq ($(call is_nocleaned,sysgui),)
 	$(MAKE) -C app/sysgui clean
+endif
+ifeq ($(call is_nocleaned,lvgl)$(call is_nocleaned,lgvl),)
 	@rm -f third_party/lvgl/liblvgl.a
 	@find third_party/lvgl -name '*.o' -delete -o -name '*.d' -delete
 endif
+endif
 
-create_hdd: kernel.elf apps doom.elf
+create_hdd: kernel.elf apps $(ACTIVE_DOOM)
 	@echo --- Generating EXT2 hdd.img ---
 	python WINDOWS_ext2.py
 
-iso: kernel.elf apps doom.elf
+iso: kernel.elf apps $(ACTIVE_DOOM)
 	@$(call RM_F,equos.iso)
 	xorriso -as mkisofs -no-pad -b boot/limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table --efi-boot boot/limine/limine-uefi-cd.bin -efi-boot-part --efi-boot-image --protective-msdos-label -o equos.iso $(ISO_ROOT)
 	limine bios-install equos.iso

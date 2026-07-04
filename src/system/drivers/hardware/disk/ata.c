@@ -18,6 +18,7 @@ extern void term_print(const char* str);
 #define ATA_DRIVE_SLAVE  0xF0
 
 extern void term_print(const char* str);
+int ata_drive_present = 0;
 
 static void ata_400ns_delay() {
     for(int i = 0; i < 4; i++) inb(ATA_PRIMARY_STATUS);
@@ -44,8 +45,9 @@ void ata_identify() {
     outb(ATA_PRIMARY_COMMAND, 0xEC); // Identify command
 
     uint8_t status = inb(ATA_PRIMARY_STATUS);
-    if (status == 0) {
+    if (status == 0 || status == 0xFF) {
         term_print("ATA: No drive found on Primary Master!\n");
+        ata_drive_present = 0; // Диска нет!
         return;
     }
 
@@ -66,7 +68,7 @@ void ata_identify() {
         model[i*2+1] = info[27+i] & 0xFF;
     }
     model[40] = '\0';
-    
+    ata_drive_present = 1;
     term_print("ATA: Drive found: ");
     term_print(model);
     term_print("\n");
@@ -119,6 +121,10 @@ static void read_sectors_ata_pio_unlocked(uintptr_t target_address, uint64_t LBA
 }
 
 void read_sectors_ata_pio(uintptr_t target_address, uint64_t LBA, uint32_t sector_count) {
+    if (!ata_drive_present) {
+        // Если диска нет, не читаем мусор и сразу выходим!
+        return; 
+    }
     uint64_t f = ata_irq_save();
     read_sectors_ata_pio_unlocked(target_address, LBA, sector_count);
     ata_irq_restore(f);
