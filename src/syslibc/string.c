@@ -235,3 +235,13 @@ char *strpbrk(const char *s1, const char *s2) {
   }
   return NULL;
 }
+
+char *strrchr(const char *s, int c) {
+    char *last = NULL;
+    do {
+        if (*s == (char)c) {
+            last = (char *)s;
+        }
+    } while (*s++);
+    return last;
+}

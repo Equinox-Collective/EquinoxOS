@@ -22,6 +22,7 @@ char *strtok(char *s, const char *delim);
 char *strpbrk(const char *s1, const char *s2);
 size_t strspn(const char *s1, const char *s2);
 size_t strcspn(const char *s1, const char *s2);
+char *strrchr(const char *s, int c);
 
 // Конвертация чисел в строки (супер-важно для будущего printf!)
 void itoa(int64_t num, int base, char *buffer);

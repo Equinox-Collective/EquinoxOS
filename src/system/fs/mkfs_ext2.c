@@ -13,7 +13,7 @@
 #define BLOCK_BITMAP_BLOCK 2
 #define INODE_BITMAP_BLOCK 3
 #define INODE_TABLE_BLOCK 4
-
+extern void term_print(const char* str);
 // Хелперы для работы с битмапами
 static void bitmap_set(uint8_t *bitmap, uint32_t index) {
     bitmap[index / 8] |= (1 << (index % 8));

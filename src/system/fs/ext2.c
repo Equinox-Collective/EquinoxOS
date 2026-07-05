@@ -318,12 +318,6 @@ vfs_node_t* ext2_get_root_node() {
     return node;
 }
 
-void ext2_read_block(uint32_t block, uint8_t *buffer) {
-  // ВАЖНО: Сначала буфер, потом LBA, потом количество секторов
-  read_sectors_ata_pio((uintptr_t)buffer, block * (block_size / 512),
-                       block_size / 512);
-}
-
 void ext2_read_inode(uint32_t inode, ext2_inode_t* out_inode) {
     if (!sb || inode == 0) {
         memset(out_inode, 0, sizeof(ext2_inode_t));
