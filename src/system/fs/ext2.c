@@ -7,6 +7,7 @@
 #include "../../syslibc/string.h"
 
 extern void term_print(const char* str);
+static uint64_t ext2_partition_lba = 0;
 
 // Forward declarations of internal functions
 void ext2_read_block(uint32_t block, uint8_t* buffer);
@@ -60,6 +61,12 @@ static uint32_t ext2_dir_cache_inode = 0; // inode каталога в кэше 
 void ext2_dir_cache_invalidate(void) {
     ext2_dir_cache_inode = 0;
     ext2_dir_cache_count = 0;
+}
+
+void ext2_read_block(uint32_t block, uint8_t *buffer) {
+    read_sectors_ata_pio((uintptr_t)buffer, 
+                         ext2_partition_lba + (uint64_t)block * (block_size / 512), 
+                         block_size / 512);
 }
 
 static void ext2_build_dir_cache(vfs_node_t* node) {
@@ -465,8 +472,13 @@ uint32_t ext2_resolve_path(const char* path) {
 }
 
 void ext2_write_block(uint32_t block, uint8_t* buffer) {
-    // ВАЖНО: Сначала адрес буфера, потом LBA, потом количество
-    write_sectors_ata_pio((uintptr_t)buffer, block * (block_size / 512), block_size / 512);
+    write_sectors_ata_pio((uintptr_t)buffer, 
+                          ext2_partition_lba + (uint64_t)block * (block_size / 512), 
+                          block_size / 512);
+}
+
+void ext2_set_partition(uint64_t lba) {
+    ext2_partition_lba = lba;
 }
 
 void ext2_write_inode(uint32_t inode, ext2_inode_t* in_inode) {

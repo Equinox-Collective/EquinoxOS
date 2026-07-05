@@ -30,6 +30,7 @@
 #include "system/drivers/devices/pcspeaker/pcspeaker.h"
 #include "system/drivers/hardware/serial/serial.h"
 #include "system/drivers/vesa/vesa.h"
+#include "system/drivers/hardware/disk/ata.h"
 
 #include "system/fs/fat32.h"
 #include "system/fs/ext2.h"
@@ -385,6 +386,7 @@ void kmain(void) {
 
   vfs_mount("/dev", devfs_create_root());
   term_print("devfs mounted at /dev\n");
+  ata_identify(); 
 
   ext2_init();
   {
