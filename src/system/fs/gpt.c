@@ -127,3 +127,18 @@ void gpt_dump(int block_id) {
         term_print(buf);
     }
 }
+
+static const uint8_t ESP_GUID[16] = {
+    0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11,
+    0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B
+};
+
+// Функция ищет индекс ESP-раздела
+int gpt_find_esp(int block_id, gpt_partition_t *parts, int count) {
+    for (int i = 0; i < count; i++) {
+        if (memcmp(parts[i].type_guid, ESP_GUID, 16) == 0) {
+            return i; // Нашли ESP раздел!
+        }
+    }
+    return -1; // Не нашли
+}

@@ -72,4 +72,6 @@ int gpt_parse(int block_id, gpt_partition_t *out, int max_out);
 /* Pretty-print all partitions to the kernel terminal. */
 void gpt_dump(int block_id);
 
+int gpt_find_esp(int block_id, gpt_partition_t *parts, int count);
+
 #endif /* GPT_H */

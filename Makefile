@@ -165,8 +165,20 @@ DOOM_SRCS := $(wildcard $(DOOM_DIR)/*.c)
 DOOM_OBJS := $(patsubst $(DOOM_DIR)/%.c, $(OBJ_DIR)/doom/%.o, $(DOOM_SRCS))
 
 # --- ДИНАМИЧЕСКОЕ ИСКЛЮЧЕНИЕ СБОРКИ (SKIP) ---
-ACTIVE_LIBS :=
-ACTIVE_APPS := $(APP_ELFS_SIMPLE) $(APP_ELFS_MUSL)
+RELEASE ?= 0
+
+ifeq ($(RELEASE),1)
+  ACTIVE_APPS := $(ISO_ROOT)/bin/sh.elf \
+                 $(ISO_ROOT)/bin/bash.elf \
+                 $(ISO_ROOT)/bin/sysgui.elf \
+                 $(ISO_ROOT)/bin/doom.elf \
+                 $(ISO_ROOT)/bin/bmpview.elf \
+                 $(ISO_ROOT)/bin/snake.elf
+  USER_CFLAGS += -O3 -s
+  CFLAGS += -O3 -DNDEBUG
+else
+  ACTIVE_APPS := $(APP_ELFS_SIMPLE) $(APP_ELFS_MUSL)
+endif
 
 ifeq ($(call is_skipped,sysgui),)
   ACTIVE_APPS += sysgui_app
@@ -452,11 +464,26 @@ ifeq ($(call is_nocleaned,lvgl)$(call is_nocleaned,lgvl),)
 endif
 endif
 
+generate_manifest: apps
+	@echo "--- Generating installation manifest ---"
+	@$(call RM_F,$(ISO_ROOT)/etc/install_manifest.txt)
+	@# Записываем все скомпилированные бинарники в манифест
+	@$(foreach app,$(ACTIVE_APPS),echo "/bin/$(notdir $(app))" >> $(ISO_ROOT)/etc/install_manifest.txt &&) true
+	@# Добавляем базовые ресурсы и конфиги, которые нужны всегда
+	@echo "/res/BG.BMP" >> $(ISO_ROOT)/etc/install_manifest.txt
+	@echo "/res/font.psf" >> $(ISO_ROOT)/etc/install_manifest.txt
+	@echo "/res/sysgui/BOOTSOUND.wav" >> $(ISO_ROOT)/etc/install_manifest.txt
+	@echo "/res/sysgui/Inter.ttf" >> $(ISO_ROOT)/etc/install_manifest.txt
+	@echo "/etc/passwd" >> $(ISO_ROOT)/etc/install_manifest.txt
+	@echo "/etc/group" >> $(ISO_ROOT)/etc/install_manifest.txt
+	@echo "/etc/motd" >> $(ISO_ROOT)/etc/install_manifest.txt
+	@echo "/.bashrc" >> $(ISO_ROOT)/etc/install_manifest.txt
+
 create_hdd: kernel.elf apps $(ACTIVE_DOOM)
 	@echo --- Generating EXT2 hdd.img ---
 	python WINDOWS_ext2.py
 
-iso: kernel.elf apps $(ACTIVE_DOOM)
+iso: kernel.elf apps $(ACTIVE_DOOM) generate_manifest
 	@$(call RM_F,equos.iso)
 	xorriso -as mkisofs -no-pad -b boot/limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table --efi-boot boot/limine/limine-uefi-cd.bin -efi-boot-part --efi-boot-image --protective-msdos-label -o equos.iso $(ISO_ROOT)
 	limine bios-install equos.iso
