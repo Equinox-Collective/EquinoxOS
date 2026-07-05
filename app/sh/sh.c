@@ -286,10 +286,25 @@ static int read_line(char *buf, size_t cap) {
             return (int)pos;
         }
         if (c == '\r') continue;
+
+        // Обработка Backspace (ASCII 8 = \b, ASCII 127 = DEL)
+        if (c == '\b' || c == 127) {
+            if (pos > 0) {
+                pos--;
+                // Стандартный трюк: стираем символ на экране терминала
+                write(sh_out_fd, "\b \b", 3);
+            }
+            continue;
+        }
+
         if (c == '\n') {
+            write(sh_out_fd, &c, 1); // Эхо перевода строки
             buf[pos] = '\0';
             return (int)pos;
         }
+
+        // Эхо обычного символа обратно в GUI терминал
+        write(sh_out_fd, &c, 1);
         buf[pos++] = c;
     }
     buf[pos] = '\0';
