@@ -1,0 +1,8 @@
+"/bin/sh.elf"  
+"/bin/bash.elf"  
+"/bin/sysgui.elf"  
+"/bin/doom.elf"  
+"/bin/bmpview.elf"  
+"/bin/snake.elf"  
+"/bin/sysgui_app"  
+"/bin/sdltest.elf"  

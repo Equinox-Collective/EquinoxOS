@@ -465,19 +465,7 @@ endif
 endif
 
 generate_manifest: apps
-	@echo "--- Generating installation manifest ---"
-	@$(call RM_F,$(ISO_ROOT)/etc/install_manifest.txt)
-	@# Записываем все скомпилированные бинарники в манифест
-	@$(foreach app,$(ACTIVE_APPS),echo "/bin/$(notdir $(app))" >> $(ISO_ROOT)/etc/install_manifest.txt &&) true
-	@# Добавляем базовые ресурсы и конфиги, которые нужны всегда
-	@echo "/res/BG.BMP" >> $(ISO_ROOT)/etc/install_manifest.txt
-	@echo "/res/font.psf" >> $(ISO_ROOT)/etc/install_manifest.txt
-	@echo "/res/sysgui/BOOTSOUND.wav" >> $(ISO_ROOT)/etc/install_manifest.txt
-	@echo "/res/sysgui/Inter.ttf" >> $(ISO_ROOT)/etc/install_manifest.txt
-	@echo "/etc/passwd" >> $(ISO_ROOT)/etc/install_manifest.txt
-	@echo "/etc/group" >> $(ISO_ROOT)/etc/install_manifest.txt
-	@echo "/etc/motd" >> $(ISO_ROOT)/etc/install_manifest.txt
-	@echo "/.bashrc" >> $(ISO_ROOT)/etc/install_manifest.txt
+	python make_manifest.py
 
 create_hdd: kernel.elf apps $(ACTIVE_DOOM)
 	@echo --- Generating EXT2 hdd.img ---
