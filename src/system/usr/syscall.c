@@ -2176,7 +2176,15 @@ void linux_syscall_handler(syscall_regs_t *regs) {
     return; /* set_tid_address */
   case 102:
   case 104:
-  case 107:
+  case 107: { // SYS_INSTALL
+    extern void install_equinox_os(void);
+    
+    // Вызываем бэкэнд установщика, который мы написали в installer.c
+    install_equinox_os();
+    
+    regs->rax = 0; // Возвращаем 0 (успех)
+    break;
+  }
   case 108: /* getuid/getgid/geteuid/getegid */
     regs->rax = 0;
     signal_deliver(regs);
