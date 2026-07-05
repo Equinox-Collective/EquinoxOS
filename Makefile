@@ -269,7 +269,7 @@ DOM_JS_OBJ      := sdk/lib_qjs/dom_js.o
 QJS_FETCH_OBJ   := sdk/lib_qjs/qjs_fetch.o
 IMAGE_DECODE_OBJ := sdk/lib_image/image_decode.o
 
-APP_ELFS_SIMPLE := $(addprefix $(ISO_ROOT)/bin/,snake.elf bmpview.elf htmlview.elf niplay.elf widget_demo.elf ipc_test.elf randtest.elf socktest.elf forktest.elf exectest.elf pipetest.elf envtest.elf sigtest.elf ttytest.elf lxtest.elf stktest.elf fstest.elf mmfork.elf cpp_test.elf)
+APP_ELFS_SIMPLE := $(addprefix $(ISO_ROOT)/bin/,snake.elf bmpview.elf htmlview.elf niplay.elf widget_demo.elf ipc_test.elf randtest.elf socktest.elf forktest.elf exectest.elf pipetest.elf envtest.elf sigtest.elf ttytest.elf lxtest.elf stktest.elf fstest.elf mmfork.elf cpp_test.elf install.elf)
 APP_ELFS_MUSL   := $(addprefix $(ISO_ROOT)/bin/,musltest.elf stattest.elf dirtest.elf ltsig.elf ltjob.elf ltjob2.elf bash.elf busybox.elf sh.elf)
 APP_ELFS_TLS    := $(addprefix $(ISO_ROOT)/bin/,tlsboot.elf tlstest.elf catest.elf httpsget.elf urlget.elf browser.elf)
 APP_ELFS_QJS    := $(addprefix $(ISO_ROOT)/bin/,jstest.elf domtest.elf jsdomtest.elf jsfetchtest.elf jspagetest.elf)
