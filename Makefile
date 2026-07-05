@@ -166,7 +166,7 @@ DOOM_OBJS := $(patsubst $(DOOM_DIR)/%.c, $(OBJ_DIR)/doom/%.o, $(DOOM_SRCS))
 
 # --- ДИНАМИЧЕСКОЕ ИСКЛЮЧЕНИЕ СБОРКИ (SKIP) ---
 ACTIVE_LIBS :=
-ACTIVE_APPS := $(APP_ELFS_SIMPLE) $(APP_ELFS_MUSL) $(ISO_ROOT)/bin/sdltest.elf
+ACTIVE_APPS := $(APP_ELFS_SIMPLE) $(APP_ELFS_MUSL)
 
 ifeq ($(call is_skipped,sysgui),)
   ACTIVE_APPS += sysgui_app
@@ -184,6 +184,7 @@ endif
 
 ifeq ($(call is_skipped,sdl2),)
   ACTIVE_LIBS += $(SDL_LIB)
+  ACTIVE_APPS += $(ISO_ROOT)/bin/sdltest.elf
 endif
 
 ifeq ($(call is_skipped,lvgl),)
