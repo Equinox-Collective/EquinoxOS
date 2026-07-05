@@ -126,5 +126,7 @@ void ext2_stress_test_phase1(void);
 void ext2_stress_test_phase2(void);
 void ext2_stress_test_phase3(void);
 void ext2_stress_test_phase4(void);
+int ext2_format(uint64_t start_lba, uint64_t sector_count);
+void ext2_set_partition(uint64_t lba);
 
 #endif
