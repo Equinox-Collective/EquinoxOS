@@ -396,6 +396,7 @@ PCI initialized  |  GUI initialized  |  Shell initialized
 - [x] **EID v2.0 widget set** — button / checkbox / text input / slider + animation helper (linear / quad / cubic easing)
 - [x] **enGUI** spun out as a Git submodule (`app/sysgui`) and launched as the Ring 3 init process
 - [x] DOOM port with AC97 audio · HTTP browser (`htmlview.elf`) · WAV player (`niplay.elf`)
+- [x] USB stack (UHCI / EHCI / xHCI)
 
 ### 🔧 In Progress / Planned
 
@@ -411,7 +412,6 @@ PCI initialized  |  GUI initialized  |  Shell initialized
 - [ ] Shell scripting, env vars, native piping via kernel pipes
 - [ ] DHCP client + DNS cache, full TCP state machine with retransmission, POSIX socket syscalls
 - [ ] HTTPS (BearSSL / mbedTLS port) + RNG + cert store
-- [ ] USB stack (UHCI / EHCI / xHCI)
 - [ ] Intel HD Audio driver and multi-stream software mixer
 - [ ] Native EquinoxFS format + installable ISO that writes the OS to disk
 
